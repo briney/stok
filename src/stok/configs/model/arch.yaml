@@ -1,7 +1,8 @@
+# "base" model size (~865M parameters)
 encoder:
-  d_model: 768
-  n_heads: 12
-  n_layers: 12
+  d_model: 1280
+  n_heads: 20
+  n_layers: 33
   ffn_mult: 4.0
   vocab_size: 32
   pad_id: 1
