@@ -34,6 +34,12 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
   - Scope: Generates small `train.csv` and `eval.csv` with columns `pid,protein_sequence,indices`, sets a small `data.max_len` and indices length (`max_len-2`), uses the same tiny model overrides, and triggers evaluation (`train.eval_steps=2`).
   - Pass criteria: CLI exits with code 0, prints an eval line (`eval | loss ...`), and ends with `Training complete.`.
 
+- CLI training with Parquet (`integration/test_cli_train_with_parquet.py`)
+  - Purpose: End-to-end training on a tiny real Parquet-backed dataset to validate tokenizer alignment and `VQIndicesDataset` integration for nested list indices.
+  - Scope: Generates small `train.parquet` and `eval.parquet` with columns `pid,protein_sequence,indices` where `indices` is a list[int] (no padding tokens). Uses the same tiny model overrides and triggers evaluation (`train.eval_steps=2`).
+  - Pass criteria: CLI exits with code 0 and ends with `Training complete.`.
+  - Notes: Requires a Parquet engine (e.g., `pyarrow` or `fastparquet`). The test auto-skips if no engine is available.
+
 - Programmatic training (`integration/test_run_training_programmatic.py`)
   - Purpose: Run `run_training` directly (non-CLI) to ensure programmatic usage works with Hydra-composed configs.
   - Scope: Composes config from packaged `stok/configs` via `initialize_config_dir`/`compose` and uses the same tiny overrides as the CLI smoke test.

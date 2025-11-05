@@ -126,10 +126,12 @@ def _build_dataloaders(cfg: DictConfig, *, codebook_size: int, pad_id: int):
     collate_fn = None
 
     if cfg.data.get("train"):
-        # CSV-backed dataset; tokenize in collate
-        train_ds = VQIndicesDataset(csv_path=str(cfg.data.train), max_length=max_len)
+        # CSV/Parquet-backed dataset; tokenize in collate
+        train_ds = VQIndicesDataset(
+            dataset_path=str(cfg.data.train), max_length=max_len
+        )
         eval_ds = (
-            VQIndicesDataset(csv_path=str(cfg.data.eval), max_length=max_len)
+            VQIndicesDataset(dataset_path=str(cfg.data.eval), max_length=max_len)
             if cfg.data.get("eval")
             else None
         )

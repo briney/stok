@@ -1,13 +1,45 @@
+from pathlib import Path
+
+import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
 
 class VQIndicesDataset(Dataset):
-    """Dataset for loading VQ indices from a CSV file."""
+    """Dataset for loading VQ indices from CSV or Parquet files.
 
-    def __init__(self, csv_path: str, max_length: int):
-        self.data = pd.read_csv(csv_path)
+    Indices are parsed from either a space-delimited string (CSV) or a
+    list/array of integers (Parquet).
+
+    Args:
+        dataset_path: Path to CSV/TSV or Parquet file (or Parquet directory).
+        max_length: Maximum number of indices to keep (padding with -1).
+    """
+
+    def __init__(self, dataset_path: str, max_length: int):
+        p = Path(dataset_path)
+        suffix = p.suffix.lower()
+
+        if p.is_dir() or suffix in {".parquet", ".parq", ".pq"}:
+            try:
+                self.data = pd.read_parquet(dataset_path)
+            except Exception as e:
+                raise RuntimeError(
+                    "Reading Parquet requires 'pyarrow' or 'fastparquet'."
+                ) from e
+        elif suffix in {".csv"}:
+            self.data = pd.read_csv(dataset_path)
+        elif suffix in {".tsv", ".tab"}:
+            self.data = pd.read_csv(dataset_path, sep="\t")
+        else:
+            # Default to Parquet for unknown suffixes/directories
+            try:
+                self.data = pd.read_parquet(dataset_path)
+            except Exception as e:
+                raise RuntimeError(
+                    "Unsupported file format. Provide a CSV/TSV or Parquet file."
+                ) from e
         self.max_length = max_length
 
     def __len__(self):
@@ -19,7 +51,9 @@ class VQIndicesDataset(Dataset):
         seq = row["protein_sequence"]
         # handle empty/NaN indices cells -> treat as empty list
         raw = row["indices"]
-        if isinstance(raw, float) and pd.isna(raw):
+        if isinstance(raw, (list, tuple, np.ndarray)):
+            indices = [int(i) for i in list(raw) if i is not None]
+        elif isinstance(raw, float) and pd.isna(raw):
             indices = []
         elif isinstance(raw, str):
             s = raw.strip()
