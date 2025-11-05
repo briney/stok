@@ -189,6 +189,19 @@ def _build_dataloaders(cfg: DictConfig, *, codebook_size: int, pad_id: int):
     return train_loader, eval_loader
 
 
+def _maybe_wandb_login(cfg: DictConfig, *, is_main_process: bool):
+    if cfg.train.get("wandb") and cfg.train.wandb.get("enabled", True):
+        if is_main_process:
+            try:
+                import wandb  # type: ignore
+
+                # Trigger login prompt early; do not create a run yet
+                wandb.login()
+            except Exception:
+                # proceed without W&B
+                pass
+
+
 def _maybe_init_wandb(cfg: DictConfig, *, is_main_process: bool):
     wb = None
     if cfg.train.get("wandb") and cfg.train.wandb.get("enabled", True):
@@ -215,6 +228,9 @@ def run_training(cfg: DictConfig):
     accelerator = _maybe_get_accelerator()
     is_main = accelerator.is_main_process if accelerator else True
     printer = accelerator.print if accelerator else print
+
+    # Prompt for W&B login early so the API key prompt happens immediately
+    _maybe_wandb_login(cfg, is_main_process=is_main)
 
     # Warn when multiple GPUs are visible but only one process is active
     if accelerator and is_main:
