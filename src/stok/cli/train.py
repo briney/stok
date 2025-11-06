@@ -39,17 +39,44 @@ def _get_model_device(model: nn.Module, accelerator) -> torch.device:
 
 
 def _build_scheduler(
-    optimizer: torch.optim.Optimizer, *, warmup_steps: int, total_steps: int
+    optimizer: torch.optim.Optimizer,
+    *,
+    decay: str,
+    warmup_steps: int,
+    stable_steps: int,
+    decay_steps: Optional[int],
+    total_steps: int,
 ):
+    # Derive decay_steps if not provided
+    if decay_steps is None:
+        decay_steps = max(0, int(total_steps) - int(warmup_steps) - int(stable_steps))
+
+    decay = str(decay).lower()
+    if decay not in {"cosine", "linear"}:
+        raise ValueError(f"Unknown scheduler.decay: {decay}")
+
+    if warmup_steps < 0 or stable_steps < 0 or decay_steps < 0:
+        raise ValueError("scheduler step counts must be non-negative")
+
     def lr_lambda(current_step: int):
+        # Warmup (0 -> 1)
         if warmup_steps > 0 and current_step < warmup_steps:
             return float(current_step) / float(max(1, warmup_steps))
-        # cosine decay from 1 -> 0
-        progress = float(current_step - warmup_steps) / float(
-            max(1, total_steps - warmup_steps)
-        )
-        progress = min(max(progress, 0.0), 1.0)
-        return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+        # Stable hold at 1.0
+        post_warmup = current_step - warmup_steps
+        if stable_steps > 0 and post_warmup < stable_steps:
+            return 1.0
+
+        # Decay phase (1 -> 0)
+        t = post_warmup - stable_steps
+        if decay_steps <= 0:
+            return 1.0
+        progress = min(max(float(t) / float(decay_steps), 0.0), 1.0)
+        if decay == "cosine":
+            return 0.5 * (1.0 + math.cos(math.pi * progress))
+        else:  # linear
+            return 1.0 - progress
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
@@ -288,9 +315,33 @@ def run_training(cfg: DictConfig):
     else:
         max_steps = int(cfg.train.get("num_steps", 10000))
 
+    # Build scheduler (WSD with decay selection)
+    sched_cfg = cfg.train.scheduler
+    if not sched_cfg.get("decay"):
+        raise ValueError(
+            "Missing required config: train.scheduler.decay (expected 'cosine' or 'linear')"
+        )
+    decay: str = str(sched_cfg.get("decay")).lower()
+    warmup_steps: int = int(sched_cfg.get("warmup_steps", 0))
+    stable_steps: int = int(sched_cfg.get("stable_steps", 0))
+    # Allow explicit 0; None triggers derivation in _build_scheduler
+    decay_steps_raw: Optional[int] = sched_cfg.get("decay_steps")
+    decay_steps: Optional[int] = (
+        int(decay_steps_raw) if decay_steps_raw is not None else None
+    )
+    if (
+        warmup_steps < 0
+        or stable_steps < 0
+        or (decay_steps is not None and decay_steps < 0)
+    ):
+        raise ValueError("scheduler step counts must be non-negative")
+
     scheduler = _build_scheduler(
         optimizer,
-        warmup_steps=int(cfg.train.scheduler.get("warmup_steps", 0)),
+        decay=decay,
+        warmup_steps=warmup_steps,
+        stable_steps=stable_steps,
+        decay_steps=decay_steps,
         total_steps=max_steps,
     )
 

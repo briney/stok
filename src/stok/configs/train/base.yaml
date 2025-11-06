@@ -5,8 +5,10 @@ optimizer:
   weight_decay: 0.01
 
 scheduler:
-  name: cosine
+  decay: cosine
   warmup_steps: 2000
+  stable_steps: 0
+  decay_steps: null
 
 
 # step/epoch governance

@@ -56,9 +56,13 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
   - Pass criteria: All assertions pass; loss values are finite and consistent across invariance and masking scenarios.
 
 - Train helpers (`unit/test_train_helpers.py`)
-  - Purpose: Validate scheduler shape and accuracy computation.
-  - Scope: `_build_scheduler` warmup increase then cosine decay (bounds in `[0, 1]`); `_compute_accuracy` respects `ignore_index` and matches expected ratio on a small constructed example.
-  - Pass criteria: Learning rates follow expected monotonic segments within bounds; accuracy equals the expected value.
+  - Purpose: Validate WSD (warmup–stable–decay) scheduler shapes (cosine/linear) and accuracy computation.
+  - Scope:
+    - Cosine WSD: warmup increases to 1.0, then cosine decay to 0.0; LRs stay within `[0, 1]`.
+    - Linear WSD with stable plateau: warmup → stable hold at 1.0 → linear decay; `decay_steps` auto‑derived from `total_steps − warmup − stable`.
+    - Warmup then stable only: `decay_steps=0` keeps LR at 1.0 after warmup.
+    - `_compute_accuracy` respects `ignore_index` and returns expected ratio on a toy example.
+  - Pass criteria: For each case, LR segments are monotonic as expected and remain within `[0, 1]`; accuracy equals the expected value.
 
 - Tokenize and align (`unit/test_tokenize_and_align.py`)
   - Purpose: Verify token-label alignment for CSV inputs.

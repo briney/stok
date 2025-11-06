@@ -78,3 +78,37 @@ Notes:
   accelerate launch --num_processes 8 -m stok.train ...
   ```
 - DataLoader workers are per process. Tune `data.num_workers` to avoid oversubscription when using many GPUs.
+
+### learning rate schedule
+
+Training uses a warmup–stable–decay (WSD) schedule implemented as a `LambdaLR`.
+
+Configuration fields:
+
+```yaml
+train:
+  scheduler:
+    decay: cosine        # one of: cosine, linear (required)
+    warmup_steps: 2000   # linear warmup from 0 → 1 (default: 0)
+    stable_steps: 0      # hold at 1.0 after warmup (default: 0)
+    decay_steps: null    # steps to decay 1.0 → 0.0; when null, auto‑derived as
+                         # (total_steps − warmup_steps − stable_steps), clamped at 0
+```
+
+Examples:
+
+- Cosine decay with warmup only (previous default):
+  ```bash
+  stok train train.scheduler.decay=cosine train.scheduler.warmup_steps=2000
+  ```
+- WSD with a stable plateau and linear decay:
+  ```bash
+  stok train \
+    train.scheduler.decay=linear \
+    train.scheduler.warmup_steps=1000 \
+    train.scheduler.stable_steps=5000
+  ```
+- Warmup then stable forever (no decay):
+  ```bash
+  stok train train.scheduler.decay=cosine train.scheduler.warmup_steps=1000 train.scheduler.decay_steps=0
+  ```
