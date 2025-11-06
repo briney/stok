@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader
 from stok.data.dataset import DummySequenceDataset, VQIndicesDataset
 from stok.models.stok import STokModel
 from stok.utils.codebook import load_codebook
+from stok.utils.console import ConsoleLogger
 from stok.utils.tokenizer import Tokenizer
 
 
@@ -321,6 +322,18 @@ def run_training(cfg: DictConfig):
     ignore_index = int(cfg.model.classifier.ignore_index)
     grad_clip = float(cfg.train.get("grad_clip_norm", 1.0))
 
+    # console output (main process only; optional toggle)
+    console_cfg = cfg.train.get("console")
+    console_enabled = True
+    if console_cfg is not None:
+        console_enabled = bool(console_cfg.get("enabled", True))
+    console = ConsoleLogger(
+        total_steps=max_steps,
+        initial_step=global_step,
+        is_main=is_main,
+        enabled=console_enabled,
+    )
+
     # Additional training accumulators (over the current log window)
     running_cls_loss = 0.0
     running_cls_count = 0
@@ -395,7 +408,7 @@ def run_training(cfg: DictConfig):
                     msg += f" | cls {avg_cls_loss:.4f} | ppl {ppl:.2f}"
                 if avg_fape_loss is not None:
                     msg += f" | fape {avg_fape_loss:.4f}"
-                printer(msg)
+                console.train(msg)
 
                 # W&B payload
                 if wb is not None:
@@ -510,7 +523,7 @@ def run_training(cfg: DictConfig):
                         msg += f" | cls {eval_cls_loss:.4f} | ppl {eval_ppl:.2f}"
                     if eval_fape_loss is not None:
                         msg += f" | fape {eval_fape_loss:.4f}"
-                    printer(msg)
+                    console.eval(msg)
                     if wb is not None:
                         payload: dict[str, float] = {
                             "eval/loss": float(eval_loss),
@@ -524,11 +537,13 @@ def run_training(cfg: DictConfig):
                         wb.log(payload, step=global_step + 1)
 
             global_step += 1
+            console.step(1)
             if global_step >= max_steps:
                 break
 
     if is_main:
-        printer("Training complete.")
+        console.close()
+        console.print("Training complete.")
 
 
 if __name__ == "__main__":
