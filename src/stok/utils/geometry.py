@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import typing
 from dataclasses import dataclass
+import contextlib
 
 import torch
 from typing_extensions import Self
@@ -16,14 +17,18 @@ class fp32_autocast_context:
     """Context manager that disables downcasting by AMP for geometric ops."""
 
     def __init__(self, device_type: str) -> None:
-        if device_type not in {"cpu", "cuda"}:
+        # Allow 'mps' by treating it like CPU (no autocast)
+        if device_type not in {"cpu", "cuda", "mps"}:
             raise ValueError(f"Unsupported device type: {device_type}")
         self.device_type = device_type
 
     def __enter__(self):
-        enabled = self.device_type == "cuda"
-        dtype = torch.float32 if enabled else None
-        self._ctx = torch.amp.autocast(self.device_type, enabled=enabled, dtype=dtype)  # type: ignore[arg-type]
+        if self.device_type == "cuda":
+            self._ctx = torch.amp.autocast("cuda", enabled=True, dtype=torch.float32)
+        elif self.device_type == "cpu":
+            self._ctx = torch.amp.autocast("cpu", enabled=False)
+        else:  # mps or other future unsupported device types -> no autocast
+            self._ctx = contextlib.nullcontext()
         return self._ctx.__enter__()
 
     def __exit__(self, exc_type, exc_value, traceback):

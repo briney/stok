@@ -79,6 +79,16 @@ Notes:
   ```
 - DataLoader workers are per process. Tune `data.num_workers` to avoid oversubscription when using many GPUs.
 
+### optional coordinates (Parquet only)
+
+When training from Parquet, you can optionally include a `coordinates` column containing per‑residue N–CA–C coordinates:
+
+- Shape per row: `[L, 3, 3]` where `L` is sequence length, atoms ordered `[N(0), CA(1), C(2)]`.
+- If present, the dataset yields an additional tensor `coords` with shape `[max_len, 3, 3]`, padded/truncated to `data.max_len` with `NaN`s.
+- If absent, the dataset omits the `coords` key; CSV inputs never include `coords`.
+
+The training loop automatically passes `coords` to the model when available. The model computes an optional structure loss (FAPE) that respects `NaN` padding.
+
 ### learning rate schedule
 
 Training uses a warmup–stable–decay (WSD) schedule implemented as a `LambdaLR`.

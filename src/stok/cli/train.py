@@ -110,6 +110,7 @@ def _tokenize_and_align(
     # Else VQIndicesDataset dicts with 'seq' and 'indices'
     input_ids = []
     label_ids = []
+    coords_batch: list[torch.Tensor] = []
     for item in batch:  # type: ignore[assignment]
         seq: str = item["seq"]
         indices: torch.Tensor = item["indices"].long()
@@ -137,10 +138,17 @@ def _tokenize_and_align(
 
         input_ids.append(ids)
         label_ids.append(labels)
+        # Optional coords tensor [max_len, 3, 3] if present
+        c = item.get("coords")
+        if c is not None and isinstance(c, torch.Tensor):
+            coords_batch.append(c)
 
     tokens = torch.stack(input_ids, dim=0)
     labels = torch.stack(label_ids, dim=0)
-    return tokens, labels
+    if len(coords_batch) > 0:
+        return tokens, labels, torch.stack(coords_batch, dim=0)
+    else:
+        return tokens, labels
 
 
 def _build_dataloaders(cfg: DictConfig, *, codebook_size: int, pad_id: int):
@@ -393,15 +401,22 @@ def run_training(cfg: DictConfig):
 
     while global_step < max_steps:
         for batch in train_loader:
+            # Batch can be (tokens, labels) or (tokens, labels, coords)
+            if isinstance(batch, (list, tuple)) and len(batch) == 3:
+                tokens, labels, coords = batch
+            else:
+                tokens, labels = batch  # type: ignore[misc]
+                coords = None
             if accelerator is None:
-                tokens, labels = batch
                 _dev = _get_model_device(model, accelerator)
                 tokens = tokens.to(_dev)
                 labels = labels.to(_dev)
-            else:
-                tokens, labels = batch
+                if coords is not None:
+                    coords = coords.to(_dev)
 
-            outputs = model(tokens=tokens, labels=labels, ignore_index=ignore_index)
+            outputs = model(
+                tokens=tokens, labels=labels, ignore_index=ignore_index, coords=coords
+            )
             loss: torch.Tensor = outputs["loss"]
 
             # Normalize by grad accumulation
@@ -494,12 +509,24 @@ def run_training(cfg: DictConfig):
                 model.eval()
                 with torch.no_grad():
                     for ev in eval_loader:
-                        etok, elab = ev
+                        # Eval batch may also include coords
+                        if isinstance(ev, (list, tuple)) and len(ev) == 3:
+                            etok, elab, ecoords = ev
+                        else:
+                            etok, elab = ev  # type: ignore[misc]
+                            ecoords = None
                         if accelerator is None:
                             _dev = _get_model_device(model, accelerator)
                             etok = etok.to(_dev)
                             elab = elab.to(_dev)
-                        out = model(tokens=etok, labels=elab, ignore_index=ignore_index)
+                            if ecoords is not None:
+                                ecoords = ecoords.to(_dev)
+                        out = model(
+                            tokens=etok,
+                            labels=elab,
+                            ignore_index=ignore_index,
+                            coords=ecoords,
+                        )
                         eval_loss_sum += float(out["loss"].item())
                         eval_acc_sum += _compute_accuracy(
                             out["logits"], elab, ignore_index

@@ -40,6 +40,12 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
   - Pass criteria: CLI exits with code 0 and ends with `Training complete.`.
   - Notes: Requires a Parquet engine (e.g., `pyarrow` or `fastparquet`). The test auto-skips if no engine is available.
 
+- CLI training with Parquet + coordinates (`integration/test_cli_train_with_parquet_coords.py`)
+  - Purpose: End-to-end training on a tiny Parquet-backed dataset that includes optional N–CA–C coordinates to validate dataset loading and training compatibility.
+  - Scope: Generates `train.parquet` and `eval.parquet` with columns `pid,protein_sequence,indices,coordinates` where `coordinates` is a nested list shaped `[L, 3, 3]` (atoms ordered N, CA, C). Uses the same tiny model overrides and triggers evaluation (`train.eval_steps=2`).
+  - Pass criteria: CLI exits with code 0 and ends with `Training complete.`.
+  - Notes: Requires a Parquet engine (e.g., `pyarrow` or `fastparquet`). The test auto-skips if no engine is available.
+
 - Programmatic training (`integration/test_run_training_programmatic.py`)
   - Purpose: Run `run_training` directly (non-CLI) to ensure programmatic usage works with Hydra-composed configs.
   - Scope: Composes config from packaged `stok/configs` via `initialize_config_dir`/`compose` and uses the same tiny overrides as the CLI smoke test.
@@ -68,6 +74,14 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
   - Purpose: Verify token-label alignment for CSV inputs.
   - Scope: Uses real `Tokenizer` and `_tokenize_and_align` with a short sequence and indices; asserts BOS/EOS/PAD positions are ignored, supervised span starts at position 1, and indices are truncated to `max_len-2`.
   - Pass criteria: Output shapes match `max_len`; labels at [0] are `ignore_index`; labels[1:1+copy_len] equal provided indices slice; remaining positions include `ignore_index`.
+
+- VQIndicesDataset coordinates (`unit/test_vqindices_coords.py`)
+  - Purpose: Validate optional coordinates handling in `VQIndicesDataset`.
+  - Scope:
+    - Parquet with `coordinates` column: item includes `coords` tensor with shape `[max_len, 3, 3]`, padded/truncated with `NaN`s; atom order N, CA, C preserved.
+    - Parquet without `coordinates` column: `coords` key is omitted.
+    - CSV inputs: `coords` key is always omitted.
+  - Pass criteria: Assertions on presence/absence of `coords`, shape, NaN padding, and expected leading residue coordinates pass.
 
 ## Conventions
 
