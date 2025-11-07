@@ -33,7 +33,7 @@ def token_ce_loss(
 
 
 def _frames_from_ncac(coords: torch.Tensor) -> Affine3D:
-    """Build per-residue backbone frames from N–CA–C coordinates.
+    """Build per-residue backbone frames from N-CA-C coordinates.
 
     Args:
         coords: Tensor of shape [B, L, 3, 3] with atoms ordered [N(0), CA(1), C(2)].
@@ -64,8 +64,8 @@ def fape_loss(
     batch to return a single scalar.
 
     Args:
-        pred_coords: Predicted N–CA–C coordinates, shape [B, L, 3, 3].
-        true_coords: Ground-truth N–CA–C coordinates, shape [B, L, 3, 3].
+        pred_coords: Predicted N-CA-C coordinates, shape [B, L, 3, 3].
+        true_coords: Ground-truth N-CA-C coordinates, shape [B, L, 3, 3].
         residue_mask: Optional [B, L] mask (True/1 for valid residues).
         clamp: Max distance before normalization.
         length_scale: Normalization factor for distances.
