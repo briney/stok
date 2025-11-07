@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import contextlib
 import typing
 from dataclasses import dataclass
-import contextlib
 
 import torch
 from typing_extensions import Self
@@ -10,6 +10,7 @@ from typing_extensions import Self
 __all__ = [
     "Affine3D",
     "RotationMatrix",
+    "frames_from_ncac",
 ]
 
 
@@ -264,6 +265,23 @@ class Affine3D:
         return Affine3D(
             trans=origin, rot=RotationMatrix.from_graham_schmidt(x_axis, xy_plane, eps)
         )
+
+
+def frames_from_ncac(coords: torch.Tensor) -> "Affine3D":
+    """Build per-residue backbone frames from N-CA-C coordinates.
+
+    Args:
+        coords: Tensor of shape [..., L, 3, 3] with atoms ordered [N(0), CA(1), C(2)].
+
+    Returns:
+        ``Affine3D`` transforms whose origin is at CA and x-axis is along CA−N
+        with the xy-plane defined by C. The returned shape matches the leading
+        batch dimensions and length ``L`` of the input tensor.
+    """
+    n = coords[..., 0, :]
+    ca = coords[..., 1, :]
+    c = coords[..., 2, :]
+    return Affine3D.from_graham_schmidt(neg_x_axis=n, origin=ca, xy_plane=c)
 
 
 def _graham_schmidt(

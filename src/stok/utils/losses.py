@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 
-from .geometry import Affine3D
+from .geometry import frames_from_ncac
 
 
 def token_ce_loss(
@@ -30,22 +30,6 @@ def token_ce_loss(
         labels_flat,
         ignore_index=ignore_index,
     )
-
-
-def _frames_from_ncac(coords: torch.Tensor) -> Affine3D:
-    """Build per-residue backbone frames from N-CA-C coordinates.
-
-    Args:
-        coords: Tensor of shape [B, L, 3, 3] with atoms ordered [N(0), CA(1), C(2)].
-
-    Returns:
-        ``Affine3D`` transforms of shape [B, L] whose origin is at CA and x-axis
-        is along CA−N with the xy-plane defined by C.
-    """
-    n = coords[..., 0, :]
-    ca = coords[..., 1, :]
-    c = coords[..., 2, :]
-    return Affine3D.from_graham_schmidt(neg_x_axis=n, origin=ca, xy_plane=c)
 
 
 def fape_loss(
@@ -81,8 +65,8 @@ def fape_loss(
         raise ValueError("coords must be shaped [B, L, 3, 3] with atoms (N, CA, C)")
 
     # 1) Per-residue frames for predicted and true
-    T_pred = _frames_from_ncac(pred_coords)
-    T_true = _frames_from_ncac(true_coords)
+    T_pred = frames_from_ncac(pred_coords)
+    T_true = frames_from_ncac(true_coords)
 
     # 2) Build masks (valid residues/atoms). Default: infer from GT NaNs
     if residue_mask is None:

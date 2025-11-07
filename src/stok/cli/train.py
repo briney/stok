@@ -12,6 +12,7 @@ from stok.data.dataset import DummySequenceDataset, VQIndicesDataset
 from stok.models.stok import STokModel
 from stok.utils.codebook import load_codebook
 from stok.utils.console import ConsoleLogger
+from stok.utils.metrics import lddt_ca, rmsd, tm_score
 from stok.utils.tokenizer import Tokenizer
 
 
@@ -506,6 +507,10 @@ def run_training(cfg: DictConfig):
                 eval_cls_batches = 0.0
                 eval_fape_loss_sum = 0.0
                 eval_fape_batches = 0.0
+                eval_lddt_sum = 0.0
+                eval_tm_sum = 0.0
+                eval_rmsd_sum = 0.0
+                eval_struct_count = 0.0
                 model.eval()
                 with torch.no_grad():
                     for ev in eval_loader:
@@ -542,6 +547,30 @@ def run_training(cfg: DictConfig):
                         if fape_loss_tensor is not None:
                             eval_fape_loss_sum += float(fape_loss_tensor.item())
                             eval_fape_batches += 1.0
+
+                        # Optional structure metrics if predicted coords available
+                        pred_coords = out.get("pred_coords", None)
+                        if pred_coords is not None and ecoords is not None:
+                            # Build residue mask from tokens: True = valid (non-pad, excluding BOS/EOS not available here)
+                            res_mask = etok != cfg.model.encoder.pad_id
+                            # Compute metrics per-example and accumulate means
+                            lddt_b, _ = lddt_ca(
+                                pred_coords, ecoords, residue_mask=res_mask
+                            )
+                            tm_b, _ = tm_score(
+                                pred_coords, ecoords, residue_mask=res_mask
+                            )
+                            rmsd_b = rmsd(
+                                pred_coords,
+                                ecoords,
+                                residue_mask=res_mask,
+                                align=True,
+                                atom_set="CA",
+                            )
+                            eval_lddt_sum += float(lddt_b.mean().item())
+                            eval_tm_sum += float(tm_b.mean().item())
+                            eval_rmsd_sum += float(rmsd_b.mean().item())
+                            eval_struct_count += 1.0
                 model.train()
 
                 # Aggregate across processes if using Accelerate
@@ -601,6 +630,11 @@ def run_training(cfg: DictConfig):
                         msg += f" | cls {eval_cls_loss:.4f} | ppl {eval_ppl:.2f}"
                     if eval_fape_loss is not None:
                         msg += f" | fape {eval_fape_loss:.4f}"
+                    if eval_struct_count > 0:
+                        avg_lddt = eval_lddt_sum / eval_struct_count
+                        avg_tm = eval_tm_sum / eval_struct_count
+                        avg_rmsd = eval_rmsd_sum / eval_struct_count
+                        msg += f" | lDDT {avg_lddt:.3f} | TM {avg_tm:.3f} | RMSD {avg_rmsd:.3f}Å"
                     console.eval(msg)
                     if wb is not None:
                         payload: dict[str, float] = {
@@ -612,6 +646,14 @@ def run_training(cfg: DictConfig):
                             payload["eval/ppl"] = float(eval_ppl)
                         if eval_fape_loss is not None:
                             payload["eval/fape_loss"] = float(eval_fape_loss)
+                        if eval_struct_count > 0:
+                            payload["eval/lddt"] = float(
+                                eval_lddt_sum / eval_struct_count
+                            )
+                            payload["eval/tm"] = float(eval_tm_sum / eval_struct_count)
+                            payload["eval/rmsd"] = float(
+                                eval_rmsd_sum / eval_struct_count
+                            )
                         wb.log(payload, step=global_step + 1)
 
             global_step += 1

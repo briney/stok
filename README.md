@@ -122,3 +122,30 @@ Examples:
   ```bash
   stok train train.scheduler.decay=cosine train.scheduler.warmup_steps=1000 train.scheduler.decay_steps=0
   ```
+
+## structure-based metrics
+
+The module `stok.utils.metrics` provides structure metrics for N/CA/C backbones:
+
+- lDDT (Cα-only, superposition-free)
+- TM-score (Cα, Kabsch-aligned)
+- RMSD (Cα or backbone, optional alignment)
+- True Aligned Error (per-pair PAE target)
+
+Example:
+
+```python
+import torch
+from stok.utils.metrics import lddt_ca, tm_score, rmsd, true_aligned_error
+
+# coords: [B, L, 3_atoms, 3] with atoms ordered [N, CA, C]
+lddt_b, lddt_per_res = lddt_ca(pred_coords, true_coords, residue_mask=mask, return_per_residue=True)
+tm_b, _ = tm_score(pred_coords, true_coords, residue_mask=mask)
+rmsd_b = rmsd(pred_coords, true_coords, residue_mask=mask, align=True, atom_set="CA")
+tae, pair_mask = true_aligned_error(pred_coords, true_coords, residue_mask=mask, atom="CA")
+```
+
+Notes:
+- `residue_mask` is `[B, L]` (True=valid). If omitted, it is inferred from NaNs in `true_coords`.
+- Shapes `[L, 3, 3]` are accepted and auto-batched.
+- lDDT and TAE are O(L²); consider using them in eval or with subsampling for long sequences.

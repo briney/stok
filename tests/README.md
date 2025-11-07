@@ -83,6 +83,15 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
     - CSV inputs: `coords` key is always omitted.
   - Pass criteria: Assertions on presence/absence of `coords`, shape, NaN padding, and expected leading residue coordinates pass.
 
+- Structure metrics (`unit/test_metrics.py`)
+  - Purpose: Validate lDDT (Cα), TM‑score, RMSD, and True Aligned Error implementations.
+  - Scope:
+    - Identity: lDDT → 1.0, TM → ≈1.0, RMSD → 0.0, TAE → 0.0
+    - Rigid invariance: metrics unchanged under same global rotation/translation
+    - Noise behavior: higher noise decreases lDDT/TM and increases RMSD
+    - Masking: metrics respect residue masks and NaN‑inferred validity
+  - Pass criteria: All assertions pass; per‑example reductions are finite and within expected ranges.
+
 ## Conventions
 
 - Tests are CPU-only to ensure CI reliability and speed.
