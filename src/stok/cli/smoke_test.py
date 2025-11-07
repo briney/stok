@@ -14,6 +14,16 @@ def run_smoke_test(cfg: DictConfig):
     Args:
         cfg: Hydra configuration dictionary.
     """
+    # # Warn if deprecated/unused decoder config is present
+    # try:
+    #     if "decoder" in cfg.model:
+    #         print(
+    #             "Warning: cfg.model.decoder is ignored. Decoder presets are selected "
+    #             "via model.codebook.preset and loaded with load_pretrained_decoder()."
+    #         )
+    # except Exception:
+    #     pass
+
     print(OmegaConf.to_yaml(cfg))
 
     # Load codebook from config (preset, path, or fallback to random)

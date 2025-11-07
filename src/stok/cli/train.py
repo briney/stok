@@ -266,6 +266,16 @@ def run_training(cfg: DictConfig):
     is_main = accelerator.is_main_process if accelerator else True
     printer = accelerator.print if accelerator else print
 
+    # # Warn if deprecated/unused decoder config is present
+    # try:
+    #     if "decoder" in cfg.model:
+    #         printer(
+    #             "Warning: cfg.model.decoder is ignored. Decoder presets are selected "
+    #             "via model.codebook.preset and loaded with load_pretrained_decoder()."
+    #         )
+    # except Exception:
+    #     pass
+
     # Prompt for W&B login early so the API key prompt happens immediately
     _maybe_wandb_login(cfg, is_main_process=is_main)
 

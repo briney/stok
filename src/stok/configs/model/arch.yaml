@@ -10,23 +10,6 @@ encoder:
   attn_dropout: 0.0
   norm: "layernorm"
 
-decoder:
-  # -- base -- 
-  d_model: 1024
-  ffn_mult: 4
-  n_layers: 16
-  n_heads: 16
-  attn_kv_heads: 1
-  num_memory_tokens: 0
-  # -- lite -- 
-  # d_model: 1024
-  # ffn_mult: 4
-  # n_layers: 12
-  # n_heads: 8
-  # attn_kv_heads: 2
-  # num_memory_tokens: 0
-
-
 classifier:
   tie_to_codebook: true
   learnable_temperature: true
@@ -39,7 +22,7 @@ init:
   std: 0.02
 
 codebook:
-  preset: "base"
+  preset: "base"  # "base" or "lite"
   path: null
   trainable: false
 

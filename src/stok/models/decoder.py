@@ -85,7 +85,7 @@ class GeometricDecoder(nn.Module):
         return bb_pred.flatten(-2) * self.decoder_output_scaling_factor
 
 
-# aligned with configs/model/arch.yaml
+# decoder architecture presets (single source of truth)
 _DECODER_ARCH = {
     "base": dict(
         d_model=1024,

@@ -26,6 +26,15 @@ stok smoke-test model.encoder.d_model=512 model.encoder.n_heads=8 model.encoder.
 
 By default the model uses the built-in codebook preset `base`, which corresponds to the codebook used in the [Large](https://github.com/mahdip72/vq_encoder_decoder?tab=readme-ov-file#pretrained-models) GCP-VQVAE model. Config overrides can be used to change the codebook.
 
+- The same preset also selects the decoder architecture and checkpoint when using the optional geometric decoder loader:
+
+```python
+from stok.models.decoder import load_pretrained_decoder
+
+# Use the same preset as model.codebook.preset (e.g., "base" or "lite")
+decoder = load_pretrained_decoder(preset="lite", device="cpu", freeze=True)
+```
+
 - Use a different built-in preset (for example, the codebook use in the [Lite](https://github.com/mahdip72/vq_encoder_decoder?tab=readme-ov-file#pretrained-models) GCP-VQVAE model variant:
 
   ```bash
@@ -48,6 +57,8 @@ model:
     preset: "base"   # one of: "base", "lite" (default: base)
     path: null       # custom file path; when set, overrides preset
 ```
+
+Note: Decoder hyperparameters are not configured in YAML; they are defined in code and selected automatically by the same preset used for the codebook.
 
 ## training
 
