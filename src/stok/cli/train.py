@@ -12,6 +12,13 @@ from stok.data.dataset import DummySequenceDataset, VQIndicesDataset
 from stok.models.stok import STokModel
 from stok.utils.codebook import load_codebook
 from stok.utils.console import ConsoleLogger
+from stok.utils.decoding import (
+    decode_coords,
+    indices_to_codes,
+    logits_to_soft_codes_gumbel,
+    sample_indices_top_p,
+)
+from stok.utils.losses import fape_loss
 from stok.utils.metrics import lddt_ca, rmsd, tm_score
 from stok.utils.tokenizer import Tokenizer
 
@@ -313,6 +320,43 @@ def run_training(cfg: DictConfig):
         norm_type=cfg.model.encoder.norm,
     )
 
+    # Optionally load frozen geometric decoder for FAPE / eval metrics
+    decoder = None
+    decoder_enabled = bool(getattr(cfg.model, "decoder", {}).get("enabled", False))
+    want_fape = bool(getattr(cfg.train, "fape", {}).get("enabled", False))
+    want_eval_decode = bool(
+        getattr(cfg.train, "decoding", {}).get("eval_enabled", True)
+    )
+    if decoder_enabled and (want_fape or want_eval_decode):
+        try:
+            from stok.models.decoder import load_pretrained_decoder  # defer import
+        except Exception as e:
+            raise RuntimeError(
+                "Decoder requested but missing dependency. Install x_transformers "
+                "or disable model.decoder.enabled."
+            ) from e
+        # resolve preset/path
+        dec_preset = getattr(
+            cfg.model.decoder, "preset", None
+        ) or cfg.model.codebook.get("preset")
+        dec_path = getattr(cfg.model.decoder, "path", None)
+        device_for_decoder = _get_model_device(model, accelerator)
+        decoder = load_pretrained_decoder(
+            preset=dec_preset or "base",
+            path=dec_path,
+            device=device_for_decoder,
+            freeze=bool(getattr(cfg.model.decoder, "freeze", True)),
+            progress=is_main,
+        )
+        # Validate d_code matches classifier codebook dim
+        with torch.no_grad():
+            inferred_d_code = int(decoder.projector_in.weight.shape[1])  # type: ignore[attr-defined]
+            if inferred_d_code != int(model.classifier.E.shape[1]):
+                raise RuntimeError(
+                    f"Decoder d_code={inferred_d_code} does not match codebook dim "
+                    f"{int(model.classifier.E.shape[1])}"
+                )
+
     # Data
     train_loader, eval_loader = _build_dataloaders(
         cfg, codebook_size=codebook_size, pad_id=cfg.model.encoder.pad_id
@@ -410,6 +454,19 @@ def run_training(cfg: DictConfig):
     running_fape_loss = 0.0
     running_fape_count = 0
 
+    # Gumbel temperature schedule
+    def _anneal_tau(step: int) -> float:
+        gcfg = getattr(cfg.train, "gumbel", {})
+        t0 = float(gcfg.get("tau_start", 1.0))
+        t1 = float(gcfg.get("tau_end", 0.5))
+        T = int(gcfg.get("anneal_steps", 20000))
+        if T <= 0:
+            return t1
+        if step >= T:
+            return t1
+        # linear
+        return t0 + (t1 - t0) * (float(step) / float(T))
+
     while global_step < max_steps:
         for batch in train_loader:
             # Batch can be (tokens, labels) or (tokens, labels, coords)
@@ -425,10 +482,40 @@ def run_training(cfg: DictConfig):
                 if coords is not None:
                     coords = coords.to(_dev)
 
-            outputs = model(
-                tokens=tokens, labels=labels, ignore_index=ignore_index, coords=coords
-            )
+            # Base model forward (token classification only)
+            outputs = model(tokens=tokens, labels=labels, ignore_index=ignore_index)
             loss: torch.Tensor = outputs["loss"]
+
+            # Optional FAPE loss using frozen decoder (two-stage training)
+            if (
+                decoder is not None
+                and want_fape
+                and (global_step >= int(cfg.train.fape.start_step))
+            ):
+                if coords is not None:
+                    pad_id = int(cfg.model.encoder.pad_id)
+                    mask = tokens != pad_id
+                    tau = _anneal_tau(global_step)
+                    soft_codes = logits_to_soft_codes_gumbel(
+                        outputs["logits"],  # [B, L, C]
+                        model.classifier.E,  # [C, d_code]
+                        tau=float(tau),
+                        hard=bool(getattr(cfg.train, "gumbel", {}).get("hard", False)),
+                    )
+                    bb = decoder(soft_codes, mask=mask)  # type: ignore[operator]
+                    pred_coords = bb.view(bb.size(0), bb.size(1), 3, 3)
+                    fape = fape_loss(
+                        pred_coords=pred_coords,
+                        true_coords=coords,
+                        residue_mask=mask,
+                    )
+                    outputs["pred_coords"] = pred_coords
+                    outputs["structure_loss"] = fape
+                    loss = loss + float(cfg.train.fape.weight) * fape
+                elif is_main and (global_step == 0):
+                    printer(
+                        "FAPE enabled but no coords in dataset; skipping FAPE term."
+                    )
 
             # Normalize by grad accumulation
             loss_to_backprop = loss / grad_accum_steps
@@ -536,12 +623,7 @@ def run_training(cfg: DictConfig):
                             elab = elab.to(_dev)
                             if ecoords is not None:
                                 ecoords = ecoords.to(_dev)
-                        out = model(
-                            tokens=etok,
-                            labels=elab,
-                            ignore_index=ignore_index,
-                            coords=ecoords,
-                        )
+                        out = model(tokens=etok, labels=elab, ignore_index=ignore_index)
                         eval_loss_sum += float(out["loss"].item())
                         eval_acc_sum += _compute_accuracy(
                             out["logits"], elab, ignore_index
@@ -560,27 +642,67 @@ def run_training(cfg: DictConfig):
 
                         # Optional structure metrics if predicted coords available
                         pred_coords = out.get("pred_coords", None)
+                        # If decoder is available and eval decoding is enabled, produce pred_coords
+                        if (
+                            pred_coords is None
+                            and decoder is not None
+                            and want_eval_decode
+                        ):
+                            pad_id = int(cfg.model.encoder.pad_id)
+                            res_mask = etok != pad_id
+                            method = str(
+                                getattr(cfg.train.decoding, "eval_method", "argmax")
+                            )
+                            if method == "top_p":
+                                temperature = float(
+                                    getattr(cfg.train.decoding, "temperature", 1.0)
+                                )
+                                top_p = float(getattr(cfg.train.decoding, "top_p", 0.9))
+                                probs = torch.softmax(
+                                    out["logits"] / max(1e-8, temperature), dim=-1
+                                )
+                                idx = sample_indices_top_p(
+                                    probs, top_p=top_p, temperature=1.0
+                                )
+                                codes = indices_to_codes(model.classifier.E, idx)
+                            else:
+                                idx = out["logits"].argmax(dim=-1)
+                                codes = indices_to_codes(model.classifier.E, idx)
+                            pred_coords = decode_coords(decoder, codes, res_mask)  # type: ignore[arg-type]
+                            out["pred_coords"] = pred_coords
+
                         if pred_coords is not None and ecoords is not None:
-                            # Build residue mask from tokens: True = valid (non-pad, excluding BOS/EOS not available here)
                             res_mask = etok != cfg.model.encoder.pad_id
-                            # Compute metrics per-example and accumulate means
-                            lddt_b, _ = lddt_ca(
-                                pred_coords, ecoords, residue_mask=res_mask
-                            )
-                            tm_b, _ = tm_score(
-                                pred_coords, ecoords, residue_mask=res_mask
-                            )
-                            rmsd_b = rmsd(
-                                pred_coords,
-                                ecoords,
-                                residue_mask=res_mask,
-                                align=True,
-                                atom_set="CA",
-                            )
-                            eval_lddt_sum += float(lddt_b.mean().item())
-                            eval_tm_sum += float(tm_b.mean().item())
-                            eval_rmsd_sum += float(rmsd_b.mean().item())
-                            eval_struct_count += 1.0
+                            # Compute eval metrics; guard against numeric failures
+                            try:
+                                lddt_b, _ = lddt_ca(
+                                    pred_coords, ecoords, residue_mask=res_mask
+                                )
+                                tm_b, _ = tm_score(
+                                    pred_coords, ecoords, residue_mask=res_mask
+                                )
+                                rmsd_b = rmsd(
+                                    pred_coords,
+                                    ecoords,
+                                    residue_mask=res_mask,
+                                    align=True,
+                                    atom_set="CA",
+                                )
+                                eval_lddt_sum += float(lddt_b.mean().item())
+                                eval_tm_sum += float(tm_b.mean().item())
+                                eval_rmsd_sum += float(rmsd_b.mean().item())
+                                eval_struct_count += 1.0
+                            except Exception:
+                                pass
+                            # Also compute FAPE on eval if coords present (as a metric)
+                            try:
+                                fape_eval = fape_loss(
+                                    pred_coords, ecoords, residue_mask=res_mask
+                                )
+                                eval_fape_loss_sum += float(fape_eval.item())
+                                eval_fape_batches += 1.0
+                            except Exception:
+                                pass
                 model.train()
 
                 # Aggregate across processes if using Accelerate

@@ -31,3 +31,20 @@ wandb:
   group: null
   name: null
   tags: []
+
+fape:
+  enabled: false
+  start_step: 0
+  weight: 0.1
+
+gumbel:
+  tau_start: 1.0
+  tau_end: 0.5
+  anneal_steps: 20000
+  hard: false
+
+decoding:
+  eval_enabled: true
+  eval_method: "argmax"  # "argmax" | "top_p"
+  top_p: 0.9
+  temperature: 1.0

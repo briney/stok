@@ -26,4 +26,10 @@ codebook:
   path: null
   trainable: false
 
+decoder:
+  enabled: false
+  preset: null    # if null, inherit from model.codebook.preset
+  path: null      # overrides preset when set
+  freeze: true
+
 

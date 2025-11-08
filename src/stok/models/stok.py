@@ -104,7 +104,7 @@ class STokModel(nn.Module):
 
         loss = None
         classification_loss = None
-        structure_loss = None
+        # structure_loss = None
 
         # token classification loss
         if labels is not None:
@@ -114,26 +114,26 @@ class STokModel(nn.Module):
                 ignore_index=ignore_index,
             )
 
-        # structure-based FAPE loss
-        if coords is not None:
-            structure_loss = fape_loss(
-                pred_coords=coords,
-                true_coords=coords,
-                residue_mask=~key_padding_mask,
-            )
+        # # structure-based FAPE loss
+        # if coords is not None:
+        #     structure_loss = fape_loss(
+        #         pred_coords=coords,
+        #         true_coords=coords,
+        #         residue_mask=~key_padding_mask,
+        #     )
 
         # combine losses
         if classification_loss is not None:
             loss = classification_loss
-        if structure_loss is not None:
-            if loss is None:
-                loss = structure_loss * coords_loss_weight
-            else:
-                loss += structure_loss * coords_loss_weight
+        # if structure_loss is not None:
+        #     if loss is None:
+        #         loss = structure_loss * coords_loss_weight
+        #     else:
+        #         loss += structure_loss * coords_loss_weight
 
         return {
             "logits": logits,
             "loss": loss,
             "classification_loss": classification_loss,
-            "structure_loss": structure_loss,
+            # "structure_loss": structure_loss,
         }

@@ -24,6 +24,12 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
   - Scope: Uses `stok.models.decoder.load_pretrained_decoder` with a temp checkpoint path to check path override and `freeze=True`; simulates download for presets and verifies cache reuse via `STOK_DECODER_CACHE`.
   - Pass criteria: With `path`, the model loads on CPU, is in eval mode when frozen, all params have `requires_grad=False`, and input/output projector shapes are as expected; with preset download, the first call downloads and caches once and the second call reuses the cache without re-downloading.
 
+- Training with decoder + FAPE (`integration/test_train_with_decoder_fape.py`)
+  - Purpose: Ensure the optional pre-trained geometric decoder can be loaded and used during training to compute FAPE and during eval to produce structure metrics.
+  - Scope: Generates Parquet datasets with coordinates; creates a temporary decoder checkpoint matching the selected codebook preset; enables `model.decoder.enabled=true` and `train.fape.enabled=true` (stage-gated) and runs a short training/eval loop.
+  - Pass criteria: CLI exits with code 0 and prints `Training complete.`; decoding and FAPE do not crash even when metrics may be numerically ill-conditioned on tiny synthetic data (guarded internally).
+  - Notes: Skips if `x_transformers` or a Parquet engine is unavailable.
+
 - CLI training smoke (`integration/test_cli_train_smoke.py`)
   - Purpose: Exercise the `stok train` CLI end-to-end on dummy data.
   - Scope: Invokes Click CLI with Hydra overrides for a tiny model (e.g., `d_model=64`, `n_layers=2`, `n_heads=4`, `ffn_mult=1.0`), small data loader (`batch_size=2`, `max_len=64`, `num_workers=0`), `model.codebook.preset=lite`, a few steps (`train.num_steps=3`), and `train.wandb.enabled=false`.
@@ -91,6 +97,15 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
     - Noise behavior: higher noise decreases lDDT/TM and increases RMSD
     - Masking: metrics respect residue masks and NaN‑inferred validity
   - Pass criteria: All assertions pass; per‑example reductions are finite and within expected ranges.
+
+- Decoding utilities (`unit/test_decoding_utils.py`)
+  - Purpose: Validate helper functions for turning logits into code vectors and decoding to coordinates.
+  - Scope:
+    - `logits_to_soft_codes_gumbel`: returns `[B, L, d_code]` soft codes using Gumbel‑Softmax; shapes and finiteness.
+    - `indices_to_codes`: gathers code vectors by sampled indices.
+    - `sample_indices_top_p`: nucleus sampling produces indices; deterministic when mass=1.0.
+    - `decode_coords`: runs the geometric decoder to obtain `[B, L, 3, 3]` when `x_transformers` is available.
+  - Pass criteria: Shape/value assertions hold; test auto‑skips decode portion if dependencies are missing.
 
 ## Conventions
 

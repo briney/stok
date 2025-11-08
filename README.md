@@ -98,7 +98,7 @@ When training from Parquet, you can optionally include a `coordinates` column co
 - If present, the dataset yields an additional tensor `coords` with shape `[max_len, 3, 3]`, padded/truncated to `data.max_len` with `NaN`s.
 - If absent, the dataset omits the `coords` key; CSV inputs never include `coords`.
 
-The training loop automatically passes `coords` to the model when available. The model computes an optional structure loss (FAPE) that respects `NaN` padding.
+When the geometric decoder is enabled and FAPE is turned on, the training loop will decode predicted structure tokens into coordinates and compute a FAPE loss against the provided `coords`. If the decoder is disabled, `coords` are only used for evaluation metrics (lDDT/TM/RMSD) when requested.
 
 ### learning rate schedule
 
@@ -160,3 +160,34 @@ Notes:
 - `residue_mask` is `[B, L]` (True=valid). If omitted, it is inferred from NaNs in `true_coords`.
 - Shapes `[L, 3, 3]` are accepted and auto-batched.
 - lDDT and TAE are O(L²); consider using them in eval or with subsampling for long sequences.
+
+## using the pre-trained decoder (FAPE and eval metrics)
+
+The decoder is optional and disabled by default. Enable it with Hydra overrides:
+
+```bash
+# enable decoder but metrics-only (no FAPE)
+stok train model.decoder.enabled=true train.fape.enabled=false
+
+# two-stage training: start with token CE only, then add FAPE
+stok train \
+  model.decoder.enabled=true \
+  train.fape.enabled=true \
+  train.fape.start_step=50000 \
+  train.fape.weight=0.1 \
+  train.gumbel.tau_start=1.0 \
+  train.gumbel.tau_end=0.5
+```
+
+If you prefer to avoid downloads, you can provide a local decoder checkpoint:
+
+```bash
+stok train model.decoder.enabled=true model.decoder.path=/abs/path/decoder-lite.pt
+```
+
+Notes:
+- The decoder runs frozen. Gradients flow through it back to the logits via Gumbel-Softmax selections.
+- For eval-time metrics, you can choose `argmax` or nucleus sampling (`top-p`) to obtain structure tokens before decoding:
+  ```bash
+  stok train model.decoder.enabled=true train.decoding.eval_enabled=true train.decoding.eval_method=top_p train.decoding.top_p=0.9
+  ```

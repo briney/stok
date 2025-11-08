@@ -126,6 +126,7 @@ class Dim6RotStructureHead(nn.Module):
         self.activation_fn = nn.GELU()
         self.norm = nn.LayerNorm(input_dim)
         self.predict_torsion_angles = predict_torsion_angles
+        self.preds_only = preds_only
         projection_dim = 9 + (14 if predict_torsion_angles else 0)
         self.proj = nn.Linear(input_dim, projection_dim)
         self.trans_scale_factor = trans_scale_factor

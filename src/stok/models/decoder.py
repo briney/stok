@@ -78,9 +78,11 @@ class GeometricDecoder(nn.Module):
         decoder_mask_bool = mask.to(torch.bool)
         x = self.decoder_stack(x, mask=decoder_mask_bool)
 
-        bb_pred = self.affine_output_projection(
-            x, affine=None, affine_mask=torch.zeros_like(mask), preds_only=True
+        bb_out = self.affine_output_projection(
+            x, affine=None, affine_mask=torch.zeros_like(mask)
         )
+        # Dim6RotStructureHead may return either (rigids, pred_xyz) or just pred_xyz
+        bb_pred = bb_out[1] if isinstance(bb_out, tuple) else bb_out
 
         return bb_pred.flatten(-2) * self.decoder_output_scaling_factor
 
