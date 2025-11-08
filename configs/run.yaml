@@ -1,0 +1,80 @@
+model:
+  encoder:
+    d_model: 64
+    n_heads: 4
+    n_layers: 2
+    ffn_mult: 1.0
+    vocab_size: 32
+    pad_id: 1
+    dropout: 0.0
+    attn_dropout: 0.0
+    norm: layernorm
+  classifier:
+    tie_to_codebook: true
+    learnable_temperature: true
+    use_cosine: false
+    bias_from_code_norm: true
+    projector_dim: null
+    ignore_index: -100
+  init:
+    std: 0.02
+  codebook:
+    preset: lite
+    path: null
+    trainable: false
+  decoder:
+    enabled: true
+    preset: null
+    path: /private/var/folders/61/gd4_q9ps5m59r1npdyscnh8r0000gn/T/pytest-of-bryanbriney/pytest-20/test_training_with_decoder_and0/decoder-lite.pt
+    freeze: true
+data:
+  batch_size: 2
+  max_len: 16
+  num_workers: 0
+  pin_memory: false
+  train: /private/var/folders/61/gd4_q9ps5m59r1npdyscnh8r0000gn/T/pytest-of-bryanbriney/pytest-20/test_training_with_decoder_and0/train.parquet
+  eval: /private/var/folders/61/gd4_q9ps5m59r1npdyscnh8r0000gn/T/pytest-of-bryanbriney/pytest-20/test_training_with_decoder_and0/eval.parquet
+train:
+  optimizer:
+    name: adamw
+    lr: 0.0003
+    betas:
+    - 0.9
+    - 0.95
+    weight_decay: 0.01
+  scheduler:
+    decay: cosine
+    warmup_steps: 2000
+    stable_steps: 0
+    decay_steps: null
+  num_steps: 3
+  epochs: null
+  eval_steps: 2
+  log_steps: 1
+  checkpoint_steps: null
+  grad_accum_steps: 1
+  grad_clip_norm: 1.0
+  project_path: null
+  wandb:
+    enabled: false
+    project: stok
+    entity: null
+    group: null
+    name: null
+    tags: []
+  fape:
+    enabled: true
+    start_step: 0
+    weight: 0.1
+  gumbel:
+    tau_start: 1.0
+    tau_end: 0.5
+    anneal_steps: 20000
+    hard: false
+  decoding:
+    eval_enabled: true
+    eval_method: argmax
+    top_p: 0.9
+    temperature: 1.0
+seed: 1337
+print_model_summary: true

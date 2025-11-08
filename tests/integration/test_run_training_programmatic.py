@@ -5,7 +5,7 @@ from hydra import compose, initialize_config_dir
 from stok.cli.train import run_training
 
 
-def test_run_training_programmatic_smoke(capsys):
+def test_run_training_programmatic_smoke(capsys, tmp_path):
     overrides = [
         # tiny model for speed
         "model.encoder.d_model=64",
@@ -28,6 +28,8 @@ def test_run_training_programmatic_smoke(capsys):
         "train.grad_accum_steps=1",
         # disable external logging
         "train.wandb.enabled=false",
+        # write artifacts to temp dir
+        f"train.project_path={tmp_path.as_posix()}",
     ]
 
     with as_file(files("stok").joinpath("configs")) as cfg_dir:

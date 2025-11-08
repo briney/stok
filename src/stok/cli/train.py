@@ -1,7 +1,12 @@
 import math
+import os
+import random
+import shutil
 import sys
+from pathlib import Path
 from typing import Any, Optional
 
+import numpy as np
 import torch
 import torch.nn as nn
 from omegaconf import DictConfig, OmegaConf
@@ -87,6 +92,148 @@ def _build_scheduler(
             return 1.0 - progress
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+
+class _TeeIO:
+    def __init__(self, *streams):
+        self._streams = streams
+
+    def write(self, s: str):
+        for st in self._streams:
+            st.write(s)
+            st.flush()
+
+    def flush(self):
+        for st in self._streams:
+            st.flush()
+
+
+def _resolve_project_dirs(cfg: DictConfig) -> dict[str, Path]:
+    root = Path(str(cfg.train.get("project_path") or Path.cwd())).resolve()
+    model_dir = root / "model"
+    ckpt_dir = root / "checkpoints"
+    logs_dir = root / "logs"
+    configs_dir = root / "configs"
+    return {
+        "root": root,
+        "model": model_dir,
+        "checkpoints": ckpt_dir,
+        "logs": logs_dir,
+        "configs": configs_dir,
+    }
+
+
+def _ensure_dirs(dirs: list[Path]):
+    for d in dirs:
+        d.mkdir(parents=True, exist_ok=True)
+
+
+def _save_config_snapshot(cfg: DictConfig, dst_file: Path):
+    dst_file.parent.mkdir(parents=True, exist_ok=True)
+    with dst_file.open("w", encoding="utf-8") as f:
+        f.write(OmegaConf.to_yaml(cfg, resolve=True))
+
+
+def _unwrap_model(model: nn.Module, accelerator) -> nn.Module:
+    return accelerator.unwrap_model(model) if accelerator is not None else model
+
+
+def _collect_rng_state() -> dict[str, Any]:
+    # Convert numpy RNG state to only primitives/lists to be loadable with weights_only=True
+    np_state = list(np.random.get_state())
+    try:
+        # element 1 is the key array
+        if hasattr(np_state[1], "tolist"):
+            np_state[1] = np_state[1].tolist()
+    except Exception:
+        pass
+    state: dict[str, Any] = {
+        "python": random.getstate(),
+        "numpy": np_state,
+        "torch": torch.get_rng_state(),
+    }
+    if torch.cuda.is_available():
+        try:
+            state["cuda"] = torch.cuda.get_rng_state_all()
+        except Exception:
+            # On some backends/devices this may not be available
+            pass
+    return state
+
+
+def _restore_rng_state(state: dict[str, Any]):
+    try:
+        if "python" in state:
+            random.setstate(state["python"])
+        if "numpy" in state:
+            np_state = state["numpy"]
+            # Accept both raw numpy state and listified variant
+            if isinstance(np_state, (list, tuple)) and len(np_state) >= 5:
+                key = np_state[1]
+                if isinstance(key, list):
+                    try:
+                        key = np.array(key, dtype=np.uint32)
+                    except Exception:
+                        key = np.array(key)
+                np_state = (np_state[0], key, np_state[2], np_state[3], np_state[4])
+            np.random.set_state(np_state)  # type: ignore[arg-type]
+        if "torch" in state:
+            torch.set_rng_state(state["torch"])
+        if "cuda" in state and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all(state["cuda"])
+    except Exception:
+        # Best-effort restore; ignore incompatibilities
+        pass
+
+
+def _save_checkpoint(
+    path: Path,
+    *,
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler._LRScheduler,  # type: ignore[attr-defined]
+    global_step: int,
+    cfg: DictConfig,
+    accelerator,
+):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "model": _unwrap_model(model, accelerator).state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "scheduler": scheduler.state_dict(),
+        "global_step": int(global_step),
+        "config": OmegaConf.to_container(cfg, resolve=True),
+        "rng_state": _collect_rng_state(),
+    }
+    torch.save(payload, path.as_posix())
+
+
+def _try_load_latest_checkpoint(
+    ckpt_dir: Path,
+    *,
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler._LRScheduler,  # type: ignore[attr-defined]
+    accelerator,
+) -> int:
+    """
+    Returns restored global_step if a checkpoint is loaded; otherwise 0.
+    """
+    latest = ckpt_dir / "latest.pt"
+    if not latest.exists():
+        return 0
+    # All processes load to keep state in sync under DDP
+    try:
+        ckpt = torch.load(latest.as_posix(), map_location="cpu")
+        _unwrap_model(model, accelerator).load_state_dict(ckpt["model"])
+        optimizer.load_state_dict(ckpt["optimizer"])
+        scheduler.load_state_dict(ckpt["scheduler"])
+        if "rng_state" in ckpt:
+            _restore_rng_state(ckpt["rng_state"])
+        return int(ckpt.get("global_step", 0))
+    except Exception:
+        # If anything goes wrong, start from scratch
+        return 0
 
 
 def _compute_accuracy(
@@ -246,14 +393,16 @@ def _maybe_wandb_login(cfg: DictConfig, *, is_main_process: bool):
                 pass
 
 
-def _maybe_init_wandb(cfg: DictConfig, *, is_main_process: bool):
+def _maybe_init_wandb(
+    cfg: DictConfig, *, is_main_process: bool, logs_dir: Optional[Path] = None
+):
     wb = None
     if cfg.train.get("wandb") and cfg.train.wandb.get("enabled", True):
         if is_main_process:
             try:
                 import wandb  # type: ignore
 
-                wandb.init(
+                init_kwargs = dict(
                     project=cfg.train.wandb.get("project", "stok"),
                     entity=cfg.train.wandb.get("entity"),
                     group=cfg.train.wandb.get("group"),
@@ -261,6 +410,10 @@ def _maybe_init_wandb(cfg: DictConfig, *, is_main_process: bool):
                     tags=list(cfg.train.wandb.get("tags", [])),
                     config=OmegaConf.to_container(cfg, resolve=True),
                 )
+                if logs_dir is not None:
+                    os.environ["WANDB_DIR"] = logs_dir.as_posix()
+                    init_kwargs["dir"] = logs_dir.as_posix()  # type: ignore[index]
+                wandb.init(**init_kwargs)
                 wb = wandb
             except Exception:
                 # proceed without W&B
@@ -294,6 +447,22 @@ def run_training(cfg: DictConfig):
                 "Multiple CUDA devices detected but only one process is active. "
                 "Launch multi-GPU with: accelerate launch -m stok.train <overrides>"
             )
+
+    # Resolve project directories and persist config (main only)
+    io_dirs = _resolve_project_dirs(cfg)
+    if is_main:
+        _ensure_dirs(
+            [
+                io_dirs["root"],
+                io_dirs["model"],
+                io_dirs["checkpoints"],
+                io_dirs["logs"],
+                io_dirs["configs"],
+            ]
+        )
+        _save_config_snapshot(cfg, io_dirs["configs"] / "run.yaml")
+    if accelerator:
+        accelerator.wait_for_everyone()
 
     # Load codebook and build model
     codebook = load_codebook(
@@ -425,7 +594,7 @@ def run_training(cfg: DictConfig):
         model.to(device)
 
     # W&B
-    wb = _maybe_init_wandb(cfg, is_main_process=is_main)
+    wb = _maybe_init_wandb(cfg, is_main_process=is_main, logs_dir=io_dirs["logs"])
 
     # Training loop
     model.train()
@@ -441,11 +610,18 @@ def run_training(cfg: DictConfig):
     console_enabled = True
     if console_cfg is not None:
         console_enabled = bool(console_cfg.get("enabled", True))
+    # Tee console output to both stdout and logs/train.log on main
+    log_file_handle = None
+    console_file = sys.stdout
+    if is_main:
+        log_file_handle = (io_dirs["logs"] / "train.log").open("a", encoding="utf-8")
+        console_file = _TeeIO(sys.stdout, log_file_handle)
     console = ConsoleLogger(
         total_steps=max_steps,
         initial_step=global_step,
         is_main=is_main,
         enabled=console_enabled,
+        file=console_file,
     )
 
     # Additional training accumulators (over the current log window)
@@ -790,12 +966,57 @@ def run_training(cfg: DictConfig):
 
             global_step += 1
             console.step(1)
+            # Periodic checkpointing
+            ckpt_steps = cfg.train.get("checkpoint_steps")
+            if (
+                is_main
+                and ckpt_steps is not None
+                and int(ckpt_steps) > 0
+                and (global_step % int(ckpt_steps) == 0)
+            ):
+                step_path = io_dirs["checkpoints"] / f"step_{global_step:08d}.pt"
+                _save_checkpoint(
+                    step_path,
+                    model=model,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    global_step=global_step,
+                    cfg=cfg,
+                    accelerator=accelerator,
+                )
+                # Update latest pointer
+                try:
+                    shutil.copyfile(
+                        step_path.as_posix(),
+                        (io_dirs["checkpoints"] / "latest.pt").as_posix(),
+                    )
+                except Exception:
+                    pass
+                if accelerator:
+                    accelerator.wait_for_everyone()
             if global_step >= max_steps:
                 break
 
     if is_main:
+        # Final checkpoint
+        final_path = io_dirs["model"] / "final.pt"
+        _save_checkpoint(
+            final_path,
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            global_step=global_step,
+            cfg=cfg,
+            accelerator=accelerator,
+        )
         console.close()
         console.print("Training complete.")
+        # Close log file if opened
+        if log_file_handle is not None:
+            try:
+                log_file_handle.close()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

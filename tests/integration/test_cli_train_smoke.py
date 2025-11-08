@@ -3,7 +3,7 @@ from click.testing import CliRunner
 from stok.cli.cli import cli
 
 
-def test_cli_train_smoke_runs_end_to_end_cpu():
+def test_cli_train_smoke_runs_end_to_end_cpu(tmp_path):
     runner = CliRunner()
     overrides = [
         # tiny model for speed
@@ -27,6 +27,8 @@ def test_cli_train_smoke_runs_end_to_end_cpu():
         "train.grad_accum_steps=1",
         # disable external logging
         "train.wandb.enabled=false",
+        # write artifacts to temp dir
+        f"train.project_path={tmp_path.as_posix()}",
     ]
 
     result = runner.invoke(cli, ["train", *overrides])  # type: ignore[arg-type]

@@ -105,6 +105,8 @@ def test_training_with_decoder_and_fape(tmp_path):
         "train.eval_steps=2",
         # disable external logging
         "train.wandb.enabled=false",
+        # write artifacts to temp dir
+        f"train.project_path={tmp_path.as_posix()}",
     ]
 
     result = runner.invoke(cli, ["train", *overrides])  # type: ignore[arg-type]

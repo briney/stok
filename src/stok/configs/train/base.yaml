@@ -18,10 +18,14 @@ epochs: null
 # intervals (in steps)
 eval_steps: 1000
 log_steps: 50
+checkpoint_steps: null
 
 # training mechanics
 grad_accum_steps: 1
 grad_clip_norm: 1.0
+
+# IO paths
+project_path: null
 
 # logging
 wandb:

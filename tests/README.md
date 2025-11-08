@@ -57,6 +57,14 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
   - Scope: Composes config from packaged `stok/configs` via `initialize_config_dir`/`compose` and uses the same tiny overrides as the CLI smoke test.
   - Pass criteria: No exceptions during the run; captured stdout contains `Training complete.`.
 
+- Checkpointing artifacts (`integration/test_checkpointing_and_resume.py`)
+  - Purpose: Validate periodic checkpointing, final model saving, and log/config artifact placement.
+  - Scope: Runs training with `train.project_path=<tmp>` and `train.checkpoint_steps=2`; verifies:
+    - `checkpoints/step_00000002.pt` and `checkpoints/latest.pt`
+    - `logs/train.log` and `configs/run.yaml`
+    - `model/final.pt`
+  - Pass criteria: All artifacts exist in the expected subdirectories.
+
 ## Unit Tests
 
 - FAPE loss (`unit/test_fape_loss.py`)
