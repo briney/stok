@@ -23,19 +23,14 @@ class VQIndicesDataset(Dataset):
 
         self._is_parquet = False
         if p.is_dir() or suffix in {".parquet", ".parq", ".pq"}:
-            try:
-                self.data = pd.read_parquet(dataset_path)
-                self._is_parquet = True
-            except Exception as e:
-                raise RuntimeError(
-                    "Reading Parquet requires 'pyarrow' or 'fastparquet'."
-                ) from e
+            self.data = pd.read_parquet(dataset_path)
+            self._is_parquet = True
         elif suffix in {".csv"}:
             self.data = pd.read_csv(dataset_path)
         elif suffix in {".tsv", ".tab"}:
             self.data = pd.read_csv(dataset_path, sep="\t")
         else:
-            # Default to Parquet for unknown suffixes/directories
+            # default to parquet for unknown suffixes/directories
             try:
                 self.data = pd.read_parquet(dataset_path)
                 self._is_parquet = True
@@ -91,72 +86,36 @@ class VQIndicesDataset(Dataset):
             "nan_masks": nan_mask,
         }
 
-        # Optional coordinates from Parquet only
+        # parse optional 3D-coordinates only from parquet inputs
         if self.has_coords:
             raw_coords = row["coordinates"]
             coords_arr = None
             if isinstance(raw_coords, np.ndarray):
-                # Parquet nested lists can round-trip as object arrays
+                # parquet nested lists can round-trip as object arrays
                 if raw_coords.dtype == object:
-                    try:
-                        coords_arr = np.asarray(raw_coords.tolist(), dtype=np.float32)
-                    except Exception:
-                        coords_arr = None
+                    coords_arr = np.asarray(raw_coords.tolist(), dtype=np.float32)
                 else:
-                    try:
-                        coords_arr = raw_coords.astype(np.float32, copy=False)
-                    except Exception:
-                        coords_arr = None
+                    coords_arr = raw_coords.astype(np.float32, copy=False)
             elif isinstance(raw_coords, (list, tuple)):
-                try:
-                    coords_arr = np.asarray(raw_coords, dtype=np.float32)
-                except Exception:
-                    coords_arr = None
+                coords_arr = np.asarray(raw_coords, dtype=np.float32)
             elif isinstance(raw_coords, float) and pd.isna(raw_coords):
                 coords_arr = None
             else:
                 coords_arr = None
 
-            # Coerce to shape [L, 3, 3] if possible; else treat as empty
+            # Ccerce to shape [L, 3, 3] if possible
             if coords_arr is not None:
-                try:
-                    if coords_arr.ndim == 3 and coords_arr.shape[-2:] == (3, 3):
-                        pass
-                    elif coords_arr.ndim == 3 and coords_arr.shape[:2] == (3, 3):
-                        coords_arr = np.transpose(coords_arr, (2, 0, 1))
-                    elif coords_arr.ndim == 2 and coords_arr.shape == (3, 3):
-                        coords_arr = coords_arr[None, ...]
-                    elif coords_arr.ndim == 2 and (coords_arr.size % 9 == 0):
-                        coords_arr = coords_arr.reshape(-1, 3, 3)
-                    else:
-                        coords_arr = None
-                except Exception:
+                if coords_arr.ndim == 3 and coords_arr.shape[-2:] == (3, 3):
+                    pass
+                elif coords_arr.ndim == 3 and coords_arr.shape[:2] == (3, 3):
+                    coords_arr = np.transpose(coords_arr, (2, 0, 1))
+                elif coords_arr.ndim == 2 and coords_arr.shape == (3, 3):
+                    coords_arr = coords_arr[None, ...]
+                elif coords_arr.ndim == 2 and (coords_arr.size % 9 == 0):
+                    coords_arr = coords_arr.reshape(-1, 3, 3)
+                else:
                     coords_arr = None
-            if coords_arr is None:
-                # Fallback: try constructing by stacking per-residue entries
-                try:
-                    if hasattr(raw_coords, "tolist"):
-                        seq_vals = raw_coords.tolist()
-                    else:
-                        seq_vals = list(raw_coords)  # type: ignore[arg-type]
-                    per_res = []
-                    for res in seq_vals:  # type: ignore[assignment]
-                        # Each residue should be 3 atoms × 3 coords
-                        if isinstance(res, np.ndarray) and res.dtype == object:
-                            res_arr = np.stack(
-                                [np.asarray(atom, dtype=np.float32) for atom in res],
-                                axis=0,
-                            )
-                        else:
-                            res_arr = np.asarray(res, dtype=np.float32)
-                        if res_arr.shape != (3, 3):
-                            per_res = []
-                            break
-                        per_res.append(res_arr)
-                    if len(per_res) > 0:
-                        coords_arr = np.stack(per_res, axis=0)
-                except Exception:
-                    coords_arr = None
+
             if coords_arr is None:
                 coords_arr = np.empty((0, 3, 3), dtype=np.float32)
 
