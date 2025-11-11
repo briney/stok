@@ -11,9 +11,13 @@ import torch
 import torch.nn as nn
 from omegaconf import DictConfig, OmegaConf
 from torch.optim import AdamW
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, IterableDataset
 
-from stok.data.dataset import DummySequenceDataset, VQIndicesDataset
+from stok.data.dataset import (
+    DummySequenceDataset,
+    IterableVQIndicesDataset,
+    VQIndicesDataset,
+)
 from stok.models.stok import STokModel
 from stok.utils.codebook import load_codebook
 from stok.utils.console import ConsoleLogger
@@ -318,14 +322,28 @@ def _build_dataloaders(cfg: DictConfig, *, codebook_size: int, pad_id: int):
 
     if cfg.data.get("train"):
         # CSV/Parquet-backed dataset; tokenize in collate
-        train_ds = VQIndicesDataset(
-            dataset_path=str(cfg.data.train), max_length=max_len
-        )
-        eval_ds = (
-            VQIndicesDataset(dataset_path=str(cfg.data.eval), max_length=max_len)
-            if cfg.data.get("eval")
-            else None
-        )
+        def _pick_dataset(path: str):
+            p = Path(path)
+            # Heuristic: directory containing parquet shards -> Iterable; else map-style
+            if p.is_dir():
+                has_parquet = (
+                    any(p.glob("*.parquet"))
+                    or any(p.glob("*.parq"))
+                    or any(p.glob("*.pq"))
+                )
+                if has_parquet:
+                    shuffle_shards = bool(getattr(cfg.data, "shuffle_shards", True))
+                    shuffle_rows = bool(getattr(cfg.data, "shuffle_rows", True))
+                    return IterableVQIndicesDataset(
+                        dataset_path=str(p),
+                        max_length=max_len,
+                        shuffle_shards=shuffle_shards,
+                        shuffle_rows=shuffle_rows,
+                    )
+            return VQIndicesDataset(dataset_path=str(path), max_length=max_len)
+
+        train_ds = _pick_dataset(str(cfg.data.train))
+        eval_ds = _pick_dataset(str(cfg.data.eval)) if cfg.data.get("eval") else None
         tokenizer = Tokenizer()
 
         def collate(batch):
@@ -355,14 +373,17 @@ def _build_dataloaders(cfg: DictConfig, *, codebook_size: int, pad_id: int):
             pad_id=pad_id,
         )
 
+    # Configure shuffle depending on dataset type
+    is_iterable = isinstance(train_ds, IterableDataset)
     train_loader = DataLoader(
         train_ds,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=not is_iterable,
         num_workers=num_workers,
         pin_memory=pin_memory,
         collate_fn=collate_fn,
         drop_last=True,
+        persistent_workers=(num_workers > 0),
     )
     eval_loader = (
         DataLoader(
@@ -373,6 +394,7 @@ def _build_dataloaders(cfg: DictConfig, *, codebook_size: int, pad_id: int):
             pin_memory=pin_memory,
             collate_fn=collate_fn,
             drop_last=False,
+            persistent_workers=(num_workers > 0),
         )
         if eval_ds is not None
         else None

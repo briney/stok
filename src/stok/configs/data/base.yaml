@@ -7,3 +7,7 @@ pin_memory: true
 # file paths for datasets
 train: null   # path to training CSV/Parquet (pid, protein_sequence, indices)
 eval: null    # path to validation CSV/Parquet
+
+# Iterable directory-of-parquet behavior tuning (ignored for single-file datasets)
+shuffle_shards: true
+shuffle_rows: true

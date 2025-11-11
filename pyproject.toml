@@ -23,6 +23,7 @@ dependencies = [
   "tokenizers",
   "numpy",
   "pandas",
+  "pyarrow>=12",
   "biopython",
   "transformers",
   "x-transformers",

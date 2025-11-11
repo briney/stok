@@ -52,6 +52,12 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
   - Pass criteria: CLI exits with code 0 and ends with `Training complete.`.
   - Notes: Requires a Parquet engine (e.g., `pyarrow` or `fastparquet`). The test auto-skips if no engine is available.
 
+- CLI training with Parquet shards (iterable) + single-file eval (`integration/test_cli_train_with_parquet_shards_mixed.py`)
+  - Purpose: Validate shard-wise iterable training dataset compatibility with a map-style single-file eval dataset in the same run.
+  - Scope: Creates a training directory containing multiple Parquet shard files and a single-file Parquet eval set. Verifies heuristic selection (dir → iterable, file → map-style) and successful end-to-end training/eval.
+  - Pass criteria: CLI exits with code 0 and prints `Training complete.`.
+  - Notes: Requires a Parquet engine; auto-skips if unavailable.
+
 - Programmatic training (`integration/test_run_training_programmatic.py`)
   - Purpose: Run `run_training` directly (non-CLI) to ensure programmatic usage works with Hydra-composed configs.
   - Scope: Composes config from packaged `stok/configs` via `initialize_config_dir`/`compose` and uses the same tiny overrides as the CLI smoke test.
@@ -96,6 +102,13 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
     - Parquet without `coordinates` column: `coords` key is omitted.
     - CSV inputs: `coords` key is always omitted.
   - Pass criteria: Assertions on presence/absence of `coords`, shape, NaN padding, and expected leading residue coordinates pass.
+
+- IterableVQIndicesDataset basics (`unit/test_iterable_vqindices_dataset.py`)
+  - Purpose: Validate core iterable dataset behavior for shard-wise Parquet loading.
+  - Scope:
+    - `__len__` reflects total rows for a single process (world_size=1).
+    - Per-epoch shuffling changes the sample order when enabled.
+  - Pass criteria: Iteration yields exactly `len(ds)` items; epoch orders differ with shuffling enabled.
 
 - Structure metrics (`unit/test_metrics.py`)
   - Purpose: Validate lDDT (Cα), TM‑score, RMSD, and True Aligned Error implementations.

@@ -90,6 +90,23 @@ Notes:
   ```
 - DataLoader workers are per process. Tune `data.num_workers` to avoid oversubscription when using many GPUs.
 
+### large, sharded Parquet datasets (iterable)
+
+When `data.train` (or `data.eval`) is a directory containing Parquet files, training uses a shard-wise IterableDataset that:
+
+- Loads one shard at a time (bounded memory)
+- Shuffles shards and rows per epoch (deterministic but different across epochs)
+- Partitions samples across distributed ranks and DataLoader workers
+- Ensures each rank sees the same number of samples per epoch (global remainder dropped)
+
+Heuristic is automatic: directory of `*.parquet|*.parq|*.pq` → iterable; single file (CSV/TSV/Parquet) → map‑style. You can tune iterable behavior:
+
+```yaml
+data:
+  shuffle_shards: true
+  shuffle_rows: true
+```
+
 ### optional coordinates (Parquet only)
 
 When training from Parquet, you can optionally include a `coordinates` column containing per‑residue N–CA–C coordinates:
