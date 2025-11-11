@@ -5,7 +5,7 @@ from pathlib import Path
 
 import torch
 
-from stok.data.dataset import VQIndicesDataset
+from stok.data.dataset import TokenizedDataset
 
 
 pytest.importorskip("pyarrow")
@@ -37,7 +37,7 @@ def test_dataset_parquet_with_coords_returns_coords_tensor(tmp_path):
     df.to_parquet(pq, index=False)
 
     max_len = 8
-    ds = VQIndicesDataset(str(pq), max_length=max_len)
+    ds = TokenizedDataset(str(pq), max_length=max_len)
     item = ds[0]
     assert "coords" in item
     coords = item["coords"]
@@ -65,7 +65,7 @@ def test_dataset_parquet_without_coords_omits_key(tmp_path):
         )
     pd.DataFrame(rows).to_parquet(pq, index=False)
 
-    ds = VQIndicesDataset(str(pq), max_length=8)
+    ds = TokenizedDataset(str(pq), max_length=8)
     item = ds[0]
     assert "coords" not in item
 
@@ -85,7 +85,7 @@ def test_dataset_csv_never_includes_coords(tmp_path):
         )
     pd.DataFrame(rows).to_csv(csv, index=False)
 
-    ds = VQIndicesDataset(str(csv), max_length=8)
+    ds = TokenizedDataset(str(csv), max_length=8)
     item = ds[0]
     assert "coords" not in item
 

@@ -2,7 +2,7 @@ import pandas as pd
 import pytest
 from pathlib import Path
 
-from stok.data.dataset import IterableVQIndicesDataset
+from stok.data.dataset import IterableTokenizedDataset
 
 
 pytest.importorskip("pyarrow")
@@ -28,7 +28,7 @@ def test_iterable_len_equals_total_rows_single_rank(tmp_path):
     d = tmp_path / "shards"
     _write_shard(d, "a", rows=5)
     _write_shard(d, "b", rows=7)
-    ds = IterableVQIndicesDataset(d.as_posix(), max_length=16, shuffle_shards=False, shuffle_rows=False, seed=123)
+    ds = IterableTokenizedDataset(d.as_posix(), max_length=16, shuffle_shards=False, shuffle_rows=False, seed=123)
     # world_size=1 -> __len__ equals total rows
     assert len(ds) == 12
     # exhaust iterator to ensure it yields len(ds) items
@@ -42,7 +42,7 @@ def test_iterable_epoch_shuffle_changes_order(tmp_path):
     d = tmp_path / "shards2"
     _write_shard(d, "x", rows=4)
     _write_shard(d, "y", rows=4)
-    ds = IterableVQIndicesDataset(d.as_posix(), max_length=16, shuffle_shards=True, shuffle_rows=True, seed=0)
+    ds = IterableTokenizedDataset(d.as_posix(), max_length=16, shuffle_shards=True, shuffle_rows=True, seed=0)
     # collect pids for two epochs and ensure order differs
     epoch1 = [item["pid"] for item in ds]
     epoch2 = [item["pid"] for item in ds]

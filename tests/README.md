@@ -36,12 +36,12 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
   - Pass criteria: CLI exits with code 0 and prints `Training complete.`.
 
 - CLI training with CSV (`integration/test_cli_train_with_csv.py`)
-  - Purpose: End-to-end training on a tiny real CSV-backed dataset to validate tokenizer alignment and `VQIndicesDataset` integration.
+  - Purpose: End-to-end training on a tiny real CSV-backed dataset to validate tokenizer alignment and `TokenizedDataset` integration.
   - Scope: Generates small `train.csv` and `eval.csv` with columns `pid,protein_sequence,indices`, sets a small `data.max_len` and indices length (`max_len-2`), uses the same tiny model overrides, and triggers evaluation (`train.eval_steps=2`).
   - Pass criteria: CLI exits with code 0, prints an eval line (`eval | loss ...`), and ends with `Training complete.`.
 
 - CLI training with Parquet (`integration/test_cli_train_with_parquet.py`)
-  - Purpose: End-to-end training on a tiny real Parquet-backed dataset to validate tokenizer alignment and `VQIndicesDataset` integration for nested list indices.
+  - Purpose: End-to-end training on a tiny real Parquet-backed dataset to validate tokenizer alignment and `TokenizedDataset` integration for nested list indices.
   - Scope: Generates small `train.parquet` and `eval.parquet` with columns `pid,protein_sequence,indices` where `indices` is a list[int] (no padding tokens). Uses the same tiny model overrides and triggers evaluation (`train.eval_steps=2`).
   - Pass criteria: CLI exits with code 0 and ends with `Training complete.`.
   - Notes: Requires a Parquet engine (e.g., `pyarrow` or `fastparquet`). The test auto-skips if no engine is available.
@@ -95,15 +95,15 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
   - Scope: Uses real `Tokenizer` and `_tokenize_and_align` with a short sequence and indices; asserts BOS/EOS/PAD positions are ignored, supervised span starts at position 1, and indices are truncated to `max_len-2`.
   - Pass criteria: Output shapes match `max_len`; labels at [0] are `ignore_index`; labels[1:1+copy_len] equal provided indices slice; remaining positions include `ignore_index`.
 
-- VQIndicesDataset coordinates (`unit/test_vqindices_coords.py`)
-  - Purpose: Validate optional coordinates handling in `VQIndicesDataset`.
+- TokenizedDataset coordinates (`unit/test_vqindices_coords.py`)
+  - Purpose: Validate optional coordinates handling in `TokenizedDataset`.
   - Scope:
     - Parquet with `coordinates` column: item includes `coords` tensor with shape `[max_len, 3, 3]`, padded/truncated with `NaN`s; atom order N, CA, C preserved.
     - Parquet without `coordinates` column: `coords` key is omitted.
     - CSV inputs: `coords` key is always omitted.
   - Pass criteria: Assertions on presence/absence of `coords`, shape, NaN padding, and expected leading residue coordinates pass.
 
-- IterableVQIndicesDataset basics (`unit/test_iterable_vqindices_dataset.py`)
+- IterableTokenizedDataset basics (`unit/test_iterable_vqindices_dataset.py`)
   - Purpose: Validate core iterable dataset behavior for shard-wise Parquet loading.
   - Scope:
     - `__len__` reflects total rows for a single process (world_size=1).

@@ -15,8 +15,8 @@ from torch.utils.data import DataLoader, IterableDataset
 
 from stok.data.dataset import (
     DummySequenceDataset,
-    IterableVQIndicesDataset,
-    VQIndicesDataset,
+    IterableTokenizedDataset,
+    TokenizedDataset,
 )
 from stok.models.stok import STokModel
 from stok.utils.codebook import load_codebook
@@ -266,7 +266,7 @@ def _tokenize_and_align(
         tokens, labels = zip(*batch)  # type: ignore[arg-type]
         return torch.stack(tokens, dim=0), torch.stack(labels, dim=0)
 
-    # Else VQIndicesDataset dicts with 'seq' and 'indices'
+    # Else TokenizedDataset dicts with 'seq' and 'indices'
     input_ids = []
     label_ids = []
     coords_batch: list[torch.Tensor] = []
@@ -334,13 +334,13 @@ def _build_dataloaders(cfg: DictConfig, *, codebook_size: int, pad_id: int):
                 if has_parquet:
                     shuffle_shards = bool(getattr(cfg.data, "shuffle_shards", True))
                     shuffle_rows = bool(getattr(cfg.data, "shuffle_rows", True))
-                    return IterableVQIndicesDataset(
+                    return IterableTokenizedDataset(
                         dataset_path=str(p),
                         max_length=max_len,
                         shuffle_shards=shuffle_shards,
                         shuffle_rows=shuffle_rows,
                     )
-            return VQIndicesDataset(dataset_path=str(path), max_length=max_len)
+            return TokenizedDataset(dataset_path=str(path), max_length=max_len)
 
         train_ds = _pick_dataset(str(cfg.data.train))
         eval_ds = _pick_dataset(str(cfg.data.eval)) if cfg.data.get("eval") else None

@@ -8,7 +8,7 @@ import torch
 from torch.utils.data import Dataset, IterableDataset, get_worker_info
 
 
-class BaseVQIndices:
+class BaseTokenizedDataset:
     """
     Mixin providing shared row parsing, padding, and optional coordinates handling.
     """
@@ -168,7 +168,7 @@ class BaseVQIndices:
         return out
 
 
-class VQIndicesDataset(Dataset, BaseVQIndices):
+class TokenizedDataset(Dataset, BaseTokenizedDataset):
     """Dataset for loading VQ indices from CSV or Parquet files.
 
     Indices are parsed from either a space-delimited string (CSV) or a
@@ -209,7 +209,7 @@ class VQIndicesDataset(Dataset, BaseVQIndices):
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         row = self.data.iloc[idx]
-        return BaseVQIndices._build_output_from_row(
+        return BaseTokenizedDataset._build_output_from_row(
             row, max_length=self.max_length, has_coords=self.has_coords
         )
 
@@ -266,7 +266,7 @@ class DummySequenceDataset(Dataset):
         return tokens.long(), labels.long()
 
 
-class IterableVQIndicesDataset(IterableDataset, BaseVQIndices):
+class IterableTokenizedDataset(IterableDataset, BaseTokenizedDataset):
     """Shard-wise iterable dataset over a directory of Parquet files.
 
     Loads a single Parquet shard at a time to bound memory use, applies
@@ -293,7 +293,7 @@ class IterableVQIndicesDataset(IterableDataset, BaseVQIndices):
         self.dataset_path = Path(dataset_path)
         if not self.dataset_path.is_dir():
             raise RuntimeError(
-                "IterableVQIndicesDataset expects a directory of Parquet files."
+                "IterableTokenizedDataset expects a directory of Parquet files."
             )
         self.max_length = int(max_length)
         self.shuffle_shards = bool(shuffle_shards)
@@ -410,7 +410,7 @@ class IterableVQIndicesDataset(IterableDataset, BaseVQIndices):
                 if emitted >= per_rank_cap:
                     break
                 row = df.iloc[i]
-                yield BaseVQIndices._build_output_from_row(
+                yield BaseTokenizedDataset._build_output_from_row(
                     row, max_length=self.max_length, has_coords=self.has_coords
                 )
                 emitted += 1
