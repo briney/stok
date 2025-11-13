@@ -513,11 +513,29 @@ def run_training(cfg: DictConfig):
 
     # Optionally load frozen geometric decoder for FAPE / eval metrics
     decoder = None
-    decoder_enabled = bool(getattr(cfg.model, "decoder", {}).get("enabled", False))
     want_fape = bool(getattr(cfg.train, "fape", {}).get("enabled", False))
+    # Default to False; eval-time decoding is opt-in via config/override
     want_eval_decode = bool(
-        getattr(cfg.train, "decoding", {}).get("eval_enabled", True)
+        getattr(cfg.train, "decoding", {}).get("eval_enabled", False)
     )
+    decoder_enabled = bool(getattr(cfg.model, "decoder", {}).get("enabled", False))
+
+    # Auto-enable the decoder when either FAPE or eval-time decoding is requested
+    if (want_fape or want_eval_decode) and not decoder_enabled:
+        if is_main:
+            printer(
+                "train.fape.enabled or train.decoding.eval_enabled is true, but "
+                "model.decoder.enabled=false; enabling decoder automatically."
+            )
+        try:
+            if "decoder" not in cfg.model:
+                cfg.model.decoder = OmegaConf.create({})
+            cfg.model.decoder.enabled = True
+        except Exception:
+            # Best-effort: proceed even if cfg is immutable
+            pass
+        decoder_enabled = True
+
     if decoder_enabled and (want_fape or want_eval_decode):
         try:
             from stok.models.decoder import load_pretrained_decoder  # defer import

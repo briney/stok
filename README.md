@@ -115,7 +115,7 @@ When training from Parquet, you can optionally include a `coordinates` column co
 - If present, the dataset yields an additional tensor `coords` with shape `[max_len, 3, 3]`, padded/truncated to `data.max_len` with `NaN`s.
 - If absent, the dataset omits the `coords` key; CSV inputs never include `coords`.
 
-When the geometric decoder is enabled and FAPE is turned on, the training loop will decode predicted structure tokens into coordinates and compute a FAPE loss against the provided `coords`. If the decoder is disabled, `coords` are only used for evaluation metrics (lDDT/TM/RMSD) when requested.
+When FAPE is enabled, the geometric decoder is auto‑enabled and the training loop decodes predicted structure tokens into coordinates to compute a FAPE loss against the provided `coords`. When eval‑time decoding is enabled, the decoder is also auto‑enabled to produce coordinates for structure metrics (lDDT/TM/RMSD). If neither FAPE nor eval‑time decoding is enabled, the decoder remains disabled.
 
 ### learning rate schedule
 
@@ -180,7 +180,7 @@ Notes:
 
 ## using the pre-trained decoder (FAPE and eval metrics)
 
-The decoder is optional and disabled by default. Enable it with Hydra overrides:
+The decoder is optional and is auto‑enabled whenever you enable FAPE or eval‑time decoding. You can also enable it explicitly if you want eval‑time structure metrics without FAPE:
 
 ```bash
 # enable decoder but metrics-only (no FAPE)
@@ -188,7 +188,6 @@ stok train model.decoder.enabled=true train.fape.enabled=false
 
 # two-stage training: start with token CE only, then add FAPE
 stok train \
-  model.decoder.enabled=true \
   train.fape.enabled=true \
   train.fape.start_step=50000 \
   train.fape.weight=0.1 \
@@ -204,7 +203,7 @@ stok train model.decoder.enabled=true model.decoder.path=/abs/path/decoder-lite.
 
 Notes:
 - The decoder runs frozen. Gradients flow through it back to the logits via Gumbel-Softmax selections.
-- For eval-time metrics, you can choose `argmax` or nucleus sampling (`top-p`) to obtain structure tokens before decoding:
+- For eval‑time metrics, set `train.decoding.eval_enabled=true` (default is false). You can choose `argmax` or nucleus sampling (`top-p`) to obtain structure tokens before decoding:
   ```bash
-  stok train model.decoder.enabled=true train.decoding.eval_enabled=true train.decoding.eval_method=top_p train.decoding.top_p=0.9
+  stok train train.decoding.eval_enabled=true train.decoding.eval_method=top_p train.decoding.top_p=0.9
   ```

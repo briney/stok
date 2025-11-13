@@ -48,7 +48,7 @@ gumbel:
   hard: false
 
 decoding:
-  eval_enabled: true
+  eval_enabled: false
   eval_method: "argmax"  # "argmax" | "top_p"
   top_p: 0.9
   temperature: 1.0
