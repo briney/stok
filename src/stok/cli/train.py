@@ -652,19 +652,19 @@ def run_training(cfg: DictConfig):
     console_enabled = True
     if console_cfg is not None:
         console_enabled = bool(console_cfg.get("enabled", True))
-    # Tee console output to both stdout and logs/train.log on main
+    # Console bar renders to stdout only; we log text lines separately to file
     log_file_handle = None
-    console_file = sys.stdout
     if is_main:
         log_file_handle = (io_dirs["logs"] / "train.log").open("a", encoding="utf-8")
-        console_file = _TeeIO(sys.stdout, log_file_handle)
     console = ConsoleLogger(
         total_steps=max_steps,
         initial_step=global_step,
         is_main=is_main,
         enabled=console_enabled,
-        file=console_file,
+        file=sys.stdout,
     )
+    if is_main and log_file_handle is not None:
+        print("Training started.", file=log_file_handle, flush=True)
 
     # Additional training accumulators (over the current log window)
     running_cls_loss = 0.0
@@ -791,6 +791,8 @@ def run_training(cfg: DictConfig):
                 if avg_fape_loss is not None:
                     msg += f" | fape {avg_fape_loss:.4f}"
                 console.train(msg)
+                if log_file_handle is not None:
+                    print(msg, file=log_file_handle, flush=True)
 
                 # W&B payload
                 if wb is not None:
@@ -986,6 +988,8 @@ def run_training(cfg: DictConfig):
                         avg_rmsd = eval_rmsd_sum / eval_struct_count
                         msg += f" | lDDT {avg_lddt:.3f} | TM {avg_tm:.3f} | RMSD {avg_rmsd:.3f}Å"
                     console.eval(msg)
+                    if log_file_handle is not None:
+                        print(msg, file=log_file_handle, flush=True)
                     if wb is not None:
                         payload: dict[str, float] = {
                             "eval/loss": float(eval_loss),
@@ -1053,6 +1057,8 @@ def run_training(cfg: DictConfig):
         )
         console.close()
         console.print("Training complete.")
+        if log_file_handle is not None:
+            print("Training complete.", file=log_file_handle, flush=True)
         # Close log file if opened
         if log_file_handle is not None:
             try:
