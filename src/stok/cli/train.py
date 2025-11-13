@@ -557,6 +557,8 @@ def run_training(cfg: DictConfig):
             freeze=bool(getattr(cfg.model.decoder, "freeze", True)),
             progress=is_main,
         )
+        if accelerator:
+            accelerator.wait_for_everyone()
         # Validate d_code matches classifier codebook dim
         with torch.no_grad():
             inferred_d_code = int(decoder.projector_in.weight.shape[1])  # type: ignore[attr-defined]

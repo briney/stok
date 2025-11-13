@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Literal
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from x_transformers import ContinuousTransformerWrapper, Encoder
 
@@ -167,17 +168,44 @@ def _ensure_downloaded(preset: str, *, progress: bool = True) -> Path:
     if local_path.exists() and local_path.is_file():
         return local_path
 
-    # download to temp then move to the local path
-    tmp_path = local_path.with_suffix(local_path.suffix + ".tmp")
-    try:
-        torch.hub.download_url_to_file(
-            url,
-            str(tmp_path),
-            progress=progress,
-        )
-        tmp_path.replace(local_path)
-    finally:
-        tmp_path.unlink(missing_ok=True)
+    # Determine distributed context (no try/except; torch is a dependency)
+    ddp = dist.is_available() and dist.is_initialized()
+    rank = dist.get_rank() if ddp else 0
+
+    def _download_to_final() -> None:
+        # download to temp then move to the local path (atomic within a filesystem)
+        tmp_path = local_path.with_suffix(local_path.suffix + ".tmp")
+        try:
+            torch.hub.download_url_to_file(
+                url,
+                str(tmp_path),
+                progress=progress,
+            )
+            # If another process already moved the file, tmp may be gone; tolerate it
+            if tmp_path.exists():
+                tmp_path.replace(local_path)
+            elif not local_path.exists():
+                # Defensive: download finished but file missing
+                raise FileNotFoundError(
+                    f"Decoder checkpoint missing after download: {tmp_path} -> {local_path}"
+                )
+        finally:
+            # Best-effort cleanup
+            tmp_path.unlink(missing_ok=True)
+
+    if ddp:
+        # Only rank 0 performs the download; others wait and reuse the cached file
+        if (rank == 0) and (not local_path.exists()):
+            _download_to_final()
+        dist.barrier()
+        if not local_path.exists():
+            raise FileNotFoundError(
+                f"Decoder checkpoint not found after distributed download: {local_path}"
+            )
+        return local_path
+
+    # Single-process path
+    _download_to_final()
 
     return local_path
 
