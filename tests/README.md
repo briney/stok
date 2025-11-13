@@ -71,6 +71,21 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
     - `model/final.pt`
   - Pass criteria: All artifacts exist in the expected subdirectories.
 
+- Click CLI smoke (`integration/test_click_cli.py`)
+  - Purpose: Ensure the Click-based CLI entrypoint runs and the `smoke-test` command succeeds with overrides.
+  - Scope: Invokes `stok` CLI `smoke-test` with a simple override and checks output contains `OK`.
+  - Pass criteria: Exit code 0 and `OK` in output.
+
+- Eval decoding auto-enable (`integration/test_eval_decoding_auto_enable.py`)
+  - Purpose: Verify that enabling eval-time decoding automatically enables the geometric decoder when not explicitly requested.
+  - Scope: Provides coords-backed Parquet data, sets `train.decoding.eval_enabled=true` without `model.decoder.enabled`, and supplies a decoder checkpoint path.
+  - Pass criteria: CLI exits with code 0 and prints `Training complete.`; decoder is auto-enabled internally.
+
+- Wrapped model eval decode (`integration/test_wrapped_model_eval_decode.py`)
+  - Purpose: Guard against accessing submodules on DDP/Accelerate-wrapped models by requiring unwrap before using `classifier.E`.
+  - Scope: Monkeypatches a fake accelerator that wraps the model and hides `.classifier`; runs a short programmatic training with eval-time decoding.
+  - Pass criteria: Training completes without `AttributeError` due to unwrap logic.
+
 ## Unit Tests
 
 - FAPE loss (`unit/test_fape_loss.py`)

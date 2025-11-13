@@ -562,10 +562,11 @@ def run_training(cfg: DictConfig):
         # Validate d_code matches classifier codebook dim
         with torch.no_grad():
             inferred_d_code = int(decoder.projector_in.weight.shape[1])  # type: ignore[attr-defined]
-            if inferred_d_code != int(model.classifier.E.shape[1]):
+            E = _unwrap_model(model, accelerator).classifier.E
+            if inferred_d_code != int(E.shape[1]):
                 raise RuntimeError(
                     f"Decoder d_code={inferred_d_code} does not match codebook dim "
-                    f"{int(model.classifier.E.shape[1])}"
+                    f"{int(E.shape[1])}"
                 )
 
     # Data
@@ -716,7 +717,7 @@ def run_training(cfg: DictConfig):
                     tau = _anneal_tau(global_step)
                     soft_codes = logits_to_soft_codes_gumbel(
                         outputs["logits"],  # [B, L, C]
-                        model.classifier.E,  # [C, d_code]
+                        _unwrap_model(model, accelerator).classifier.E,  # [C, d_code]
                         tau=float(tau),
                         hard=bool(getattr(cfg.train, "gumbel", {}).get("hard", False)),
                     )
@@ -884,10 +885,14 @@ def run_training(cfg: DictConfig):
                                 idx = sample_indices_top_p(
                                     probs, top_p=top_p, temperature=1.0
                                 )
-                                codes = indices_to_codes(model.classifier.E, idx)
+                                codes = indices_to_codes(
+                                    _unwrap_model(model, accelerator).classifier.E, idx
+                                )
                             else:
                                 idx = out["logits"].argmax(dim=-1)
-                                codes = indices_to_codes(model.classifier.E, idx)
+                                codes = indices_to_codes(
+                                    _unwrap_model(model, accelerator).classifier.E, idx
+                                )
                             pred_coords = decode_coords(decoder, codes, res_mask)  # type: ignore[arg-type]
                             out["pred_coords"] = pred_coords
 
