@@ -18,6 +18,7 @@ from stok.data.dataset import (
     IterableTokenizedDataset,
     TokenizedDataset,
 )
+from stok.models.decoder import load_pretrained_decoder
 from stok.models.stok import STokModel
 from stok.utils.codebook import load_codebook
 from stok.utils.console import ConsoleLogger
@@ -34,7 +35,7 @@ from stok.utils.tokenizer import Tokenizer
 
 def _maybe_get_accelerator():
     try:
-        from accelerate import Accelerator  # type: ignore
+        from accelerate import Accelerator
 
         return Accelerator()
     except Exception:
@@ -48,7 +49,7 @@ def _get_model_device(model: nn.Module, accelerator) -> torch.device:
     """
     if accelerator is not None:
         return accelerator.device
-    # Fall back to the device of the first parameter (or CPU if model is empty)
+    # fall back to the device of the first parameter (or CPU if model is empty)
     try:
         return next(model.parameters()).device
     except StopIteration:
@@ -64,7 +65,7 @@ def _build_scheduler(
     decay_steps: Optional[int],
     total_steps: int,
 ):
-    # Derive decay_steps if not provided
+    # derive decay_steps if not provided
     if decay_steps is None:
         decay_steps = max(0, int(total_steps) - int(warmup_steps) - int(stable_steps))
 
@@ -76,16 +77,16 @@ def _build_scheduler(
         raise ValueError("scheduler step counts must be non-negative")
 
     def lr_lambda(current_step: int):
-        # Warmup (0 -> 1)
+        # warmup phase (0 -> 1)
         if warmup_steps > 0 and current_step < warmup_steps:
             return float(current_step) / float(max(1, warmup_steps))
 
-        # Stable hold at 1.0
+        # stable hold at 1.0
         post_warmup = current_step - warmup_steps
         if stable_steps > 0 and post_warmup < stable_steps:
             return 1.0
 
-        # Decay phase (1 -> 0)
+        # decay phase (1 -> 0)
         t = post_warmup - stable_steps
         if decay_steps <= 0:
             return 1.0
@@ -143,7 +144,7 @@ def _unwrap_model(model: nn.Module, accelerator) -> nn.Module:
 
 
 def _collect_rng_state() -> dict[str, Any]:
-    # Convert numpy RNG state to only primitives/lists to be loadable with weights_only=True
+    # convert numpy RNG state to only primitives/lists to be loadable with weights_only=True
     np_state = list(np.random.get_state())
     try:
         # element 1 is the key array
@@ -160,7 +161,7 @@ def _collect_rng_state() -> dict[str, Any]:
         try:
             state["cuda"] = torch.cuda.get_rng_state_all()
         except Exception:
-            # On some backends/devices this may not be available
+            # on some backends/devices this may not be available
             pass
     return state
 
@@ -171,7 +172,7 @@ def _restore_rng_state(state: dict[str, Any]):
             random.setstate(state["python"])
         if "numpy" in state:
             np_state = state["numpy"]
-            # Accept both raw numpy state and listified variant
+            # accept both raw numpy state and "listified" variant
             if isinstance(np_state, (list, tuple)) and len(np_state) >= 5:
                 key = np_state[1]
                 if isinstance(key, list):
@@ -180,13 +181,13 @@ def _restore_rng_state(state: dict[str, Any]):
                     except Exception:
                         key = np.array(key)
                 np_state = (np_state[0], key, np_state[2], np_state[3], np_state[4])
-            np.random.set_state(np_state)  # type: ignore[arg-type]
+            np.random.set_state(np_state)
         if "torch" in state:
             torch.set_rng_state(state["torch"])
         if "cuda" in state and torch.cuda.is_available():
             torch.cuda.set_rng_state_all(state["cuda"])
     except Exception:
-        # Best-effort restore; ignore incompatibilities
+        # best-effort restore; ignore incompatibilities
         pass
 
 
@@ -195,7 +196,7 @@ def _save_checkpoint(
     *,
     model: nn.Module,
     optimizer: torch.optim.Optimizer,
-    scheduler: torch.optim.lr_scheduler._LRScheduler,  # type: ignore[attr-defined]
+    scheduler: torch.optim.lr_scheduler._LRScheduler,
     global_step: int,
     cfg: DictConfig,
     accelerator,
@@ -217,7 +218,7 @@ def _try_load_latest_checkpoint(
     *,
     model: nn.Module,
     optimizer: torch.optim.Optimizer,
-    scheduler: torch.optim.lr_scheduler._LRScheduler,  # type: ignore[attr-defined]
+    scheduler: torch.optim.lr_scheduler._LRScheduler,
     accelerator,
 ) -> int:
     """
@@ -226,7 +227,7 @@ def _try_load_latest_checkpoint(
     latest = ckpt_dir / "latest.pt"
     if not latest.exists():
         return 0
-    # All processes load to keep state in sync under DDP
+    # all processes load to keep state in sync under DDP
     try:
         ckpt = torch.load(latest.as_posix(), map_location="cpu")
         _unwrap_model(model, accelerator).load_state_dict(ckpt["model"])
@@ -236,7 +237,7 @@ def _try_load_latest_checkpoint(
             _restore_rng_state(ckpt["rng_state"])
         return int(ckpt.get("global_step", 0))
     except Exception:
-        # If anything goes wrong, start from scratch
+        # if anything goes wrong, start from scratch
         return 0
 
 
@@ -261,12 +262,12 @@ def _tokenize_and_align(
     ignore_index: int,
     pad_id: int,
 ):
-    # If using DummySequenceDataset, batch is tuples(tokens, labels)
+    # if using DummySequenceDataset, batch is tuples(tokens, labels)
     if tokenizer is None:
         tokens, labels = zip(*batch)  # type: ignore[arg-type]
         return torch.stack(tokens, dim=0), torch.stack(labels, dim=0)
 
-    # Else TokenizedDataset dicts with 'seq' and 'indices'
+    # else TokenizedDataset dicts with 'seq' and 'indices'
     input_ids = []
     label_ids = []
     coords_batch: list[torch.Tensor] = []
@@ -284,11 +285,11 @@ def _tokenize_and_align(
         )
         ids = enc["input_ids"][0]
 
-        # Build labels aligned to tokens: CLS/EOS/PAD -> ignore_index
+        # build labels aligned to tokens: CLS/EOS/PAD -> ignore_index
         L = ids.size(0)
         labels = torch.full((L,), ignore_index, dtype=torch.long)
 
-        # Copy only non-negative indices; positions 1..(1+copy_len) receive labels,
+        # copy only non-negative indices; positions 1..(1+copy_len) receive labels,
         # respecting truncation before EOS
         valid_indices = indices[indices >= 0]
         copy_len = min(int(valid_indices.numel()), max(0, L - 2))
@@ -297,7 +298,7 @@ def _tokenize_and_align(
 
         input_ids.append(ids)
         label_ids.append(labels)
-        # Optional coords tensor [max_len, 3, 3] if present
+        # optional coords tensor [max_len, 3, 3]
         c = item.get("coords")
         if c is not None and isinstance(c, torch.Tensor):
             coords_batch.append(c)
@@ -324,7 +325,7 @@ def _build_dataloaders(cfg: DictConfig, *, codebook_size: int, pad_id: int):
         # CSV/Parquet-backed dataset; tokenize in collate
         def _pick_dataset(path: str):
             p = Path(path)
-            # Heuristic: directory containing parquet shards -> Iterable; else map-style
+            # heuristic: directory containing parquet shards -> Iterable; else map-style
             if p.is_dir():
                 has_parquet = (
                     any(p.glob("*.parquet"))
@@ -357,7 +358,7 @@ def _build_dataloaders(cfg: DictConfig, *, codebook_size: int, pad_id: int):
 
         collate_fn = collate
     else:
-        # Fallback dummy data for quick smoke training
+        # fallback dummy data for quick smoke test
         train_ds = DummySequenceDataset(
             num_samples=512,
             seq_len=min(max_len, 256),
@@ -373,7 +374,7 @@ def _build_dataloaders(cfg: DictConfig, *, codebook_size: int, pad_id: int):
             pad_id=pad_id,
         )
 
-    # Configure shuffle depending on dataset type
+    # configure shuffle depending on dataset type
     is_iterable = isinstance(train_ds, IterableDataset)
     train_loader = DataLoader(
         train_ds,
@@ -406,10 +407,9 @@ def _maybe_wandb_login(cfg: DictConfig, *, is_main_process: bool):
     if cfg.train.get("wandb") and cfg.train.wandb.get("enabled", True):
         if is_main_process:
             try:
-                import wandb  # type: ignore
+                import wandb
 
-                # Trigger login prompt early; do not create a run yet
-                wandb.login()
+                wandb.login()  # trigger login prompt early; do not create a run yet
             except Exception:
                 # proceed without W&B
                 pass
@@ -422,7 +422,7 @@ def _maybe_init_wandb(
     if cfg.train.get("wandb") and cfg.train.wandb.get("enabled", True):
         if is_main_process:
             try:
-                import wandb  # type: ignore
+                import wandb
 
                 init_kwargs = dict(
                     project=cfg.train.wandb.get("project", "stok"),
@@ -434,7 +434,7 @@ def _maybe_init_wandb(
                 )
                 if logs_dir is not None:
                     os.environ["WANDB_DIR"] = logs_dir.as_posix()
-                    init_kwargs["dir"] = logs_dir.as_posix()  # type: ignore[index]
+                    init_kwargs["dir"] = logs_dir.as_posix()
                 wandb.init(**init_kwargs)
                 wb = wandb
             except Exception:
@@ -448,20 +448,10 @@ def run_training(cfg: DictConfig):
     is_main = accelerator.is_main_process if accelerator else True
     printer = accelerator.print if accelerator else print
 
-    # # Warn if deprecated/unused decoder config is present
-    # try:
-    #     if "decoder" in cfg.model:
-    #         printer(
-    #             "Warning: cfg.model.decoder is ignored. Decoder presets are selected "
-    #             "via model.codebook.preset and loaded with load_pretrained_decoder()."
-    #         )
-    # except Exception:
-    #     pass
-
-    # Prompt for W&B login early so the API key prompt happens immediately
+    # prompt for W&B login early so the API key prompt happens immediately
     _maybe_wandb_login(cfg, is_main_process=is_main)
 
-    # Warn when multiple GPUs are visible but only one process is active
+    # warn if multiple GPUs are visible but only one process is active
     if accelerator and is_main:
         world_size = getattr(accelerator, "num_processes", 1)
         if world_size == 1 and torch.cuda.device_count() > 1:
@@ -470,7 +460,7 @@ def run_training(cfg: DictConfig):
                 "Launch multi-GPU with: accelerate launch -m stok.train <overrides>"
             )
 
-    # Resolve project directories and persist config (main only)
+    # resolve project directories and save config (main only)
     io_dirs = _resolve_project_dirs(cfg)
     if is_main:
         _ensure_dirs(
@@ -486,7 +476,7 @@ def run_training(cfg: DictConfig):
     if accelerator:
         accelerator.wait_for_everyone()
 
-    # Load codebook and build model
+    # load codebook and build model
     codebook = load_codebook(
         preset=cfg.model.codebook.get("preset"),
         path=cfg.model.codebook.get("path"),
@@ -511,10 +501,10 @@ def run_training(cfg: DictConfig):
         norm_type=cfg.model.encoder.norm,
     )
 
-    # Optionally load frozen geometric decoder for FAPE / eval metrics
+    # load frozen geometric decoder for FAPE loss and/or eval metrics (optional)
     decoder = None
     want_fape = bool(getattr(cfg.train, "fape", {}).get("enabled", False))
-    # Default to False; eval-time decoding is opt-in via config/override
+    # default to False; eval-time decoding is opt-in via config/override
     want_eval_decode = bool(
         getattr(cfg.train, "decoding", {}).get("eval_enabled", False)
     )
@@ -538,19 +528,11 @@ def run_training(cfg: DictConfig):
             if "decoder" not in cfg.model:
                 cfg.model.decoder = OmegaConf.create({})
             cfg.model.decoder.enabled = True
-        except Exception:
-            # Best-effort: proceed even if cfg is immutable
+        except Exception:  # maybe config is immutable?
             pass
         decoder_enabled = True
 
     if decoder_enabled and (want_fape or want_eval_decode):
-        try:
-            from stok.models.decoder import load_pretrained_decoder  # defer import
-        except Exception as e:
-            raise RuntimeError(
-                "Decoder requested but missing dependency. Install x_transformers "
-                "or disable model.decoder.enabled."
-            ) from e
         # resolve preset/path
         dec_preset = getattr(
             cfg.model.decoder, "preset", None
@@ -566,7 +548,7 @@ def run_training(cfg: DictConfig):
         )
         if accelerator:
             accelerator.wait_for_everyone()
-        # Validate d_code matches classifier codebook dim
+        # check if d_code matches classifier codebook dim
         with torch.no_grad():
             inferred_d_code = int(decoder.projector_in.weight.shape[1])  # type: ignore[attr-defined]
             E = _unwrap_model(model, accelerator).classifier.E
@@ -576,12 +558,12 @@ def run_training(cfg: DictConfig):
                     f"{int(E.shape[1])}"
                 )
 
-    # Data
+    # data
     train_loader, eval_loader = _build_dataloaders(
         cfg, codebook_size=codebook_size, pad_id=cfg.model.encoder.pad_id
     )
 
-    # Optimizer
+    # optimizer
     optimizer = AdamW(
         model.parameters(),
         lr=cfg.train.optimizer.lr,
@@ -589,7 +571,7 @@ def run_training(cfg: DictConfig):
         weight_decay=cfg.train.optimizer.weight_decay,
     )
 
-    # Determine training steps
+    # determine training steps
     grad_accum_steps: int = cfg.train.get("grad_accum_steps", 1)
     if cfg.train.get("epochs") is not None:
         steps_per_epoch = math.ceil(len(train_loader))
@@ -597,7 +579,7 @@ def run_training(cfg: DictConfig):
     else:
         max_steps = int(cfg.train.get("num_steps", 10000))
 
-    # Build scheduler (WSD with decay selection)
+    # build scheduler (WSD with decay selection)
     sched_cfg = cfg.train.scheduler
     if not sched_cfg.get("decay"):
         raise ValueError(
@@ -627,7 +609,7 @@ def run_training(cfg: DictConfig):
         total_steps=max_steps,
     )
 
-    # Prepare with Accelerate (if available)
+    # prepare with Accelerate (if available)
     if accelerator:
         to_prepare = [model, optimizer, train_loader]
         if eval_loader is not None:
@@ -646,7 +628,7 @@ def run_training(cfg: DictConfig):
     # W&B
     wb = _maybe_init_wandb(cfg, is_main_process=is_main, logs_dir=io_dirs["logs"])
 
-    # Training loop
+    # train loop
     model.train()
     global_step = 0
     running_loss = 0.0
@@ -655,12 +637,12 @@ def run_training(cfg: DictConfig):
     ignore_index = int(cfg.model.classifier.ignore_index)
     grad_clip = float(cfg.train.get("grad_clip_norm", 1.0))
 
-    # console output (main process only; optional toggle)
+    # console output (main process only
     console_cfg = cfg.train.get("console")
     console_enabled = True
     if console_cfg is not None:
         console_enabled = bool(console_cfg.get("enabled", True))
-    # Console bar renders to stdout only; we log text lines separately to file
+    # console progbar renders to stdout only, text lines are also logged separately to file
     log_file_handle = None
     if is_main:
         log_file_handle = (io_dirs["logs"] / "train.log").open("a", encoding="utf-8")
@@ -674,7 +656,7 @@ def run_training(cfg: DictConfig):
     if is_main and log_file_handle is not None:
         print("Training started.", file=log_file_handle, flush=True)
 
-    # Additional training accumulators (over the current log window)
+    # additional training accumulators (over the current log window)
     running_cls_loss = 0.0
     running_cls_count = 0
     running_fape_loss = 0.0
@@ -697,7 +679,7 @@ def run_training(cfg: DictConfig):
 
     while global_step < max_steps:
         for batch in train_loader:
-            # Batch can be (tokens, labels) or (tokens, labels, coords)
+            # batch can be (tokens, labels) or (tokens, labels, coords)
             if isinstance(batch, (list, tuple)) and len(batch) == 3:
                 tokens, labels, coords = batch
             else:
@@ -710,11 +692,11 @@ def run_training(cfg: DictConfig):
                 if coords is not None:
                     coords = coords.to(_dev)
 
-            # Base model forward (token classification only)
+            # base model forward (token classification only)
             outputs = model(tokens=tokens, labels=labels, ignore_index=ignore_index)
             loss: torch.Tensor = outputs["loss"]
 
-            # Optional FAPE loss using frozen decoder (two-stage training)
+            # optional FAPE loss using frozen decoder
             if (
                 decoder is not None
                 and want_fape
@@ -732,13 +714,14 @@ def run_training(cfg: DictConfig):
                     )
                     bb = decoder(soft_codes, mask=mask)  # type: ignore[operator]
                     pred_coords = bb.view(bb.size(0), bb.size(1), 3, 3)
-                    # Quick diagnostic: fraction of NaNs in predicted coords
+                    # metric: fraction of NaNs in predicted coords
+                    # can happen when encoder isn't producing coherent outputs (yet!)
                     if log_pred_nan_frac:
                         pred_nan_frac_t = torch.isnan(pred_coords).float().mean()
                         outputs["pred_nan_frac"] = float(
                             pred_nan_frac_t.detach().item()
                         )
-                    # Early short-circuit if all predictions are NaN
+                    # don't bother with FAPE loss if all predicted coords are NaN
                     if torch.isnan(pred_coords).all():
                         outputs["pred_coords"] = pred_coords
                         outputs["structure_loss"] = None
@@ -759,7 +742,7 @@ def run_training(cfg: DictConfig):
                         "FAPE enabled but no coords in dataset; skipping FAPE term."
                     )
 
-            # Normalize by grad accumulation
+            # normalize by grad accumulation
             loss_to_backprop = loss / grad_accum_steps
             if accelerator:
                 accelerator.backward(loss_to_backprop)
@@ -778,7 +761,7 @@ def run_training(cfg: DictConfig):
 
             running_loss += float(loss.detach().item())
 
-            # Accumulate component losses
+            # accumulate loss components
             cls_loss_tensor = outputs.get("classification_loss")
             if cls_loss_tensor is not None:
                 running_cls_loss += float(cls_loss_tensor.detach().item())
@@ -793,13 +776,13 @@ def run_training(cfg: DictConfig):
                     running_pred_nan_frac_sum += float(_pnan)
                     running_pred_nan_frac_count += 1
 
-            # Logging
+            # logging
             if (global_step + 1) % log_interval == 0 and is_main:
                 with torch.no_grad():
                     acc = _compute_accuracy(outputs["logits"], labels, ignore_index)
                 lr = scheduler.get_last_lr()[0]
 
-                # Compute window averages
+                # compute averages over the current log interval
                 avg_total_loss = running_loss / max(1, log_interval)
                 avg_cls_loss = (
                     running_cls_loss / float(max(1, running_cls_count))
@@ -819,7 +802,7 @@ def run_training(cfg: DictConfig):
                 )
                 ppl = math.exp(avg_cls_loss) if avg_cls_loss is not None else None
 
-                # Console message
+                # build console log message
                 msg = f"step {global_step+1}/{max_steps} | loss {avg_total_loss:.4f} | acc {acc:.4f} | lr {lr:.2e}"
                 if avg_cls_loss is not None:
                     msg += f" | cls {avg_cls_loss:.4f} | ppl {ppl:.2f}"
@@ -831,7 +814,7 @@ def run_training(cfg: DictConfig):
                 if log_file_handle is not None:
                     print(msg, file=log_file_handle, flush=True)
 
-                # W&B payload
+                # W&B logging
                 if wb is not None:
                     payload: dict[str, float] = {
                         "train/loss": float(avg_total_loss),
@@ -847,7 +830,7 @@ def run_training(cfg: DictConfig):
                         payload["train/pred_nan_frac"] = float(avg_pred_nan_frac)
                     wb.log(payload, step=global_step + 1)
 
-                # Reset window accumulators
+                # reset accumulators for the next log interval
                 running_loss = 0.0
                 running_cls_loss = 0.0
                 running_cls_count = 0
@@ -856,7 +839,7 @@ def run_training(cfg: DictConfig):
                 running_pred_nan_frac_sum = 0.0
                 running_pred_nan_frac_count = 0
 
-            # Eval
+            # eval
             if (global_step + 1) % eval_interval == 0 and eval_loader is not None:
                 eval_loss_sum = 0.0
                 eval_acc_sum = 0.0
@@ -874,11 +857,11 @@ def run_training(cfg: DictConfig):
                 model.eval()
                 with torch.no_grad():
                     for ev in eval_loader:
-                        # Eval batch may also include coords
+                        # eval batch may also include coords (to compute structure-based metrics)
                         if isinstance(ev, (list, tuple)) and len(ev) == 3:
                             etok, elab, ecoords = ev
                         else:
-                            etok, elab = ev  # type: ignore[misc]
+                            etok, elab = ev
                             ecoords = None
                         if accelerator is None:
                             _dev = _get_model_device(model, accelerator)
@@ -893,7 +876,7 @@ def run_training(cfg: DictConfig):
                         )
                         eval_batches += 1.0
 
-                        # Accumulate component losses
+                        # accumulate loss components
                         cls_loss_tensor = out.get("classification_loss")
                         if cls_loss_tensor is not None:
                             eval_cls_loss_sum += float(cls_loss_tensor.item())
@@ -903,9 +886,9 @@ def run_training(cfg: DictConfig):
                             eval_fape_loss_sum += float(fape_loss_tensor.item())
                             eval_fape_batches += 1.0
 
-                        # Optional structure metrics if predicted coords available
+                        # optional structure metrics if predicted coords available
                         pred_coords = out.get("pred_coords", None)
-                        # If decoder is available and eval decoding is enabled, produce pred_coords
+                        # if decoder is available and eval decoding is enabled, produce pred_coords
                         if (
                             pred_coords is None
                             and decoder is not None
@@ -935,7 +918,7 @@ def run_training(cfg: DictConfig):
                                 codes = indices_to_codes(
                                     _unwrap_model(model, accelerator).classifier.E, idx
                                 )
-                            pred_coords = decode_coords(decoder, codes, res_mask)  # type: ignore[arg-type]
+                            pred_coords = decode_coords(decoder, codes, res_mask)
                             out["pred_coords"] = pred_coords
 
                         if pred_coords is not None and ecoords is not None:
@@ -944,7 +927,7 @@ def run_training(cfg: DictConfig):
                                 eval_pred_nan_frac_sum += float(_pnan_eval.item())
                                 eval_pred_nan_frac_count += 1.0
                             res_mask = etok != cfg.model.encoder.pad_id
-                            # Compute eval metrics; guard against numeric failures
+                            # compute eval metrics; guard against numeric failures (NaN, etc)
                             try:
                                 lddt_b, _ = lddt_ca(
                                     pred_coords, ecoords, residue_mask=res_mask
@@ -965,7 +948,7 @@ def run_training(cfg: DictConfig):
                                 eval_struct_count += 1.0
                             except Exception:
                                 pass
-                            # Also compute FAPE on eval if coords present (as a metric)
+                            # also compute FAPE on eval if predicted coords are present (as a metric)
                             try:
                                 fape_eval = fape_loss(
                                     pred_coords, ecoords, residue_mask=res_mask
@@ -976,7 +959,7 @@ def run_training(cfg: DictConfig):
                                 pass
                 model.train()
 
-                # Aggregate across processes if using Accelerate
+                # aggregate across processes if using Accelerate
                 if accelerator:
                     metrics_device = accelerator.device
                     metrics_local = torch.tensor(
@@ -1072,7 +1055,7 @@ def run_training(cfg: DictConfig):
 
             global_step += 1
             console.step(1)
-            # Periodic checkpointing
+            # checkpointing
             ckpt_steps = cfg.train.get("checkpoint_steps")
             if (
                 is_main
@@ -1090,7 +1073,7 @@ def run_training(cfg: DictConfig):
                     cfg=cfg,
                     accelerator=accelerator,
                 )
-                # Update latest pointer
+                # update latest pointer
                 try:
                     shutil.copyfile(
                         step_path.as_posix(),
@@ -1104,7 +1087,7 @@ def run_training(cfg: DictConfig):
                 break
 
     if is_main:
-        # Final checkpoint
+        # final checkpoint
         final_path = io_dirs["model"] / "final.pt"
         _save_checkpoint(
             final_path,
@@ -1119,7 +1102,7 @@ def run_training(cfg: DictConfig):
         console.print("Training complete.")
         if log_file_handle is not None:
             print("Training complete.", file=log_file_handle, flush=True)
-        # Close log file if opened
+        # close log file if opened
         if log_file_handle is not None:
             try:
                 log_file_handle.close()
