@@ -81,3 +81,28 @@ def test_fape_nan_in_ground_truth_equals_explicit_mask():
     assert torch.allclose(loss_inferred, loss_explicit, atol=1e-6, rtol=1e-6)
 
 
+def test_fape_nan_in_predictions_all_nan_returns_zero_and_finite():
+    B, L = 2, 6
+    true_coords = _stable_ncac_coords(B, L)
+    pred_coords = torch.full_like(true_coords, float("nan"))
+
+    loss = fape_loss(pred_coords, true_coords)
+    assert torch.isfinite(loss)
+    assert torch.allclose(loss, torch.tensor(0.0, dtype=loss.dtype), atol=0.0, rtol=0.0)
+
+
+def test_fape_nan_in_predictions_partial():
+    B, L = 2, 8
+    true_coords = _stable_ncac_coords(B, L)
+    pred_coords = true_coords.clone()
+    # Make first half finite but slightly off; second half NaN
+    delta = torch.zeros_like(pred_coords)
+    delta[:, : L // 2, :, :] = 0.2
+    pred_coords[:, : L // 2, :, :] = true_coords[:, : L // 2, :, :] + delta[:, : L // 2, :, :]
+    pred_coords[:, L // 2 :, :, :] = float("nan")
+
+    loss = fape_loss(pred_coords, true_coords)
+    assert torch.isfinite(loss)
+    # With perturbations on valid half, expect positive loss
+    assert loss.item() > 0.0
+

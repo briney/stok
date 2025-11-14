@@ -68,18 +68,26 @@ def fape_loss(
     T_pred = frames_from_ncac(pred_coords)
     T_true = frames_from_ncac(true_coords)
 
-    # 2) Build masks (valid residues/atoms). Default: infer from GT NaNs
+    # 2) Build masks (valid residues/atoms). Default: infer from GT finiteness
     if residue_mask is None:
-        residue_valid = ~torch.isnan(true_coords).any(dim=(-2, -1))  # [B, L]
+        residue_valid_true = torch.isfinite(true_coords).all(dim=(-2, -1))  # [B, L]
+        residue_valid = residue_valid_true
     else:
         residue_valid = residue_mask.to(torch.bool)
+
+    # Also require predicted residues to be finite
+    residue_valid_pred = torch.isfinite(pred_coords).all(dim=(-2, -1))  # [B, L]
+    residue_valid = residue_valid & residue_valid_pred
 
     # Set invalid frames to identity to avoid NaNs in transforms
     T_pred = T_pred.mask(~residue_valid)
     T_true = T_true.mask(~residue_valid)
 
     pair_mask = residue_valid[:, :, None] & residue_valid[:, None, :]  # [B, L, L]
-    atom_valid = ~torch.isnan(true_coords).any(dim=-1)  # [B, L, 3]
+    # Atom validity requires both true and predicted atoms to be finite
+    atom_valid_true = torch.isfinite(true_coords).all(dim=-1)  # [B, L, 3]
+    atom_valid_pred = torch.isfinite(pred_coords).all(dim=-1)  # [B, L, 3]
+    atom_valid = atom_valid_true & atom_valid_pred  # [B, L, 3]
     full_mask = pair_mask[:, :, :, None] & atom_valid[:, None, :, :]  # [B, Li, Lj, 3]
 
     # 3) Transform all atoms j into all frames i (global pairwise)

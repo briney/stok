@@ -518,6 +518,13 @@ def run_training(cfg: DictConfig):
     want_eval_decode = bool(
         getattr(cfg.train, "decoding", {}).get("eval_enabled", False)
     )
+    # FAPE behavior toggles (with safe defaults)
+    ignore_non_finite_fape = bool(
+        getattr(cfg.train, "fape", {}).get("ignore_non_finite", True)
+    )
+    log_pred_nan_frac = bool(
+        getattr(cfg.train, "fape", {}).get("log_pred_nan_frac", True)
+    )
     decoder_enabled = bool(getattr(cfg.model, "decoder", {}).get("enabled", False))
 
     # Auto-enable the decoder when either FAPE or eval-time decoding is requested
@@ -672,6 +679,8 @@ def run_training(cfg: DictConfig):
     running_cls_count = 0
     running_fape_loss = 0.0
     running_fape_count = 0
+    running_pred_nan_frac_sum = 0.0
+    running_pred_nan_frac_count = 0
 
     # Gumbel temperature schedule
     def _anneal_tau(step: int) -> float:
@@ -723,14 +732,28 @@ def run_training(cfg: DictConfig):
                     )
                     bb = decoder(soft_codes, mask=mask)  # type: ignore[operator]
                     pred_coords = bb.view(bb.size(0), bb.size(1), 3, 3)
-                    fape = fape_loss(
-                        pred_coords=pred_coords,
-                        true_coords=coords,
-                        residue_mask=mask,
-                    )
-                    outputs["pred_coords"] = pred_coords
-                    outputs["structure_loss"] = fape
-                    loss = loss + float(cfg.train.fape.weight) * fape
+                    # Quick diagnostic: fraction of NaNs in predicted coords
+                    if log_pred_nan_frac:
+                        pred_nan_frac_t = torch.isnan(pred_coords).float().mean()
+                        outputs["pred_nan_frac"] = float(
+                            pred_nan_frac_t.detach().item()
+                        )
+                    # Early short-circuit if all predictions are NaN
+                    if torch.isnan(pred_coords).all():
+                        outputs["pred_coords"] = pred_coords
+                        outputs["structure_loss"] = None
+                    else:
+                        fape = fape_loss(
+                            pred_coords=pred_coords,
+                            true_coords=coords,
+                            residue_mask=mask,
+                        )
+                        outputs["pred_coords"] = pred_coords
+                        if ignore_non_finite_fape and not torch.isfinite(fape).item():
+                            outputs["structure_loss"] = None
+                        else:
+                            outputs["structure_loss"] = fape
+                            loss = loss + float(cfg.train.fape.weight) * fape
                 elif is_main and (global_step == 0):
                     printer(
                         "FAPE enabled but no coords in dataset; skipping FAPE term."
@@ -764,6 +787,11 @@ def run_training(cfg: DictConfig):
             if fape_loss_tensor is not None:
                 running_fape_loss += float(fape_loss_tensor.detach().item())
                 running_fape_count += 1
+            if log_pred_nan_frac:
+                _pnan = outputs.get("pred_nan_frac")
+                if _pnan is not None:
+                    running_pred_nan_frac_sum += float(_pnan)
+                    running_pred_nan_frac_count += 1
 
             # Logging
             if (global_step + 1) % log_interval == 0 and is_main:
@@ -783,6 +811,12 @@ def run_training(cfg: DictConfig):
                     if running_fape_count > 0
                     else None
                 )
+                avg_pred_nan_frac = (
+                    running_pred_nan_frac_sum
+                    / float(max(1, running_pred_nan_frac_count))
+                    if running_pred_nan_frac_count > 0
+                    else None
+                )
                 ppl = math.exp(avg_cls_loss) if avg_cls_loss is not None else None
 
                 # Console message
@@ -791,6 +825,8 @@ def run_training(cfg: DictConfig):
                     msg += f" | cls {avg_cls_loss:.4f} | ppl {ppl:.2f}"
                 if avg_fape_loss is not None:
                     msg += f" | fape {avg_fape_loss:.4f}"
+                if log_pred_nan_frac and (avg_pred_nan_frac is not None):
+                    msg += f" | pnan {avg_pred_nan_frac:.3f}"
                 console.train(msg)
                 if log_file_handle is not None:
                     print(msg, file=log_file_handle, flush=True)
@@ -807,6 +843,8 @@ def run_training(cfg: DictConfig):
                         payload["train/ppl"] = float(ppl)
                     if avg_fape_loss is not None:
                         payload["train/fape_loss"] = float(avg_fape_loss)
+                    if log_pred_nan_frac and (avg_pred_nan_frac is not None):
+                        payload["train/pred_nan_frac"] = float(avg_pred_nan_frac)
                     wb.log(payload, step=global_step + 1)
 
                 # Reset window accumulators
@@ -815,6 +853,8 @@ def run_training(cfg: DictConfig):
                 running_cls_count = 0
                 running_fape_loss = 0.0
                 running_fape_count = 0
+                running_pred_nan_frac_sum = 0.0
+                running_pred_nan_frac_count = 0
 
             # Eval
             if (global_step + 1) % eval_interval == 0 and eval_loader is not None:
@@ -829,6 +869,8 @@ def run_training(cfg: DictConfig):
                 eval_tm_sum = 0.0
                 eval_rmsd_sum = 0.0
                 eval_struct_count = 0.0
+                eval_pred_nan_frac_sum = 0.0
+                eval_pred_nan_frac_count = 0.0
                 model.eval()
                 with torch.no_grad():
                     for ev in eval_loader:
@@ -897,6 +939,10 @@ def run_training(cfg: DictConfig):
                             out["pred_coords"] = pred_coords
 
                         if pred_coords is not None and ecoords is not None:
+                            if log_pred_nan_frac:
+                                _pnan_eval = torch.isnan(pred_coords).float().mean()
+                                eval_pred_nan_frac_sum += float(_pnan_eval.item())
+                                eval_pred_nan_frac_count += 1.0
                             res_mask = etok != cfg.model.encoder.pad_id
                             # Compute eval metrics; guard against numeric failures
                             try:
@@ -980,6 +1026,11 @@ def run_training(cfg: DictConfig):
                 eval_ppl = (
                     math.exp(eval_cls_loss) if eval_cls_loss is not None else None
                 )
+                eval_pred_nan_frac = (
+                    eval_pred_nan_frac_sum / max(1.0, eval_pred_nan_frac_count)
+                    if eval_pred_nan_frac_count > 0
+                    else None
+                )
 
                 if is_main:
                     msg = f"eval | loss {eval_loss:.4f} | acc {eval_acc:.4f}"
@@ -987,6 +1038,8 @@ def run_training(cfg: DictConfig):
                         msg += f" | cls {eval_cls_loss:.4f} | ppl {eval_ppl:.2f}"
                     if eval_fape_loss is not None:
                         msg += f" | fape {eval_fape_loss:.4f}"
+                    if log_pred_nan_frac and (eval_pred_nan_frac is not None):
+                        msg += f" | pnan {eval_pred_nan_frac:.3f}"
                     if eval_struct_count > 0:
                         avg_lddt = eval_lddt_sum / eval_struct_count
                         avg_tm = eval_tm_sum / eval_struct_count
@@ -1005,6 +1058,8 @@ def run_training(cfg: DictConfig):
                             payload["eval/ppl"] = float(eval_ppl)
                         if eval_fape_loss is not None:
                             payload["eval/fape_loss"] = float(eval_fape_loss)
+                        if log_pred_nan_frac and (eval_pred_nan_frac is not None):
+                            payload["eval/pred_nan_frac"] = float(eval_pred_nan_frac)
                         if eval_struct_count > 0:
                             payload["eval/lddt"] = float(
                                 eval_lddt_sum / eval_struct_count
