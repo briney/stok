@@ -179,7 +179,13 @@ class TokenizedDataset(Dataset, BaseTokenizedDataset):
         max_length: Maximum number of indices to keep (padding with -1).
     """
 
-    def __init__(self, dataset_path: str, max_length: int):
+    def __init__(
+        self,
+        dataset_path: str,
+        max_length: int,
+        *,
+        load_coords: bool = True,
+    ):
         p = Path(dataset_path)
         suffix = p.suffix.lower()
 
@@ -202,7 +208,9 @@ class TokenizedDataset(Dataset, BaseTokenizedDataset):
                 ) from e
         self.max_length = max_length
         # Coordinates are only supported from Parquet-backed datasets
-        self.has_coords = self._is_parquet and ("coordinates" in self.data.columns)
+        self.has_coords = bool(load_coords) and self._is_parquet and (
+            "coordinates" in self.data.columns
+        )
 
     def __len__(self):
         return len(self.data)
@@ -289,6 +297,7 @@ class IterableTokenizedDataset(IterableDataset, BaseTokenizedDataset):
         shuffle_shards: bool = True,
         shuffle_rows: bool = True,
         seed: int = 0,
+        load_coords: bool = True,
     ):
         self.dataset_path = Path(dataset_path)
         if not self.dataset_path.is_dir():
@@ -300,6 +309,8 @@ class IterableTokenizedDataset(IterableDataset, BaseTokenizedDataset):
         self.shuffle_rows = bool(shuffle_rows)
         self.seed = int(seed)
         self._epoch = -1
+        # user-intent flag for whether to load coordinates at all
+        self._load_coords = bool(load_coords)
 
         # enumerate shard files and stats
         shard_paths = sorted(
@@ -327,6 +338,7 @@ class IterableTokenizedDataset(IterableDataset, BaseTokenizedDataset):
                 pass
         self._offsets = np.cumsum([0] + self._rows_per_shard[:-1]).tolist()
         self._total_rows = int(sum(self._rows_per_shard))
+        # Track whether the directory has any coordinates column at all.
         self.has_coords = ("coordinates" in cols_union) if len(cols_union) > 0 else True
 
     def __len__(self) -> int:
@@ -402,7 +414,8 @@ class IterableTokenizedDataset(IterableDataset, BaseTokenizedDataset):
 
             # read only required columns
             want_cols = ["pid", "protein_sequence", "indices"]
-            if self.has_coords:
+            use_coords = self.has_coords and self._load_coords
+            if use_coords:
                 want_cols.append("coordinates")
             df = pd.read_parquet(spath.as_posix(), columns=want_cols)
 
@@ -411,6 +424,8 @@ class IterableTokenizedDataset(IterableDataset, BaseTokenizedDataset):
                     break
                 row = df.iloc[i]
                 yield BaseTokenizedDataset._build_output_from_row(
-                    row, max_length=self.max_length, has_coords=self.has_coords
+                    row,
+                    max_length=self.max_length,
+                    has_coords=use_coords,
                 )
                 emitted += 1

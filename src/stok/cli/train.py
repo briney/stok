@@ -318,6 +318,12 @@ def _build_dataloaders(cfg: DictConfig, *, codebook_size: int, pad_id: int):
     pin_memory: bool = cfg.data.pin_memory
     ignore_index: int = cfg.model.classifier.ignore_index
 
+    # resolve dataloader buffering
+    prefetch_factor: int = int(getattr(cfg.data, "prefetch_factor", 2))
+
+    # resolve whether to load 3D coordinates from disk
+    user_load_coords = getattr(cfg.data, "load_coords", None)
+
     tokenizer: Optional[Tokenizer] = None
     collate_fn = None
 
@@ -340,8 +346,13 @@ def _build_dataloaders(cfg: DictConfig, *, codebook_size: int, pad_id: int):
                         max_length=max_len,
                         shuffle_shards=shuffle_shards,
                         shuffle_rows=shuffle_rows,
+                        load_coords=bool(user_load_coords),
                     )
-            return TokenizedDataset(dataset_path=str(path), max_length=max_len)
+            return TokenizedDataset(
+                dataset_path=str(path),
+                max_length=max_len,
+                load_coords=bool(user_load_coords),
+            )
 
         train_ds = _pick_dataset(str(cfg.data.train))
         eval_ds = _pick_dataset(str(cfg.data.eval)) if cfg.data.get("eval") else None
@@ -376,26 +387,29 @@ def _build_dataloaders(cfg: DictConfig, *, codebook_size: int, pad_id: int):
 
     # configure shuffle depending on dataset type
     is_iterable = isinstance(train_ds, IterableDataset)
+    # only meaningful for multi-process loading
+    dl_kwargs = {
+        "batch_size": batch_size,
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+        "collate_fn": collate_fn,
+        "persistent_workers": (num_workers > 0),
+    }
+    if num_workers > 0 and prefetch_factor is not None and prefetch_factor > 0:
+        dl_kwargs["prefetch_factor"] = prefetch_factor
+
     train_loader = DataLoader(
         train_ds,
-        batch_size=batch_size,
         shuffle=not is_iterable,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        collate_fn=collate_fn,
         drop_last=True,
-        persistent_workers=(num_workers > 0),
+        **dl_kwargs,
     )
     eval_loader = (
         DataLoader(
             eval_ds,
-            batch_size=batch_size,
             shuffle=False,
-            num_workers=num_workers,
-            pin_memory=pin_memory,
-            collate_fn=collate_fn,
             drop_last=False,
-            persistent_workers=(num_workers > 0),
+            **dl_kwargs,
         )
         if eval_ds is not None
         else None

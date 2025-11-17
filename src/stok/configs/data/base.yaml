@@ -4,6 +4,10 @@ num_workers: 4
 pin_memory: true
 
 
+load_coords: null      # null=auto; false/true to force coordinates loading
+prefetch_factor: 4     # per-worker prefetch depth (only used when num_workers > 0)
+
+
 # file paths for datasets
 train: null   # path to training CSV/Parquet (pid, protein_sequence, indices)
 eval: null    # path to validation CSV/Parquet
