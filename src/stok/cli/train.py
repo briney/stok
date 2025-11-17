@@ -509,9 +509,6 @@ def run_training(cfg: DictConfig):
         getattr(cfg.train, "decoding", {}).get("eval_enabled", False)
     )
     # FAPE behavior toggles (with safe defaults)
-    ignore_non_finite_fape = bool(
-        getattr(cfg.train, "fape", {}).get("ignore_non_finite", True)
-    )
     log_pred_nan_frac = bool(
         getattr(cfg.train, "fape", {}).get("log_pred_nan_frac", True)
     )
@@ -732,10 +729,10 @@ def run_training(cfg: DictConfig):
                             residue_mask=mask,
                         )
                         outputs["pred_coords"] = pred_coords
-                        if ignore_non_finite_fape and not torch.isfinite(fape).item():
-                            outputs["structure_loss"] = None
-                        else:
-                            outputs["structure_loss"] = fape
+                        # Always expose FAPE value (even if NaN/Inf) for logging
+                        outputs["structure_loss"] = fape
+                        # Only add finite FAPE to the optimization loss
+                        if torch.isfinite(fape).item():
                             loss = loss + float(cfg.train.fape.weight) * fape
                 elif is_main and (global_step == 0):
                     printer(

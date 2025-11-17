@@ -40,7 +40,6 @@ fape:
   enabled: false
   start_step: 0
   weight: 0.1
-  ignore_non_finite: true
   log_pred_nan_frac: true
 
 gumbel:
