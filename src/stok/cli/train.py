@@ -584,8 +584,22 @@ def run_training(cfg: DictConfig):
 
     # determine training steps
     grad_accum_steps: int = cfg.train.get("grad_accum_steps", 1)
+    # derive steps_per_epoch when possible (used for both max_steps and logging)
+    steps_per_epoch: Optional[int] = None
+    try:
+        steps_per_epoch = math.ceil(len(train_loader))  # type: ignore[arg-type]
+        if steps_per_epoch <= 0:
+            steps_per_epoch = None
+    except TypeError:
+        # len(train_loader) may be undefined for some iterable datasets
+        steps_per_epoch = None
+
     if cfg.train.get("epochs") is not None:
-        steps_per_epoch = math.ceil(len(train_loader))
+        if steps_per_epoch is None:
+            raise ValueError(
+                "cfg.train.epochs is set but steps_per_epoch could not be derived "
+                "from the train dataloader."
+            )
         max_steps = int(cfg.train.epochs) * steps_per_epoch
     else:
         max_steps = int(cfg.train.get("num_steps", 10000))
@@ -690,6 +704,12 @@ def run_training(cfg: DictConfig):
 
     while global_step < max_steps:
         for batch in train_loader:
+            # step/epoch bookkeeping (global_step is zero-based)
+            current_step = global_step + 1
+            current_epoch: Optional[float] = None
+            if steps_per_epoch is not None:
+                current_epoch = float(current_step) / float(steps_per_epoch)
+
             # batch can be (tokens, labels) or (tokens, labels, coords)
             if isinstance(batch, (list, tuple)) and len(batch) == 3:
                 tokens, labels, coords = batch
@@ -788,7 +808,7 @@ def run_training(cfg: DictConfig):
                     running_pred_nan_frac_count += 1
 
             # logging
-            if (global_step + 1) % log_interval == 0 and is_main:
+            if current_step % log_interval == 0 and is_main:
                 with torch.no_grad():
                     acc = _compute_accuracy(outputs["logits"], labels, ignore_index)
                 lr = scheduler.get_last_lr()[0]
@@ -814,7 +834,14 @@ def run_training(cfg: DictConfig):
                 ppl = math.exp(avg_cls_loss) if avg_cls_loss is not None else None
 
                 # build console log message
-                msg = f"step {global_step+1}/{max_steps} | loss {avg_total_loss:.4f} | acc {acc:.4f} | lr {lr:.2e}"
+                msg = f"step {current_step}/{max_steps}"
+                if current_epoch is not None:
+                    msg += f" | epoch {current_epoch:.3f}"
+                msg += (
+                    f" | loss {avg_total_loss:.4f}"
+                    f" | acc {acc:.4f}"
+                    f" | lr {lr:.2e}"
+                )
                 if avg_cls_loss is not None:
                     msg += f" | cls {avg_cls_loss:.4f} | ppl {ppl:.2f}"
                 if avg_fape_loss is not None:
@@ -839,7 +866,9 @@ def run_training(cfg: DictConfig):
                         payload["train/fape_loss"] = float(avg_fape_loss)
                     if log_pred_nan_frac and (avg_pred_nan_frac is not None):
                         payload["train/pred_nan_frac"] = float(avg_pred_nan_frac)
-                    wb.log(payload, step=global_step + 1)
+                    if current_epoch is not None:
+                        payload["train/epoch"] = float(current_epoch)
+                    wb.log(payload, step=current_step)
 
                 # reset accumulators for the next log interval
                 running_loss = 0.0
@@ -851,7 +880,7 @@ def run_training(cfg: DictConfig):
                 running_pred_nan_frac_count = 0
 
             # eval
-            if (global_step + 1) % eval_interval == 0 and eval_loader is not None:
+            if current_step % eval_interval == 0 and eval_loader is not None:
                 eval_loss_sum = 0.0
                 eval_acc_sum = 0.0
                 eval_batches = 0.0
@@ -1027,7 +1056,14 @@ def run_training(cfg: DictConfig):
                 )
 
                 if is_main:
-                    msg = f"eval | loss {eval_loss:.4f} | acc {eval_acc:.4f}"
+                    if current_epoch is not None:
+                        msg = (
+                            f"eval | epoch {current_epoch:.3f}"
+                            f" | loss {eval_loss:.4f}"
+                            f" | acc {eval_acc:.4f}"
+                        )
+                    else:
+                        msg = f"eval | loss {eval_loss:.4f} | acc {eval_acc:.4f}"
                     if eval_cls_loss is not None and eval_ppl is not None:
                         msg += f" | cls {eval_cls_loss:.4f} | ppl {eval_ppl:.2f}"
                     if eval_fape_loss is not None:
@@ -1062,7 +1098,9 @@ def run_training(cfg: DictConfig):
                             payload["eval/rmsd"] = float(
                                 eval_rmsd_sum / eval_struct_count
                             )
-                        wb.log(payload, step=global_step + 1)
+                        if current_epoch is not None:
+                            payload["eval/epoch"] = float(current_epoch)
+                        wb.log(payload, step=current_step)
 
             global_step += 1
             console.step(1)

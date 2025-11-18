@@ -38,7 +38,12 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
 - CLI training with CSV (`integration/test_cli_train_with_csv.py`)
   - Purpose: End-to-end training on a tiny real CSV-backed dataset to validate tokenizer alignment and `TokenizedDataset` integration.
   - Scope: Generates small `train.csv` and `eval.csv` with columns `pid,protein_sequence,indices`, sets a small `data.max_len` and indices length (`max_len-2`), uses the same tiny model overrides, and triggers evaluation (`train.eval_steps=2`).
-  - Pass criteria: CLI exits with code 0, prints an eval line (`eval | loss ...`), and ends with `Training complete.`.
+  - Pass criteria: CLI exits with code 0, prints an eval line that includes epoch and loss (e.g., `eval | epoch ... | loss ...`), and ends with `Training complete.`.
+
+- CLI training with CSV (variable-length sequences) (`integration/test_cli_train_with_csv_varlen.py`)
+  - Purpose: Ensure CSV-backed training works correctly when protein sequence lengths vary and indices are truncated/padded consistently with `data.max_len`.
+  - Scope: Generates small `train.csv` and `eval.csv` with variable-length sequences, fixes the indices vector length to `max_len-2`, and reuses the tiny model and data loader overrides from the main CSV test to exercise tokenization and alignment under length variation.
+  - Pass criteria: CLI exits with code 0 and ends with `Training complete.`; no shape or alignment errors occur despite varying raw sequence lengths.
 
 - CLI training with Parquet (`integration/test_cli_train_with_parquet.py`)
   - Purpose: End-to-end training on a tiny real Parquet-backed dataset to validate tokenizer alignment and `TokenizedDataset` integration for nested list indices.

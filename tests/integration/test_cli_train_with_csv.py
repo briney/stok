@@ -58,7 +58,9 @@ def test_cli_train_with_csv_e2e(tmp_path):
 
     result = runner.invoke(cli, ["train", *overrides])  # type: ignore[arg-type]
     assert result.exit_code == 0, result.output
-    assert "eval | loss" in result.output
+    # eval line should be present and include epoch and loss
+    assert "eval | epoch" in result.output
+    assert " | loss " in result.output
     assert "Training complete." in result.output
 
 
