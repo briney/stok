@@ -207,3 +207,41 @@ Notes:
   ```bash
   stok train train.decoding.eval_enabled=true train.decoding.eval_method=top_p train.decoding.top_p=0.9
   ```
+
+## multiple eval datasets
+
+You can run in-training evaluation on multiple datasets, each logged separately.
+
+Config (`data.eval` as a dict of named datasets):
+
+```yaml
+data:
+  eval:
+    validation: /abs/path/val.parquet
+    test:
+      path: /abs/path/test.parquet
+      batch_size: 16   # optional per-dataset override
+      load_coords: true
+```
+
+CLI overrides (Hydra) to add or set datasets:
+
+```bash
+# simple paths
+stok train data.train=/abs/path/train.csv \
+  +data.eval.validation=/abs/path/val.csv \
+  +data.eval.test=/abs/path/test.csv
+
+# nested options
+stok train \
+  +data.eval.validation.path=/abs/path/val.parquet \
+  +data.eval.validation.batch_size=8
+
+# remove a dataset defined in config
+stok train ~data.eval.validation
+```
+
+Logging/metrics:
+
+- Console/W&B keys are namespaced: `eval/{name}/loss`, `eval/{name}/acc`, etc.
+- Eval log lines include step then epoch: `eval/validation | step 200 | epoch 2.0 | loss ...`.

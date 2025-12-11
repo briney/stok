@@ -1,8 +1,10 @@
 import math
 
+import pytest
 import torch
+from omegaconf import OmegaConf
 
-from stok.cli.train import _build_scheduler, _compute_accuracy
+from stok.cli.train import _build_scheduler, _compute_accuracy, _parse_eval_configs
 
 
 def test_build_scheduler_warmup_then_cosine_decay():
@@ -96,5 +98,31 @@ def test_compute_accuracy_with_ignore_index():
     labels = torch.tensor([ignore_index, 1, 1])
     acc = _compute_accuracy(logits, labels, ignore_index)
     assert math.isclose(acc, 0.5, rel_tol=1e-6, abs_tol=1e-6)
+
+
+def test_parse_eval_configs_supports_legacy_string():
+    cfg = OmegaConf.create({"data": {"eval": "/path/to/eval"}})
+    parsed = _parse_eval_configs(cfg)
+    assert parsed == {"default": {"path": "/path/to/eval"}}
+
+
+def test_parse_eval_configs_handles_dict_of_paths():
+    cfg = OmegaConf.create({"data": {"eval": {"val": "/p1", "test": "/p2"}}})
+    parsed = _parse_eval_configs(cfg)
+    assert parsed == {"val": {"path": "/p1"}, "test": {"path": "/p2"}}
+
+
+def test_parse_eval_configs_handles_nested_configs():
+    cfg = OmegaConf.create(
+        {"data": {"eval": {"val": {"path": "/p1", "batch_size": 8}}}}
+    )
+    parsed = _parse_eval_configs(cfg)
+    assert parsed == {"val": {"path": "/p1", "batch_size": 8}}
+
+
+def test_parse_eval_configs_rejects_invalid_type():
+    cfg = OmegaConf.create({"data": {"eval": 123}})
+    with pytest.raises(ValueError):
+        _parse_eval_configs(cfg)
 
 

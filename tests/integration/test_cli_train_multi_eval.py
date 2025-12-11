@@ -18,20 +18,24 @@ def _write_csv(path: Path, n_rows: int, seq_min_len: int, seq_max_len: int, indi
             writer.writerow([f"p{i}", seq, indices_str])
 
 
-def test_cli_train_with_csv_e2e(tmp_path):
+def test_cli_train_with_multiple_eval_datasets(tmp_path):
     runner = CliRunner()
 
     max_len = 16
     indices_len = max_len - 2  # align with token positions excluding BOS/EOS
 
     train_csv = tmp_path / "train.csv"
-    eval_csv = tmp_path / "eval.csv"
+    eval_val_csv = tmp_path / "eval_val.csv"
+    eval_test_csv = tmp_path / "eval_test.csv"
     _write_csv(train_csv, n_rows=8, seq_min_len=12, seq_max_len=28, indices_len=indices_len)
-    _write_csv(eval_csv, n_rows=4, seq_min_len=12, seq_max_len=28, indices_len=indices_len)
+    _write_csv(eval_val_csv, n_rows=4, seq_min_len=12, seq_max_len=28, indices_len=indices_len)
+    _write_csv(eval_test_csv, n_rows=4, seq_min_len=12, seq_max_len=28, indices_len=indices_len)
 
     overrides = [
         f"data.train={train_csv.as_posix()}",
-        f"data.eval={eval_csv.as_posix()}",
+        # multiple eval datasets via dict keys
+        f"+data.eval.validation={eval_val_csv.as_posix()}",
+        f"+data.eval.test={eval_test_csv.as_posix()}",
         # tiny model for speed
         "model.encoder.d_model=64",
         "model.encoder.n_layers=2",
@@ -58,9 +62,8 @@ def test_cli_train_with_csv_e2e(tmp_path):
 
     result = runner.invoke(cli, ["train", *overrides])  # type: ignore[arg-type]
     assert result.exit_code == 0, result.output
-    # eval line should be present and include step, epoch, and loss
-    assert "eval/default | step 2 | epoch" in result.output
-    assert " | loss " in result.output
+    # Expect per-dataset eval logs with step then epoch
+    assert "eval/validation | step 2 | epoch" in result.output
+    assert "eval/test | step 2 | epoch" in result.output
     assert "Training complete." in result.output
-
 

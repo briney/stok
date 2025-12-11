@@ -38,7 +38,7 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
 - CLI training with CSV (`integration/test_cli_train_with_csv.py`)
   - Purpose: End-to-end training on a tiny real CSV-backed dataset to validate tokenizer alignment and `TokenizedDataset` integration.
   - Scope: Generates small `train.csv` and `eval.csv` with columns `pid,protein_sequence,indices`, sets a small `data.max_len` and indices length (`max_len-2`), uses the same tiny model overrides, and triggers evaluation (`train.eval_steps=2`).
-  - Pass criteria: CLI exits with code 0, prints an eval line that includes epoch and loss (e.g., `eval | epoch ... | loss ...`), and ends with `Training complete.`.
+  - Pass criteria: CLI exits with code 0, prints an eval line that includes step, epoch, and loss (e.g., `eval/default | step ... | epoch ... | loss ...`), and ends with `Training complete.`.
 
 - CLI training with CSV (variable-length sequences) (`integration/test_cli_train_with_csv_varlen.py`)
   - Purpose: Ensure CSV-backed training works correctly when protein sequence lengths vary and indices are truncated/padded consistently with `data.max_len`.
@@ -62,6 +62,11 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
   - Scope: Creates a training directory containing multiple Parquet shard files and a single-file Parquet eval set. Verifies heuristic selection (dir → iterable, file → map-style) and successful end-to-end training/eval.
   - Pass criteria: CLI exits with code 0 and prints `Training complete.`.
   - Notes: Requires a Parquet engine; auto-skips if unavailable.
+
+- CLI training with multiple eval datasets (`integration/test_cli_train_multi_eval.py`)
+  - Purpose: Validate Hydra overrides for multiple eval datasets and per-dataset logging.
+  - Scope: Generates CSV train plus two eval CSVs; passes `+data.eval.validation=...` and `+data.eval.test=...` overrides; short run with `train.eval_steps=2`.
+  - Pass criteria: CLI exits with code 0; output contains per-dataset eval lines (`eval/validation | step ... | epoch ...`, `eval/test | ...`); ends with `Training complete.`.
 
 - Programmatic training (`integration/test_run_training_programmatic.py`)
   - Purpose: Run `run_training` directly (non-CLI) to ensure programmatic usage works with Hydra-composed configs.
