@@ -5,6 +5,20 @@ from .attention import MultiheadAttention
 from .mlp import SwiGLU
 
 
+class RMSNorm(nn.Module):
+    """Root Mean Square Layer Normalization (no mean subtraction)."""
+
+    def __init__(self, d_model: int, eps: float = 1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(d_model))
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        inv_rms = torch.rsqrt(x.float().pow(2).mean(dim=-1, keepdim=True) + self.eps)
+        x = x * inv_rms.to(dtype=x.dtype)
+        return x * self.weight.to(dtype=x.dtype)
+
+
 class EncoderBlock(nn.Module):
     """Transformer encoder block (pre-layer norm + MHA + SwiGLU)."""
 
@@ -30,10 +44,13 @@ class EncoderBlock(nn.Module):
             ffn_mult: Feedforward multiplier (hidden_dim = d_model * ffn_mult).
         """
         super().__init__()
-        Norm = nn.LayerNorm  # RMSNorm optional later
-        if norm_type != "layernorm":
-            # Placeholder to keep interface stable; can add RMSNorm later.
+        norm_type = norm_type.lower()
+        if norm_type == "rmsnorm":
+            Norm = RMSNorm
+        elif norm_type == "layernorm":
             Norm = nn.LayerNorm
+        else:
+            raise ValueError(f"Unknown norm_type: {norm_type}")
 
         self.norm1 = Norm(d_model)
         self.attn = MultiheadAttention(

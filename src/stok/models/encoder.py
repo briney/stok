@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from .blocks import EncoderBlock
+from .blocks import EncoderBlock, RMSNorm
 from .rope import RotaryEmbedding
 
 
@@ -47,7 +47,15 @@ class Encoder(nn.Module):
                 for _ in range(n_layers)
             ]
         )
-        self.final_norm = nn.LayerNorm(d_model)
+        norm_type = norm_type.lower()
+        if norm_type == "rmsnorm":
+            Norm = RMSNorm
+        elif norm_type == "layernorm":
+            Norm = nn.LayerNorm
+        else:
+            raise ValueError(f"Unknown norm_type: {norm_type}")
+
+        self.final_norm = Norm(d_model)
 
     def forward(
         self,

@@ -34,6 +34,7 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
   - Purpose: Exercise the `stok train` CLI end-to-end on dummy data.
   - Scope: Invokes Click CLI with Hydra overrides for a tiny model (e.g., `d_model=64`, `n_layers=2`, `n_heads=4`, `ffn_mult=1.0`), small data loader (`batch_size=2`, `max_len=64`, `num_workers=0`), `model.codebook.preset=lite`, a few steps (`train.num_steps=3`), and `train.wandb.enabled=false`.
   - Pass criteria: CLI exits with code 0 and prints `Training complete.`.
+  - Notes: Includes an RMSNorm variant to ensure `model.encoder.norm=rmsnorm` works end-to-end.
 
 - CLI training with CSV (`integration/test_cli_train_with_csv.py`)
   - Purpose: End-to-end training on a tiny real CSV-backed dataset to validate tokenizer alignment and `TokenizedDataset` integration.
@@ -152,6 +153,11 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
     - `sample_indices_top_p`: nucleus sampling produces indices; deterministic when mass=1.0.
     - `decode_coords`: runs the geometric decoder to obtain `[B, L, 3, 3]` when `x_transformers` is available.
   - Pass criteria: Shape/value assertions hold; test auto‑skips decode portion if dependencies are missing.
+
+- RMSNorm (`unit/test_rmsnorm.py`)
+  - Purpose: Verify RMSNorm correctness and stability.
+  - Scope: Compares `stok.models.blocks.RMSNorm` to a simple reference implementation, checks positive scale invariance, and ensures output dtype matches input dtype.
+  - Pass criteria: Outputs match the reference within tolerance; invariance/dtype assertions hold.
 
 ## Conventions
 
