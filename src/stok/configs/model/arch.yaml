@@ -8,7 +8,7 @@ encoder:
   pad_id: 1
   dropout: 0.1
   attn_dropout: 0.0
-  norm: "layernorm"
+  norm: "layernorm"  # "layernorm" or "rmsnorm"
 
 classifier:
   tie_to_codebook: true
