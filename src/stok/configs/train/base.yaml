@@ -5,7 +5,7 @@ optimizer:
   weight_decay: 0.01
 
 scheduler:
-  decay: cosine
+  decay: linear  # "cosine" | "linear"
   warmup_steps: 2000
   stable_steps: 0      # if 0, no stable hold, decay starts immediately after warmup
   decay_steps: null    # if null, auto-derived as (num_steps − warmup_steps − stable_steps), clamped at 0
