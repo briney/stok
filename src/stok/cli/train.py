@@ -11,13 +11,15 @@ import torch
 import torch.nn as nn
 from omegaconf import DictConfig, OmegaConf
 from torch.optim import AdamW
-from torch.utils.data import DataLoader, IterableDataset
+from torch.utils.data import ConcatDataset, DataLoader, Dataset, IterableDataset, Sampler
 
 from stok.data.collate import mlm_collate
 from stok.data.dataset import (
     DummyMLMDataset,
     DummySequenceDataset,
+    InterleavedIterableDataset,
     IterableTokenizedDataset,
+    MapAsIterableDataset,
     TokenizedDataset,
 )
 from stok.models.decoder import load_pretrained_decoder
@@ -378,6 +380,137 @@ def _parse_eval_configs(cfg: DictConfig) -> dict[str, dict[str, Any]]:
     raise ValueError(f"Invalid data.eval config type: {type(raw_eval)}")
 
 
+def _parse_train_configs(cfg: DictConfig) -> list[dict[str, Any]]:
+    """
+    Normalize train config into a list of {name, path, fraction, **options}.
+
+    Supports:
+      - Single path: data.train="/path" -> [{"name": "default", "path": "/path", "fraction": 1.0}]
+      - Dict of datasets:
+          data.train.ds1="/p" -> [{"name": "ds1", "path": "/p", "fraction": ...}]
+          data.train.ds1.path="/p" -> same, with optional data.train.ds1.fraction
+
+    Fractions are normalized to sum to 1.0. If some fractions are omitted, they
+    share the remaining mass equally (when positive).
+    """
+    raw_train = cfg.data.get("train")
+    if raw_train is None:
+        return []
+    if isinstance(raw_train, str):
+        return [{"name": "default", "path": raw_train, "fraction": 1.0}]
+    if isinstance(raw_train, (dict, DictConfig)):
+        if len(raw_train) == 0:
+            return []
+        out: list[dict[str, Any]] = []
+        for name, value in raw_train.items():
+            if value is None:
+                continue
+            if isinstance(value, str):
+                out.append({"name": str(name), "path": value, "fraction": None})
+            elif isinstance(value, (dict, DictConfig)):
+                p = value.get("path")
+                if p is None:
+                    continue
+                entry: dict[str, Any] = {"name": str(name), "path": str(p)}
+                entry["fraction"] = value.get("fraction")
+                # optional per-dataset toggles (currently only load_coords is supported)
+                if "load_coords" in value:
+                    entry["load_coords"] = value.get("load_coords")
+                out.append(entry)
+            else:
+                raise ValueError(f"Invalid train config for '{name}': {type(value)}")
+
+        if len(out) == 0:
+            return []
+        if len(out) == 1:
+            out[0]["fraction"] = 1.0
+            return out
+
+        # validate and fill missing fractions
+        specified = []
+        for e in out:
+            f = e.get("fraction")
+            if f is None:
+                continue
+            ff = float(f)
+            if ff < 0:
+                raise ValueError(f"data.train.{e['name']}.fraction must be >= 0")
+            e["fraction"] = ff
+            specified.append(ff)
+
+        total_specified = float(sum(specified))
+        unspecified = [e for e in out if e.get("fraction") is None]
+        if len(unspecified) > 0:
+            remaining = 1.0 - total_specified
+            # If the specified fractions already exceed 1.0, give unspecified 0.0
+            default_frac = (remaining / float(len(unspecified))) if remaining > 0 else 0.0
+            for e in unspecified:
+                e["fraction"] = float(default_frac)
+
+        total = float(sum(float(e["fraction"]) for e in out))
+        if total <= 0:
+            # fallback: equal mixing
+            eq = 1.0 / float(len(out))
+            for e in out:
+                e["fraction"] = eq
+            return out
+
+        # normalize
+        for e in out:
+            e["fraction"] = float(e["fraction"]) / total
+        return out
+
+    raise ValueError(f"Invalid data.train config type: {type(raw_train)}")
+
+
+class MixtureSampler(Sampler[int]):
+    """
+    Efficient sampler for a ConcatDataset that samples per-dataset according to
+    dataset-level fractions, then uniformly within the chosen dataset.
+
+    This avoids allocating per-sample weight vectors (which can be huge).
+    Sampling is with replacement.
+    """
+
+    def __init__(
+        self,
+        *,
+        lengths: list[int],
+        fractions: list[float],
+        seed: int = 0,
+        num_samples: Optional[int] = None,
+    ):
+        if len(lengths) == 0:
+            raise ValueError("MixtureSampler requires at least one dataset length")
+        if len(lengths) != len(fractions):
+            raise ValueError("lengths and fractions must have the same length")
+        if any(int(L) <= 0 for L in lengths):
+            raise ValueError("All dataset lengths must be positive for MixtureSampler")
+        fr = np.asarray([float(f) for f in fractions], dtype=np.float64)
+        if np.any(fr < 0) or float(fr.sum()) <= 0:
+            raise ValueError("fractions must be non-negative and sum to a positive value")
+        fr = fr / float(fr.sum())
+
+        self.lengths = [int(L) for L in lengths]
+        self.fractions = fr.tolist()
+        self.seed = int(seed)
+        self._epoch = 0
+        self.offsets = np.cumsum([0] + self.lengths[:-1]).tolist()
+        self.num_samples = int(num_samples) if num_samples is not None else int(sum(self.lengths))
+
+    def __len__(self) -> int:
+        return int(self.num_samples)
+
+    def __iter__(self):
+        rng = np.random.RandomState((self.seed + (self._epoch * 1009)) & 0xFFFFFFFF)
+        self._epoch += 1
+        fr = np.asarray(self.fractions, dtype=np.float64)
+        for _ in range(int(self.num_samples)):
+            ds_idx = int(rng.choice(len(self.lengths), p=fr))
+            j = int(rng.randint(0, self.lengths[ds_idx]))
+            yield int(self.offsets[ds_idx] + j)
+
+
 def _build_dataloaders(
     cfg: DictConfig,
     *,
@@ -398,9 +531,11 @@ def _build_dataloaders(
     user_load_coords = getattr(cfg.data, "load_coords", None)
 
     eval_configs = _parse_eval_configs(cfg)
+    train_configs = _parse_train_configs(cfg)
 
     tokenizer: Optional[Tokenizer] = None
     collate_fn = None
+    train_sampler: Optional[Sampler[int]] = None
 
     # MLM-specific config
     if is_mlm:
@@ -435,18 +570,11 @@ def _build_dataloaders(
             require_indices=require_indices,
         )
 
-    if cfg.data.get("train"):
-        # CSV/Parquet-backed dataset; tokenize in collate
-        # For MLM, we don't require indices column
-        train_ds = _pick_dataset(
-            str(cfg.data.train),
-            bool(user_load_coords) if not is_mlm else False,
-            require_indices=not is_mlm,
-        )
+    if len(train_configs) > 0:
+        # Real dataset(s); tokenize in collate
         tokenizer = Tokenizer()
 
         if is_mlm:
-            # MLM collate function
             def collate(batch):
                 return mlm_collate(
                     batch,
@@ -461,7 +589,6 @@ def _build_dataloaders(
 
             collate_fn = collate
         else:
-            # Codebook collate function
             def collate(batch):
                 return _tokenize_and_align(
                     batch,
@@ -472,6 +599,58 @@ def _build_dataloaders(
                 )
 
             collate_fn = collate
+
+        if len(train_configs) == 1:
+            # Single dataset (backwards compatible)
+            train_ds = _pick_dataset(
+                str(train_configs[0]["path"]),
+                bool(user_load_coords) if not is_mlm else False,
+                require_indices=not is_mlm,
+            )
+        else:
+            # Multiple datasets with fractions
+            ds_pairs: list[tuple[Dataset | IterableDataset, float]] = []
+            for tcfg in train_configs:
+                t_load_coords = tcfg.get("load_coords", user_load_coords)
+                ds = _pick_dataset(
+                    str(tcfg["path"]),
+                    bool(t_load_coords) if not is_mlm else False,
+                    require_indices=not is_mlm,
+                )
+                ds_pairs.append((ds, float(tcfg["fraction"])))
+
+            any_iterable = any(isinstance(ds, IterableDataset) for ds, _ in ds_pairs)
+            if any_iterable:
+                # Convert map-style datasets to iterable wrappers, then interleave
+                iterables: list[IterableDataset] = []
+                fracs: list[float] = []
+                total_samples = 0
+                for ds, frac in ds_pairs:
+                    if isinstance(ds, IterableDataset):
+                        itds = ds
+                    else:
+                        itds = MapAsIterableDataset(ds, num_samples=len(ds), seed=int(cfg.seed))
+                    iterables.append(itds)
+                    fracs.append(float(frac))
+                    try:
+                        total_samples += int(len(itds))  # type: ignore[arg-type]
+                    except Exception:
+                        total_samples = 0
+                train_ds = InterleavedIterableDataset(
+                    iterables,
+                    fracs,
+                    num_samples=total_samples if total_samples > 0 else None,
+                    seed=int(cfg.seed),
+                )
+            else:
+                # Efficient mixture sampler over a ConcatDataset
+                map_datasets: list[Dataset] = [ds for ds, _ in ds_pairs]  # type: ignore[list-item]
+                lengths = [int(len(ds)) for ds in map_datasets]
+                fracs = [float(fr) for _, fr in ds_pairs]
+                concat = ConcatDataset(map_datasets)
+                sampler = MixtureSampler(lengths=lengths, fractions=fracs, seed=int(cfg.seed))
+                train_ds = concat
+                train_sampler = sampler
     else:
         # fallback dummy data for quick smoke test
         if is_mlm:
@@ -503,7 +682,7 @@ def _build_dataloaders(
                 pad_id=pad_id,
             )
 
-    # configure shuffle depending on dataset type
+    # configure shuffle depending on dataset type / sampler usage
     is_iterable = isinstance(train_ds, IterableDataset)
     # only meaningful for multi-process loading
     if tokenizer is None and len(eval_configs) > 0:
@@ -547,12 +726,20 @@ def _build_dataloaders(
             kwargs["prefetch_factor"] = prefetch_factor
         return kwargs
 
-    train_loader = DataLoader(
-        train_ds,
-        shuffle=not is_iterable,
-        drop_last=True,
-        **_make_dl_kwargs(batch_size),
-    )
+    if train_sampler is not None:
+        train_loader = DataLoader(
+            train_ds,  # type: ignore[arg-type]
+            sampler=train_sampler,
+            drop_last=True,
+            **_make_dl_kwargs(batch_size),
+        )
+    else:
+        train_loader = DataLoader(
+            train_ds,
+            shuffle=(not is_iterable),
+            drop_last=True,
+            **_make_dl_kwargs(batch_size),
+        )
     eval_loaders: dict[str, DataLoader] = {}
     for name, eval_cfg in eval_configs.items():
         eval_path = eval_cfg["path"]
@@ -624,6 +811,8 @@ def run_training(cfg: DictConfig):
             OmegaConf.set_struct(cfg.data, False)
             if "eval" in cfg.data:
                 OmegaConf.set_struct(cfg.data.eval, False)
+            if "train" in cfg.data and isinstance(cfg.data.train, DictConfig):
+                OmegaConf.set_struct(cfg.data.train, False)
     except Exception:
         pass
 

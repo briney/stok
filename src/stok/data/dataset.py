@@ -521,3 +521,137 @@ class IterableTokenizedDataset(IterableDataset, BaseTokenizedDataset):
                     require_indices=self._require_indices,
                 )
                 emitted += 1
+
+
+class MapAsIterableDataset(IterableDataset):
+    """
+    Wrap a map-style Dataset to behave like an IterableDataset.
+
+    This is useful when mixing map-style and iterable datasets, because PyTorch
+    DataLoader does not allow mixing samplers/shuffle with IterableDatasets.
+
+    Behavior:
+      - Each epoch yields `num_samples` samples (default: len(dataset))
+      - Sampling is with replacement, uniformly over indices [0, len(dataset))
+      - Dataloader worker IDs stripe the sample positions to avoid multiplying
+        total emitted samples by `num_workers`.
+    """
+
+    def __init__(
+        self, dataset: Dataset, *, num_samples: int | None = None, seed: int = 0
+    ):
+        super().__init__()
+        self.dataset = dataset
+        self.num_samples = int(num_samples) if num_samples is not None else len(dataset)
+        self.seed = int(seed)
+        self._epoch = -1
+
+    def __len__(self) -> int:
+        return int(self.num_samples)
+
+    def __iter__(self):
+        self._epoch += 1
+        wi = get_worker_info()
+        if wi is None:
+            num_workers, worker_id = 1, 0
+        else:
+            num_workers, worker_id = wi.num_workers, wi.id
+
+        # Deterministic per-epoch, per-worker RNG
+        seed_base = (0x9E3779B97F4A7C15 ^ self.seed) + (self._epoch * 0x1000003)
+        rng = np.random.RandomState((seed_base + worker_id) & 0xFFFFFFFF)
+
+        n = int(self.num_samples)
+        L = int(len(self.dataset))
+        if L <= 0 or n <= 0:
+            return iter(())
+
+        # worker striping over sample positions (keeps global sample count ~num_samples)
+        for _pos in range(worker_id, n, max(1, num_workers)):
+            j = int(rng.randint(0, L))
+            yield self.dataset[j]
+
+
+class InterleavedIterableDataset(IterableDataset):
+    """
+    Interleave samples from multiple IterableDatasets according to fractions.
+
+    Each epoch yields `num_samples` items (default: sum(len(ds)) when available,
+    otherwise falls back to 0 which effectively yields nothing).
+
+    When a sub-dataset iterator is exhausted, it is re-initialized so mixing
+    continues without prematurely stopping.
+
+    Worker IDs stripe emitted positions so that total yielded items across all
+    workers is approximately `num_samples` (not multiplied by num_workers).
+    """
+
+    def __init__(
+        self,
+        datasets: list[IterableDataset],
+        fractions: list[float],
+        *,
+        num_samples: int | None = None,
+        seed: int = 0,
+    ):
+        super().__init__()
+        if len(datasets) == 0:
+            raise ValueError("InterleavedIterableDataset requires at least 1 dataset")
+        if len(datasets) != len(fractions):
+            raise ValueError("datasets and fractions must have the same length")
+
+        fr = np.asarray([float(f) for f in fractions], dtype=np.float64)
+        if np.any(fr < 0):
+            raise ValueError("fractions must be non-negative")
+        if float(fr.sum()) <= 0:
+            raise ValueError("fractions must sum to a positive value")
+        fr = fr / float(fr.sum())
+
+        self.datasets = datasets
+        self.fractions = fr.tolist()
+        self.seed = int(seed)
+        self._epoch = -1
+
+        if num_samples is None:
+            # best-effort: sum dataset lengths if available
+            total = 0
+            for ds in datasets:
+                try:
+                    total += int(len(ds))  # type: ignore[arg-type]
+                except Exception:
+                    total = 0
+                    break
+            num_samples = total
+        self.num_samples = int(num_samples)
+
+    def __len__(self) -> int:
+        return int(self.num_samples)
+
+    def __iter__(self):
+        self._epoch += 1
+        wi = get_worker_info()
+        if wi is None:
+            num_workers, worker_id = 1, 0
+        else:
+            num_workers, worker_id = wi.num_workers, wi.id
+
+        n = int(self.num_samples)
+        if n <= 0:
+            return iter(())
+
+        # Deterministic per-epoch, per-worker RNG
+        seed_base = (0x9E3779B97F4A7C15 ^ self.seed) + (self._epoch * 0x1000003)
+        rng = np.random.RandomState((seed_base + worker_id) & 0xFFFFFFFF)
+
+        # Create iterators; we re-create an iterator when it is exhausted.
+        iters = [iter(ds) for ds in self.datasets]
+        fr = np.asarray(self.fractions, dtype=np.float64)
+
+        for _pos in range(worker_id, n, max(1, num_workers)):
+            # Choose dataset id according to fractions
+            ds_idx = int(rng.choice(len(iters), p=fr))
+            try:
+                yield next(iters[ds_idx])
+            except StopIteration:
+                iters[ds_idx] = iter(self.datasets[ds_idx])
+                yield next(iters[ds_idx])

@@ -195,6 +195,38 @@ data:
   shuffle_rows: true
 ```
 
+## multiple training datasets (mixtures)
+
+You can train on a **mixture** of datasets and control the probability of sampling from each one via per-dataset `fraction`s.
+
+### CLI: multiple train datasets with fractions
+
+```bash
+stok train \
+  +data.train.dataset_a.path=/abs/path/to/dataset_a.parquet \
+  +data.train.dataset_a.fraction=0.6 \
+  +data.train.dataset_b.path=/abs/path/to/dataset_b.parquet \
+  +data.train.dataset_b.fraction=0.4
+```
+
+Notes:
+- Fractions are **normalized** to sum to 1.0.
+- If you omit one or more fractions, unspecified datasets share any remaining mass (and everything is then normalized).
+- This works for both `train.objective=codebook` and `train.objective=mlm`.
+
+### YAML: multiple train datasets with fractions
+
+```yaml
+data:
+  train:
+    dataset_a:
+      path: /abs/path/to/dataset_a.parquet
+      fraction: 0.6
+    dataset_b:
+      path: /abs/path/to/dataset_b.parquet
+      fraction: 0.4
+```
+
 ### optional coordinates (Parquet only)
 
 When training from Parquet, you can optionally include a `coordinates` column containing per‑residue N–CA–C coordinates:
@@ -299,6 +331,18 @@ Notes:
 ## multiple eval datasets
 
 You can run in-training evaluation on multiple datasets, each logged separately.
+
+### Single eval dataset
+
+You can specify a single eval dataset directly:
+
+```bash
+stok train \
+  data.train=/abs/path/train.csv \
+  data.eval=/abs/path/eval.csv
+```
+
+When using `data.eval=/path`, eval metrics are logged under the name `default` (for example: `eval/default | step ...`).
 
 Config (`data.eval` as a dict of named datasets):
 

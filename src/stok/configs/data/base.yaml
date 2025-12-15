@@ -9,16 +9,39 @@ prefetch_factor: 4     # per-worker prefetch depth (only used when num_workers >
 
 
 # file paths for datasets
-train: null   # path to training CSV/Parquet (pid, protein_sequence, indices)
-# Dict of eval datasets. Keys are dataset names, values are paths or nested configs.
-# Examples:
-#   eval:
-#     validation: /path/to/val.parquet
-#     test: /path/to/test.parquet
-#   eval:
-#     validation:
-#       path: /path/to/val.parquet
-#       batch_size: 32
+# Training dataset(s). Supports both:
+#   - Single dataset (100% sampling):
+#       train: /path/to/train.parquet
+#     (equivalently via CLI: `data.train=/path/to/train.parquet`)
+#   - Multiple datasets with fractional sampling:
+#       train:
+#         dataset_a:
+#           path: /path/to/dataset_a.parquet
+#           fraction: 0.6
+#         dataset_b:
+#           path: /path/to/dataset_b.parquet
+#           fraction: 0.4
+#     (via CLI: `+data.train.dataset_a.path=... +data.train.dataset_a.fraction=...`)
+#
+# Notes:
+#   - Fractions are normalized to sum to 1.0.
+#   - You may omit some/all fractions; unspecified fractions share the remaining mass.
+train: {}
+
+# Eval dataset(s). Supports both:
+#   - Single dataset:
+#       eval: /path/to/eval.parquet
+#     (via CLI: `data.eval=/path/to/eval.parquet`)
+#   - Multiple datasets:
+#       eval:
+#         validation: /path/to/val.parquet
+#         test: /path/to/test.parquet
+#     (via CLI: `+data.eval.validation=... +data.eval.test=...`)
+#   - Multiple datasets with per-dataset options:
+#       eval:
+#         validation:
+#           path: /path/to/val.parquet
+#           batch_size: 32
 eval: {}
 
 # Iterable directory-of-parquet behavior tuning (ignored for single-file datasets)
