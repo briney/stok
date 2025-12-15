@@ -69,6 +69,17 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
   - Scope: Generates CSV train plus two eval CSVs; passes `+data.eval.validation=...` and `+data.eval.test=...` overrides; short run with `train.eval_steps=2`.
   - Pass criteria: CLI exits with code 0; output contains per-dataset eval lines (`eval/validation | step ... | epoch ...`, `eval/test | ...`); ends with `Training complete.`.
 
+- CLI training with MLM objective (`integration/test_cli_train_mlm.py`)
+  - Purpose: Validate masked language modeling (MLM) pre-training objective.
+  - Scope: Tests include:
+    - Smoke test with dummy data and `train.objective=mlm`
+    - Logging of `mask_acc` (masked token accuracy) and `ppl` (perplexity) metrics
+    - Training on CSV datasets without `indices` column
+    - Training with eval datasets
+    - Checkpoint saving with MLM objective
+    - Regression test ensuring codebook objective still works
+  - Pass criteria: CLI exits with code 0; output contains `Training objective: mlm` and appropriate metrics (`mask_acc`, `ppl`); ends with `Training complete.`.
+
 - Programmatic training (`integration/test_run_training_programmatic.py`)
   - Purpose: Run `run_training` directly (non-CLI) to ensure programmatic usage works with Hydra-composed configs.
   - Scope: Composes config from packaged `stok/configs` via `initialize_config_dir`/`compose` and uses the same tiny overrides as the CLI smoke test.
@@ -98,6 +109,37 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
   - Pass criteria: Training completes without `AttributeError` due to unwrap logic.
 
 ## Unit Tests
+
+- MLM collate (`unit/test_mlm_collate.py`)
+  - Purpose: Verify masked language modeling collate function correctness.
+  - Scope: Tests include:
+    - Output tensor shapes are correct
+    - Mask ratio is approximately as configured (within variance)
+    - `<mask>` token is applied to masked positions
+    - Special tokens (CLS, PAD, EOS, UNK) are never masked
+    - Labels at masked positions match original token values
+    - Random token replacement occurs for a subset of masked positions
+  - Pass criteria: All assertions pass; mask ratios are within expected ranges.
+
+- MLM model (`unit/test_mlm_model.py`)
+  - Purpose: Verify LMHead and STokModel with MLM head type.
+  - Scope: Tests include:
+    - LMHead output shape, weight tying, gradient flow
+    - STokModel creation with `head_type="mlm"`
+    - Forward pass, loss computation, gradient flow for MLM
+    - Weight tying behavior with and without `tie_word_embeddings`
+    - Codebook model still works correctly (regression)
+    - Error raised for invalid head types or missing codebook
+  - Pass criteria: All assertions pass; model outputs have expected shapes and types.
+
+- Dataset MLM support (`unit/test_dataset_mlm.py`)
+  - Purpose: Validate dataset loading without `indices` column for MLM pre-training.
+  - Scope: Tests include:
+    - `TokenizedDataset` loads CSV/Parquet without `indices` column when `require_indices=False`
+    - Dataset raises error when indices required but missing
+    - `DummyMLMDataset` produces correct sequence lengths and valid amino acid characters
+    - `IterableTokenizedDataset` works without indices column
+  - Pass criteria: Datasets load correctly; items contain expected keys; sequences are valid.
 
 - FAPE loss (`unit/test_fape_loss.py`)
   - Purpose: Verify Frame-Aligned Point Error (FAPE) correctness and behavior.

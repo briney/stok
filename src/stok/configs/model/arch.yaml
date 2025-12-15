@@ -1,9 +1,9 @@
 # "base" model size (~865M parameters)
 encoder:
-  d_model: 1280
-  n_heads: 20
-  n_layers: 33
-  ffn_mult: 4.0
+  d_model: 1536
+  n_heads: 16
+  n_layers: 36
+  ffn_mult: 2.667  # 8/3 to account for SwiGLU projection
   vocab_size: 32
   pad_id: 1
   dropout: 0.1

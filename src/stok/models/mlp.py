@@ -18,7 +18,9 @@ class SwiGLU(nn.Module):
             dropout: Dropout probability.
         """
         super().__init__()
-        hidden = int(d_model * expansion)
+        # set hidden dimesion to nearest multiple of 256 after expansion ratio
+        hidden = int(((expansion * d_model) + 255) // 256 * 256)
+        # hidden = int(d_model * expansion)
         self.w_up = nn.Linear(d_model, hidden, bias=False)
         self.w_gate = nn.Linear(d_model, hidden, bias=False)
         self.w_down = nn.Linear(hidden, d_model, bias=False)

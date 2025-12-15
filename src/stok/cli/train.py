@@ -13,7 +13,9 @@ from omegaconf import DictConfig, OmegaConf
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, IterableDataset
 
+from stok.data.collate import mlm_collate
 from stok.data.dataset import (
+    DummyMLMDataset,
     DummySequenceDataset,
     IterableTokenizedDataset,
     TokenizedDataset,
@@ -241,6 +243,40 @@ def _try_load_latest_checkpoint(
         return 0
 
 
+def _load_pretrained_encoder(
+    model: STokModel,
+    checkpoint_path: str,
+    *,
+    accelerator,
+    printer,
+) -> None:
+    """Load encoder weights from a pre-trained checkpoint (e.g., from MLM pre-training).
+
+    Only loads embedding and encoder weights, leaving head weights randomly initialized.
+    """
+    ckpt = torch.load(checkpoint_path, map_location="cpu")
+    state_dict = ckpt.get("model", ckpt)
+
+    # Filter to only encoder and embedding weights
+    encoder_keys = {
+        k: v for k, v in state_dict.items() if k.startswith(("embed.", "encoder."))
+    }
+
+    missing, unexpected = _unwrap_model(model, accelerator).load_state_dict(
+        encoder_keys, strict=False
+    )
+
+    # Log what was loaded
+    printer(f"Loaded {len(encoder_keys)} encoder/embedding weights from {checkpoint_path}")
+    if missing:
+        # Filter out expected missing keys (head-specific)
+        missing_encoder = [
+            k for k in missing if k.startswith(("embed.", "encoder."))
+        ]
+        if missing_encoder:
+            printer(f"  Warning: Missing encoder keys: {missing_encoder}")
+
+
 def _compute_accuracy(
     logits: torch.Tensor, labels: torch.Tensor, ignore_index: int
 ) -> float:
@@ -343,7 +379,11 @@ def _parse_eval_configs(cfg: DictConfig) -> dict[str, dict[str, Any]]:
 
 
 def _build_dataloaders(
-    cfg: DictConfig, *, codebook_size: int, pad_id: int
+    cfg: DictConfig,
+    *,
+    codebook_size: int | None,
+    pad_id: int,
+    is_mlm: bool = False,
 ) -> tuple[DataLoader, dict[str, DataLoader]]:
     batch_size: int = cfg.data.batch_size
     max_len: int = cfg.data.max_len
@@ -362,8 +402,15 @@ def _build_dataloaders(
     tokenizer: Optional[Tokenizer] = None
     collate_fn = None
 
+    # MLM-specific config
+    if is_mlm:
+        mlm_cfg = cfg.train.get("mlm", {})
+        mask_prob = float(mlm_cfg.get("mask_prob", 0.15))
+        mask_token_prob = float(mlm_cfg.get("mask_token_prob", 0.8))
+        random_token_prob = float(mlm_cfg.get("random_token_prob", 0.1))
+
     # dataset picker usable for train/eval
-    def _pick_dataset(path: str, load_coords: bool):
+    def _pick_dataset(path: str, load_coords: bool, require_indices: bool = True):
         p = Path(path)
         # heuristic: directory containing parquet shards -> Iterable; else map-style
         if p.is_dir():
@@ -379,37 +426,82 @@ def _build_dataloaders(
                     shuffle_shards=shuffle_shards,
                     shuffle_rows=shuffle_rows,
                     load_coords=bool(load_coords),
+                    require_indices=require_indices,
                 )
         return TokenizedDataset(
             dataset_path=str(path),
             max_length=max_len,
             load_coords=bool(load_coords),
+            require_indices=require_indices,
         )
 
     if cfg.data.get("train"):
         # CSV/Parquet-backed dataset; tokenize in collate
-        train_ds = _pick_dataset(str(cfg.data.train), bool(user_load_coords))
+        # For MLM, we don't require indices column
+        train_ds = _pick_dataset(
+            str(cfg.data.train),
+            bool(user_load_coords) if not is_mlm else False,
+            require_indices=not is_mlm,
+        )
         tokenizer = Tokenizer()
 
-        def collate(batch):
-            return _tokenize_and_align(
-                batch,
-                tokenizer,
-                max_len=max_len,
-                ignore_index=ignore_index,
-                pad_id=pad_id,
-            )
+        if is_mlm:
+            # MLM collate function
+            def collate(batch):
+                return mlm_collate(
+                    batch,
+                    tokenizer,
+                    max_len=max_len,
+                    mask_prob=mask_prob,
+                    mask_token_prob=mask_token_prob,
+                    random_token_prob=random_token_prob,
+                    pad_id=pad_id,
+                    ignore_index=ignore_index,
+                )
 
-        collate_fn = collate
+            collate_fn = collate
+        else:
+            # Codebook collate function
+            def collate(batch):
+                return _tokenize_and_align(
+                    batch,
+                    tokenizer,
+                    max_len=max_len,
+                    ignore_index=ignore_index,
+                    pad_id=pad_id,
+                )
+
+            collate_fn = collate
     else:
         # fallback dummy data for quick smoke test
-        train_ds = DummySequenceDataset(
-            num_samples=512,
-            seq_len=min(max_len, 256),
-            vocab_size=cfg.model.encoder.vocab_size,
-            num_classes=codebook_size,
-            pad_id=pad_id,
-        )
+        if is_mlm:
+            train_ds = DummyMLMDataset(
+                num_samples=512,
+                seq_len=min(max_len, 256) - 2,  # Account for CLS/EOS tokens
+            )
+            tokenizer = Tokenizer()
+
+            def collate(batch):
+                return mlm_collate(
+                    batch,
+                    tokenizer,
+                    max_len=max_len,
+                    mask_prob=mask_prob,
+                    mask_token_prob=mask_token_prob,
+                    random_token_prob=random_token_prob,
+                    pad_id=pad_id,
+                    ignore_index=ignore_index,
+                )
+
+            collate_fn = collate
+        else:
+            train_ds = DummySequenceDataset(
+                num_samples=512,
+                seq_len=min(max_len, 256),
+                vocab_size=cfg.model.encoder.vocab_size,
+                num_classes=codebook_size,
+                pad_id=pad_id,
+            )
 
     # configure shuffle depending on dataset type
     is_iterable = isinstance(train_ds, IterableDataset)
@@ -417,16 +509,31 @@ def _build_dataloaders(
     if tokenizer is None and len(eval_configs) > 0:
         tokenizer = Tokenizer()
 
-        def collate(batch):
-            return _tokenize_and_align(
-                batch,
-                tokenizer,
-                max_len=max_len,
-                ignore_index=ignore_index,
-                pad_id=pad_id,
-            )
+        if is_mlm:
+            def collate(batch):
+                return mlm_collate(
+                    batch,
+                    tokenizer,
+                    max_len=max_len,
+                    mask_prob=mask_prob,
+                    mask_token_prob=mask_token_prob,
+                    random_token_prob=random_token_prob,
+                    pad_id=pad_id,
+                    ignore_index=ignore_index,
+                )
 
-        collate_fn = collate
+            collate_fn = collate
+        else:
+            def collate(batch):
+                return _tokenize_and_align(
+                    batch,
+                    tokenizer,
+                    max_len=max_len,
+                    ignore_index=ignore_index,
+                    pad_id=pad_id,
+                )
+
+            collate_fn = collate
 
     def _make_dl_kwargs(batch_sz: int):
         kwargs = {
@@ -451,7 +558,11 @@ def _build_dataloaders(
         eval_path = eval_cfg["path"]
         eval_batch_size = int(eval_cfg.get("batch_size", batch_size))
         eval_load_coords = eval_cfg.get("load_coords", user_load_coords)
-        ds = _pick_dataset(eval_path, bool(eval_load_coords))
+        ds = _pick_dataset(
+            eval_path,
+            bool(eval_load_coords) if not is_mlm else False,
+            require_indices=not is_mlm,
+        )
         eval_loaders[name] = DataLoader(
             ds,
             shuffle=False,
@@ -516,6 +627,17 @@ def run_training(cfg: DictConfig):
     except Exception:
         pass
 
+    # Determine training objective
+    objective = str(cfg.train.get("objective", "codebook")).lower()
+    if objective not in {"codebook", "mlm"}:
+        raise ValueError(
+            f"Unknown train.objective: {objective}. Expected 'codebook' or 'mlm'."
+        )
+    is_mlm = objective == "mlm"
+
+    if is_main:
+        printer(f"Training objective: {objective}")
+
     # prompt for W&B login early so the API key prompt happens immediately
     _maybe_wandb_login(cfg, is_main_process=is_main)
 
@@ -544,12 +666,17 @@ def run_training(cfg: DictConfig):
     if accelerator:
         accelerator.wait_for_everyone()
 
-    # load codebook and build model
-    codebook = load_codebook(
-        preset=cfg.model.codebook.get("preset"),
-        path=cfg.model.codebook.get("path"),
-    )
-    codebook_size = codebook.shape[0]
+    # Load codebook only for codebook objective
+    codebook = None
+    codebook_size = None
+    if not is_mlm:
+        codebook = load_codebook(
+            preset=cfg.model.codebook.get("preset"),
+            path=cfg.model.codebook.get("path"),
+        )
+        codebook_size = codebook.shape[0]
+
+    # Build model with appropriate head type
     model = STokModel(
         vocab_size=cfg.model.encoder.vocab_size,
         pad_id=cfg.model.encoder.pad_id,
@@ -559,73 +686,100 @@ def run_training(cfg: DictConfig):
         ffn_mult=cfg.model.encoder.ffn_mult,
         dropout=cfg.model.encoder.dropout,
         attn_dropout=cfg.model.encoder.attn_dropout,
-        codebook=codebook,
-        classifier_kwargs=dict(
-            use_cosine=cfg.model.classifier.use_cosine,
-            learnable_temperature=cfg.model.classifier.learnable_temperature,
-            bias_from_code_norm=cfg.model.classifier.bias_from_code_norm,
-            projector_dim=cfg.model.classifier.projector_dim,
+        codebook=codebook,  # None for MLM
+        classifier_kwargs=(
+            dict(
+                use_cosine=cfg.model.classifier.use_cosine,
+                learnable_temperature=cfg.model.classifier.learnable_temperature,
+                bias_from_code_norm=cfg.model.classifier.bias_from_code_norm,
+                projector_dim=cfg.model.classifier.projector_dim,
+            )
+            if not is_mlm
+            else None
         ),
         norm_type=cfg.model.encoder.norm,
+        head_type=objective,
+        tie_word_embeddings=(
+            cfg.train.mlm.get("tie_word_embeddings", True) if is_mlm else True
+        ),
     )
+
+    # Load pre-trained encoder if specified (typically for codebook training after MLM)
+    pretrained_encoder_path = cfg.train.get("pretrained_encoder")
+    if pretrained_encoder_path is not None and is_main:
+        _load_pretrained_encoder(
+            model,
+            str(pretrained_encoder_path),
+            accelerator=accelerator,
+            printer=printer,
+        )
 
     # load frozen geometric decoder for FAPE loss and/or eval metrics (optional)
+    # Skip decoder setup for MLM objective
     decoder = None
-    want_fape = bool(getattr(cfg.train, "fape", {}).get("enabled", False))
-    # default to False; eval-time decoding is opt-in via config/override
-    want_eval_decode = bool(
-        getattr(cfg.train, "decoding", {}).get("eval_enabled", False)
-    )
-    # FAPE behavior toggles (with safe defaults)
-    log_pred_nan_frac = bool(
-        getattr(cfg.train, "fape", {}).get("log_pred_nan_frac", True)
-    )
-    decoder_enabled = bool(getattr(cfg.model, "decoder", {}).get("enabled", False))
+    want_fape = False
+    want_eval_decode = False
+    log_pred_nan_frac = False
 
-    # Auto-enable the decoder when either FAPE or eval-time decoding is requested
-    if (want_fape or want_eval_decode) and not decoder_enabled:
-        if is_main:
-            printer(
-                "train.fape.enabled or train.decoding.eval_enabled is true, but "
-                "model.decoder.enabled=false; enabling decoder automatically."
-            )
-        try:
-            if "decoder" not in cfg.model:
-                cfg.model.decoder = OmegaConf.create({})
-            cfg.model.decoder.enabled = True
-        except Exception:  # maybe config is immutable?
-            pass
-        decoder_enabled = True
-
-    if decoder_enabled and (want_fape or want_eval_decode):
-        # resolve preset/path
-        dec_preset = getattr(
-            cfg.model.decoder, "preset", None
-        ) or cfg.model.codebook.get("preset")
-        dec_path = getattr(cfg.model.decoder, "path", None)
-        device_for_decoder = _get_model_device(model, accelerator)
-        decoder = load_pretrained_decoder(
-            preset=dec_preset or "base",
-            path=dec_path,
-            device=device_for_decoder,
-            freeze=bool(getattr(cfg.model.decoder, "freeze", True)),
-            progress=is_main,
+    if not is_mlm:
+        want_fape = bool(getattr(cfg.train, "fape", {}).get("enabled", False))
+        # default to False; eval-time decoding is opt-in via config/override
+        want_eval_decode = bool(
+            getattr(cfg.train, "decoding", {}).get("eval_enabled", False)
         )
-        if accelerator:
-            accelerator.wait_for_everyone()
-        # check if d_code matches classifier codebook dim
-        with torch.no_grad():
-            inferred_d_code = int(decoder.projector_in.weight.shape[1])  # type: ignore[attr-defined]
-            E = _unwrap_model(model, accelerator).classifier.E
-            if inferred_d_code != int(E.shape[1]):
-                raise RuntimeError(
-                    f"Decoder d_code={inferred_d_code} does not match codebook dim "
-                    f"{int(E.shape[1])}"
+        # FAPE behavior toggles (with safe defaults)
+        log_pred_nan_frac = bool(
+            getattr(cfg.train, "fape", {}).get("log_pred_nan_frac", True)
+        )
+        decoder_enabled = bool(getattr(cfg.model, "decoder", {}).get("enabled", False))
+
+        # Auto-enable the decoder when either FAPE or eval-time decoding is requested
+        if (want_fape or want_eval_decode) and not decoder_enabled:
+            if is_main:
+                printer(
+                    "train.fape.enabled or train.decoding.eval_enabled is true, but "
+                    "model.decoder.enabled=false; enabling decoder automatically."
                 )
+            try:
+                if "decoder" not in cfg.model:
+                    cfg.model.decoder = OmegaConf.create({})
+                cfg.model.decoder.enabled = True
+            except Exception:  # maybe config is immutable?
+                pass
+            decoder_enabled = True
+
+        if decoder_enabled and (want_fape or want_eval_decode):
+            # resolve preset/path
+            dec_preset = getattr(
+                cfg.model.decoder, "preset", None
+            ) or cfg.model.codebook.get("preset")
+            dec_path = getattr(cfg.model.decoder, "path", None)
+            device_for_decoder = _get_model_device(model, accelerator)
+            decoder = load_pretrained_decoder(
+                preset=dec_preset or "base",
+                path=dec_path,
+                device=device_for_decoder,
+                freeze=bool(getattr(cfg.model.decoder, "freeze", True)),
+                progress=is_main,
+            )
+            if accelerator:
+                accelerator.wait_for_everyone()
+            # check if d_code matches classifier codebook dim
+            with torch.no_grad():
+                inferred_d_code = int(decoder.projector_in.weight.shape[1])  # type: ignore[attr-defined]
+                E = _unwrap_model(model, accelerator).classifier.E
+                if inferred_d_code != int(E.shape[1]):
+                    raise RuntimeError(
+                        f"Decoder d_code={inferred_d_code} does not match codebook dim "
+                        f"{int(E.shape[1])}"
+                    )
 
     # data
     train_loader, eval_loaders = _build_dataloaders(
-        cfg, codebook_size=codebook_size, pad_id=cfg.model.encoder.pad_id
+        cfg,
+        codebook_size=codebook_size,
+        pad_id=cfg.model.encoder.pad_id,
+        is_mlm=is_mlm,
     )
 
     # optimizer
@@ -732,7 +886,7 @@ def run_training(cfg: DictConfig):
         file=sys.stdout,
     )
     if is_main and log_file_handle is not None:
-        print("Training started.", file=log_file_handle, flush=True)
+        print(f"Training started. Objective: {objective}", file=log_file_handle, flush=True)
 
     # additional training accumulators (over the current log window)
     running_cls_loss = 0.0
@@ -741,8 +895,11 @@ def run_training(cfg: DictConfig):
     running_fape_count = 0
     running_pred_nan_frac_sum = 0.0
     running_pred_nan_frac_count = 0
+    # MLM-specific accumulators
+    running_masked_acc_sum = 0.0
+    running_masked_acc_count = 0
 
-    # Gumbel temperature schedule
+    # Gumbel temperature schedule (only for codebook objective)
     def _anneal_tau(step: int) -> float:
         gcfg = getattr(cfg.train, "gumbel", {})
         t0 = float(gcfg.get("tau_start", 1.0))
@@ -780,9 +937,10 @@ def run_training(cfg: DictConfig):
             outputs = model(tokens=tokens, labels=labels, ignore_index=ignore_index)
             loss: torch.Tensor = outputs["loss"]
 
-            # optional FAPE loss using frozen decoder
+            # optional FAPE loss using frozen decoder (codebook objective only)
             if (
-                decoder is not None
+                not is_mlm
+                and decoder is not None
                 and want_fape
                 and (global_step >= int(cfg.train.fape.start_step))
             ):
@@ -850,15 +1008,25 @@ def run_training(cfg: DictConfig):
             if cls_loss_tensor is not None:
                 running_cls_loss += float(cls_loss_tensor.detach().item())
                 running_cls_count += 1
-            fape_loss_tensor = outputs.get("structure_loss")
-            if fape_loss_tensor is not None:
-                running_fape_loss += float(fape_loss_tensor.detach().item())
-                running_fape_count += 1
-            if log_pred_nan_frac:
-                _pnan = outputs.get("pred_nan_frac")
-                if _pnan is not None:
-                    running_pred_nan_frac_sum += float(_pnan)
-                    running_pred_nan_frac_count += 1
+
+            # For MLM, compute masked token accuracy
+            if is_mlm:
+                with torch.no_grad():
+                    masked_acc = _compute_accuracy(outputs["logits"], labels, ignore_index)
+                    running_masked_acc_sum += masked_acc
+                    running_masked_acc_count += 1
+
+            # Codebook-specific accumulations
+            if not is_mlm:
+                fape_loss_tensor = outputs.get("structure_loss")
+                if fape_loss_tensor is not None:
+                    running_fape_loss += float(fape_loss_tensor.detach().item())
+                    running_fape_count += 1
+                if log_pred_nan_frac:
+                    _pnan = outputs.get("pred_nan_frac")
+                    if _pnan is not None:
+                        running_pred_nan_frac_sum += float(_pnan)
+                        running_pred_nan_frac_count += 1
 
             # logging
             if current_step % log_interval == 0 and is_main:
@@ -873,34 +1041,47 @@ def run_training(cfg: DictConfig):
                     if running_cls_count > 0
                     else None
                 )
-                avg_fape_loss = (
-                    running_fape_loss / float(max(1, running_fape_count))
-                    if running_fape_count > 0
-                    else None
-                )
-                avg_pred_nan_frac = (
-                    running_pred_nan_frac_sum
-                    / float(max(1, running_pred_nan_frac_count))
-                    if running_pred_nan_frac_count > 0
-                    else None
-                )
                 ppl = math.exp(avg_cls_loss) if avg_cls_loss is not None else None
 
                 # build console log message
                 msg = f"step {current_step}/{max_steps}"
                 if current_epoch is not None:
                     msg += f" | epoch {current_epoch:.3f}"
-                msg += (
-                    f" | loss {avg_total_loss:.4f}"
-                    f" | acc {acc:.4f}"
-                    f" | lr {lr:.2e}"
-                )
-                if avg_cls_loss is not None:
-                    msg += f" | cls {avg_cls_loss:.4f} | ppl {ppl:.2f}"
-                if avg_fape_loss is not None:
-                    msg += f" | fape {avg_fape_loss:.4f}"
-                if log_pred_nan_frac and (avg_pred_nan_frac is not None):
-                    msg += f" | pnan {avg_pred_nan_frac:.3f}"
+                msg += f" | loss {avg_total_loss:.4f}"
+
+                if is_mlm:
+                    # MLM-specific logging
+                    avg_masked_acc = (
+                        running_masked_acc_sum / float(max(1, running_masked_acc_count))
+                        if running_masked_acc_count > 0
+                        else acc
+                    )
+                    msg += f" | mask_acc {avg_masked_acc:.4f}"
+                    if ppl is not None:
+                        msg += f" | ppl {ppl:.2f}"
+                    msg += f" | lr {lr:.2e}"
+                else:
+                    # Codebook-specific logging
+                    msg += f" | acc {acc:.4f} | lr {lr:.2e}"
+                    if avg_cls_loss is not None:
+                        msg += f" | cls {avg_cls_loss:.4f} | ppl {ppl:.2f}"
+
+                    avg_fape_loss = (
+                        running_fape_loss / float(max(1, running_fape_count))
+                        if running_fape_count > 0
+                        else None
+                    )
+                    avg_pred_nan_frac = (
+                        running_pred_nan_frac_sum
+                        / float(max(1, running_pred_nan_frac_count))
+                        if running_pred_nan_frac_count > 0
+                        else None
+                    )
+                    if avg_fape_loss is not None:
+                        msg += f" | fape {avg_fape_loss:.4f}"
+                    if log_pred_nan_frac and (avg_pred_nan_frac is not None):
+                        msg += f" | pnan {avg_pred_nan_frac:.3f}"
+
                 console.train(msg)
                 if log_file_handle is not None:
                     print(msg, file=log_file_handle, flush=True)
@@ -909,16 +1090,39 @@ def run_training(cfg: DictConfig):
                 if wb is not None:
                     payload: dict[str, float] = {
                         "train/loss": float(avg_total_loss),
-                        "train/acc": float(acc),
                         "lr": float(lr),
                     }
-                    if avg_cls_loss is not None and ppl is not None:
-                        payload["train/cls_loss"] = float(avg_cls_loss)
-                        payload["train/ppl"] = float(ppl)
-                    if avg_fape_loss is not None:
-                        payload["train/fape_loss"] = float(avg_fape_loss)
-                    if log_pred_nan_frac and (avg_pred_nan_frac is not None):
-                        payload["train/pred_nan_frac"] = float(avg_pred_nan_frac)
+
+                    if is_mlm:
+                        avg_masked_acc = (
+                            running_masked_acc_sum / float(max(1, running_masked_acc_count))
+                            if running_masked_acc_count > 0
+                            else acc
+                        )
+                        payload["train/mask_acc"] = float(avg_masked_acc)
+                        if ppl is not None:
+                            payload["train/ppl"] = float(ppl)
+                    else:
+                        payload["train/acc"] = float(acc)
+                        if avg_cls_loss is not None and ppl is not None:
+                            payload["train/cls_loss"] = float(avg_cls_loss)
+                            payload["train/ppl"] = float(ppl)
+                        avg_fape_loss = (
+                            running_fape_loss / float(max(1, running_fape_count))
+                            if running_fape_count > 0
+                            else None
+                        )
+                        avg_pred_nan_frac = (
+                            running_pred_nan_frac_sum
+                            / float(max(1, running_pred_nan_frac_count))
+                            if running_pred_nan_frac_count > 0
+                            else None
+                        )
+                        if avg_fape_loss is not None:
+                            payload["train/fape_loss"] = float(avg_fape_loss)
+                        if log_pred_nan_frac and (avg_pred_nan_frac is not None):
+                            payload["train/pred_nan_frac"] = float(avg_pred_nan_frac)
+
                     if current_epoch is not None:
                         payload["train/epoch"] = float(current_epoch)
                     wb.log(payload, step=current_step)
@@ -931,6 +1135,8 @@ def run_training(cfg: DictConfig):
                 running_fape_count = 0
                 running_pred_nan_frac_sum = 0.0
                 running_pred_nan_frac_count = 0
+                running_masked_acc_sum = 0.0
+                running_masked_acc_count = 0
 
             # eval across all configured eval loaders
             if current_step % eval_interval == 0 and len(eval_loaders) > 0:
@@ -951,6 +1157,9 @@ def run_training(cfg: DictConfig):
                     eval_struct_count = 0.0
                     eval_pred_nan_frac_sum = 0.0
                     eval_pred_nan_frac_count = 0.0
+                    # MLM-specific eval accumulators
+                    eval_masked_acc_sum = 0.0
+                    eval_masked_acc_count = 0.0
 
                     with torch.no_grad():
                         for ev in eval_loader:
@@ -970,10 +1179,16 @@ def run_training(cfg: DictConfig):
                                 tokens=etok, labels=elab, ignore_index=ignore_index
                             )
                             eval_loss_sum += float(out["loss"].item())
-                            eval_acc_sum += _compute_accuracy(
+                            batch_acc = _compute_accuracy(
                                 out["logits"], elab, ignore_index
                             )
+                            eval_acc_sum += batch_acc
                             eval_batches += 1.0
+
+                            # MLM-specific: track masked accuracy
+                            if is_mlm:
+                                eval_masked_acc_sum += batch_acc
+                                eval_masked_acc_count += 1.0
 
                             # accumulate loss components
                             cls_loss_tensor = out.get("classification_loss")
@@ -985,81 +1200,82 @@ def run_training(cfg: DictConfig):
                                 eval_fape_loss_sum += float(fape_loss_tensor.item())
                                 eval_fape_batches += 1.0
 
-                            # optional structure metrics if predicted coords available
-                            pred_coords = out.get("pred_coords", None)
-                            # if decoder is available and eval decoding is enabled, produce pred_coords
-                            if (
-                                pred_coords is None
-                                and decoder is not None
-                                and want_eval_decode
-                            ):
-                                pad_id = int(cfg.model.encoder.pad_id)
-                                res_mask = etok != pad_id
-                                method = str(
-                                    getattr(cfg.train.decoding, "eval_method", "argmax")
-                                )
-                                if method == "top_p":
-                                    temperature = float(
-                                        getattr(cfg.train.decoding, "temperature", 1.0)
+                            # optional structure metrics if predicted coords available (codebook only)
+                            if not is_mlm:
+                                pred_coords = out.get("pred_coords", None)
+                                # if decoder is available and eval decoding is enabled, produce pred_coords
+                                if (
+                                    pred_coords is None
+                                    and decoder is not None
+                                    and want_eval_decode
+                                ):
+                                    pad_id = int(cfg.model.encoder.pad_id)
+                                    res_mask = etok != pad_id
+                                    method = str(
+                                        getattr(cfg.train.decoding, "eval_method", "argmax")
                                     )
-                                    top_p = float(
-                                        getattr(cfg.train.decoding, "top_p", 0.9)
-                                    )
-                                    probs = torch.softmax(
-                                        out["logits"] / max(1e-8, temperature), dim=-1
-                                    )
-                                    idx = sample_indices_top_p(
-                                        probs, top_p=top_p, temperature=1.0
-                                    )
-                                    codes = indices_to_codes(
-                                        _unwrap_model(model, accelerator).classifier.E,
-                                        idx,
-                                    )
-                                else:
-                                    idx = out["logits"].argmax(dim=-1)
-                                    codes = indices_to_codes(
-                                        _unwrap_model(model, accelerator).classifier.E,
-                                        idx,
-                                    )
-                                pred_coords = decode_coords(decoder, codes, res_mask)
-                                out["pred_coords"] = pred_coords
+                                    if method == "top_p":
+                                        temperature = float(
+                                            getattr(cfg.train.decoding, "temperature", 1.0)
+                                        )
+                                        top_p = float(
+                                            getattr(cfg.train.decoding, "top_p", 0.9)
+                                        )
+                                        probs = torch.softmax(
+                                            out["logits"] / max(1e-8, temperature), dim=-1
+                                        )
+                                        idx = sample_indices_top_p(
+                                            probs, top_p=top_p, temperature=1.0
+                                        )
+                                        codes = indices_to_codes(
+                                            _unwrap_model(model, accelerator).classifier.E,
+                                            idx,
+                                        )
+                                    else:
+                                        idx = out["logits"].argmax(dim=-1)
+                                        codes = indices_to_codes(
+                                            _unwrap_model(model, accelerator).classifier.E,
+                                            idx,
+                                        )
+                                    pred_coords = decode_coords(decoder, codes, res_mask)
+                                    out["pred_coords"] = pred_coords
 
-                            if pred_coords is not None and ecoords is not None:
-                                if log_pred_nan_frac:
-                                    _pnan_eval = torch.isnan(pred_coords).float().mean()
-                                    eval_pred_nan_frac_sum += float(_pnan_eval.item())
-                                    eval_pred_nan_frac_count += 1.0
-                                res_mask = etok != cfg.model.encoder.pad_id
-                                # compute eval metrics; guard against numeric failures (NaN, etc)
-                                try:
-                                    lddt_b, _ = lddt_ca(
-                                        pred_coords, ecoords, residue_mask=res_mask
-                                    )
-                                    tm_b, _ = tm_score(
-                                        pred_coords, ecoords, residue_mask=res_mask
-                                    )
-                                    rmsd_b = rmsd(
-                                        pred_coords,
-                                        ecoords,
-                                        residue_mask=res_mask,
-                                        align=True,
-                                        atom_set="CA",
-                                    )
-                                    eval_lddt_sum += float(lddt_b.mean().item())
-                                    eval_tm_sum += float(tm_b.mean().item())
-                                    eval_rmsd_sum += float(rmsd_b.mean().item())
-                                    eval_struct_count += 1.0
-                                except Exception:
-                                    pass
-                                # also compute FAPE on eval if predicted coords are present (as a metric)
-                                try:
-                                    fape_eval = fape_loss(
-                                        pred_coords, ecoords, residue_mask=res_mask
-                                    )
-                                    eval_fape_loss_sum += float(fape_eval.item())
-                                    eval_fape_batches += 1.0
-                                except Exception:
-                                    pass
+                                if pred_coords is not None and ecoords is not None:
+                                    if log_pred_nan_frac:
+                                        _pnan_eval = torch.isnan(pred_coords).float().mean()
+                                        eval_pred_nan_frac_sum += float(_pnan_eval.item())
+                                        eval_pred_nan_frac_count += 1.0
+                                    res_mask = etok != cfg.model.encoder.pad_id
+                                    # compute eval metrics; guard against numeric failures (NaN, etc)
+                                    try:
+                                        lddt_b, _ = lddt_ca(
+                                            pred_coords, ecoords, residue_mask=res_mask
+                                        )
+                                        tm_b, _ = tm_score(
+                                            pred_coords, ecoords, residue_mask=res_mask
+                                        )
+                                        rmsd_b = rmsd(
+                                            pred_coords,
+                                            ecoords,
+                                            residue_mask=res_mask,
+                                            align=True,
+                                            atom_set="CA",
+                                        )
+                                        eval_lddt_sum += float(lddt_b.mean().item())
+                                        eval_tm_sum += float(tm_b.mean().item())
+                                        eval_rmsd_sum += float(rmsd_b.mean().item())
+                                        eval_struct_count += 1.0
+                                    except Exception:
+                                        pass
+                                    # also compute FAPE on eval if predicted coords are present (as a metric)
+                                    try:
+                                        fape_eval = fape_loss(
+                                            pred_coords, ecoords, residue_mask=res_mask
+                                        )
+                                        eval_fape_loss_sum += float(fape_eval.item())
+                                        eval_fape_batches += 1.0
+                                    except Exception:
+                                        pass
 
                     # aggregate across processes if using Accelerate
                     if accelerator:
@@ -1073,12 +1289,14 @@ def run_training(cfg: DictConfig):
                                 eval_cls_batches,
                                 eval_fape_loss_sum,
                                 eval_fape_batches,
+                                eval_masked_acc_sum,
+                                eval_masked_acc_count,
                             ],
                             dtype=torch.float32,
                             device=metrics_device,
                         )
                         gathered = accelerator.gather_for_metrics(metrics_local)
-                        # gathered can be shape [7] on single process or [N, 7] on multi
+                        # gathered can be shape [9] on single process or [N, 9] on multi
                         if gathered.dim() == 1:
                             eval_loss_sum = float(gathered[0].item())
                             eval_acc_sum = float(gathered[1].item())
@@ -1087,6 +1305,8 @@ def run_training(cfg: DictConfig):
                             eval_cls_batches = float(gathered[4].item())
                             eval_fape_loss_sum = float(gathered[5].item())
                             eval_fape_batches = float(gathered[6].item())
+                            eval_masked_acc_sum = float(gathered[7].item())
+                            eval_masked_acc_count = float(gathered[8].item())
                         else:
                             eval_loss_sum = float(gathered[:, 0].sum().item())
                             eval_acc_sum = float(gathered[:, 1].sum().item())
@@ -1095,6 +1315,8 @@ def run_training(cfg: DictConfig):
                             eval_cls_batches = float(gathered[:, 4].sum().item())
                             eval_fape_loss_sum = float(gathered[:, 5].sum().item())
                             eval_fape_batches = float(gathered[:, 6].sum().item())
+                            eval_masked_acc_sum = float(gathered[:, 7].sum().item())
+                            eval_masked_acc_count = float(gathered[:, 8].sum().item())
 
                     eval_loss = eval_loss_sum / max(1.0, eval_batches)
                     eval_acc = eval_acc_sum / max(1.0, eval_batches)
@@ -1116,22 +1338,35 @@ def run_training(cfg: DictConfig):
                         if eval_pred_nan_frac_count > 0
                         else None
                     )
+                    eval_masked_acc = (
+                        eval_masked_acc_sum / max(1.0, eval_masked_acc_count)
+                        if eval_masked_acc_count > 0
+                        else None
+                    )
 
                     metrics: dict[str, float] = {
                         "loss": float(eval_loss),
-                        "acc": float(eval_acc),
                     }
-                    if eval_cls_loss is not None and eval_ppl is not None:
-                        metrics["cls_loss"] = float(eval_cls_loss)
-                        metrics["ppl"] = float(eval_ppl)
-                    if eval_fape_loss is not None:
-                        metrics["fape_loss"] = float(eval_fape_loss)
-                    if log_pred_nan_frac and (eval_pred_nan_frac is not None):
-                        metrics["pred_nan_frac"] = float(eval_pred_nan_frac)
-                    if eval_struct_count > 0:
-                        metrics["lddt"] = float(eval_lddt_sum / eval_struct_count)
-                        metrics["tm"] = float(eval_tm_sum / eval_struct_count)
-                        metrics["rmsd"] = float(eval_rmsd_sum / eval_struct_count)
+
+                    if is_mlm:
+                        if eval_masked_acc is not None:
+                            metrics["mask_acc"] = float(eval_masked_acc)
+                        if eval_ppl is not None:
+                            metrics["ppl"] = float(eval_ppl)
+                    else:
+                        metrics["acc"] = float(eval_acc)
+                        if eval_cls_loss is not None and eval_ppl is not None:
+                            metrics["cls_loss"] = float(eval_cls_loss)
+                            metrics["ppl"] = float(eval_ppl)
+                        if eval_fape_loss is not None:
+                            metrics["fape_loss"] = float(eval_fape_loss)
+                        if log_pred_nan_frac and (eval_pred_nan_frac is not None):
+                            metrics["pred_nan_frac"] = float(eval_pred_nan_frac)
+                        if eval_struct_count > 0:
+                            metrics["lddt"] = float(eval_lddt_sum / eval_struct_count)
+                            metrics["tm"] = float(eval_tm_sum / eval_struct_count)
+                            metrics["rmsd"] = float(eval_rmsd_sum / eval_struct_count)
+
                     if current_epoch is not None:
                         metrics["epoch"] = float(current_epoch)
 
@@ -1145,54 +1380,70 @@ def run_training(cfg: DictConfig):
                         epoch_val = metrics.get("epoch")
                         if epoch_val is not None:
                             msg += f" | epoch {epoch_val:.3f}"
-                        msg += (
-                            f" | loss {metrics['loss']:.4f}"
-                            f" | acc {metrics['acc']:.4f}"
-                        )
-                        if "cls_loss" in metrics and "ppl" in metrics:
-                            msg += (
-                                f" | cls {metrics['cls_loss']:.4f}"
-                                f" | ppl {metrics['ppl']:.2f}"
-                            )
-                        if "fape_loss" in metrics:
-                            msg += f" | fape {metrics['fape_loss']:.4f}"
-                        if log_pred_nan_frac and ("pred_nan_frac" in metrics):
-                            msg += f" | pnan {metrics['pred_nan_frac']:.3f}"
-                        if "lddt" in metrics:
-                            msg += (
-                                f" | lDDT {metrics['lddt']:.3f}"
-                                f" | TM {metrics['tm']:.3f}"
-                                f" | RMSD {metrics['rmsd']:.3f}Å"
-                            )
+                        msg += f" | loss {metrics['loss']:.4f}"
+
+                        if is_mlm:
+                            if "mask_acc" in metrics:
+                                msg += f" | mask_acc {metrics['mask_acc']:.4f}"
+                            if "ppl" in metrics:
+                                msg += f" | ppl {metrics['ppl']:.2f}"
+                        else:
+                            msg += f" | acc {metrics['acc']:.4f}"
+                            if "cls_loss" in metrics and "ppl" in metrics:
+                                msg += (
+                                    f" | cls {metrics['cls_loss']:.4f}"
+                                    f" | ppl {metrics['ppl']:.2f}"
+                                )
+                            if "fape_loss" in metrics:
+                                msg += f" | fape {metrics['fape_loss']:.4f}"
+                            if log_pred_nan_frac and ("pred_nan_frac" in metrics):
+                                msg += f" | pnan {metrics['pred_nan_frac']:.3f}"
+                            if "lddt" in metrics:
+                                msg += (
+                                    f" | lDDT {metrics['lddt']:.3f}"
+                                    f" | TM {metrics['tm']:.3f}"
+                                    f" | RMSD {metrics['rmsd']:.3f}Å"
+                                )
+
                         console.eval(msg)
                         if log_file_handle is not None:
                             print(msg, file=log_file_handle, flush=True)
                         if wb is not None:
                             payload: dict[str, float] = {
                                 f"eval/{eval_name}/loss": float(metrics["loss"]),
-                                f"eval/{eval_name}/acc": float(metrics["acc"]),
                             }
-                            if "cls_loss" in metrics and "ppl" in metrics:
-                                payload[f"eval/{eval_name}/cls_loss"] = float(
-                                    metrics["cls_loss"]
-                                )
-                                payload[f"eval/{eval_name}/ppl"] = float(metrics["ppl"])
-                            if "fape_loss" in metrics:
-                                payload[f"eval/{eval_name}/fape_loss"] = float(
-                                    metrics["fape_loss"]
-                                )
-                            if log_pred_nan_frac and ("pred_nan_frac" in metrics):
-                                payload[f"eval/{eval_name}/pred_nan_frac"] = float(
-                                    metrics["pred_nan_frac"]
-                                )
-                            if "lddt" in metrics:
-                                payload[f"eval/{eval_name}/lddt"] = float(
-                                    metrics["lddt"]
-                                )
-                                payload[f"eval/{eval_name}/tm"] = float(metrics["tm"])
-                                payload[f"eval/{eval_name}/rmsd"] = float(
-                                    metrics["rmsd"]
-                                )
+
+                            if is_mlm:
+                                if "mask_acc" in metrics:
+                                    payload[f"eval/{eval_name}/mask_acc"] = float(
+                                        metrics["mask_acc"]
+                                    )
+                                if "ppl" in metrics:
+                                    payload[f"eval/{eval_name}/ppl"] = float(metrics["ppl"])
+                            else:
+                                payload[f"eval/{eval_name}/acc"] = float(metrics["acc"])
+                                if "cls_loss" in metrics and "ppl" in metrics:
+                                    payload[f"eval/{eval_name}/cls_loss"] = float(
+                                        metrics["cls_loss"]
+                                    )
+                                    payload[f"eval/{eval_name}/ppl"] = float(metrics["ppl"])
+                                if "fape_loss" in metrics:
+                                    payload[f"eval/{eval_name}/fape_loss"] = float(
+                                        metrics["fape_loss"]
+                                    )
+                                if log_pred_nan_frac and ("pred_nan_frac" in metrics):
+                                    payload[f"eval/{eval_name}/pred_nan_frac"] = float(
+                                        metrics["pred_nan_frac"]
+                                    )
+                                if "lddt" in metrics:
+                                    payload[f"eval/{eval_name}/lddt"] = float(
+                                        metrics["lddt"]
+                                    )
+                                    payload[f"eval/{eval_name}/tm"] = float(metrics["tm"])
+                                    payload[f"eval/{eval_name}/rmsd"] = float(
+                                        metrics["rmsd"]
+                                    )
+
                             if epoch_val is not None:
                                 payload[f"eval/{eval_name}/epoch"] = float(epoch_val)
                             wb.log(payload, step=current_step)

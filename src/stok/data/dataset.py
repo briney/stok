@@ -19,45 +19,60 @@ class BaseTokenizedDataset:
         *,
         max_length: int,
         has_coords: bool,
+        require_indices: bool = True,
     ) -> dict[str, torch.Tensor | str]:
+        """Build output dictionary from a dataset row.
+
+        Args:
+            row: DataFrame row containing protein data.
+            max_length: Maximum sequence length for padding.
+            has_coords: Whether to parse coordinates from the row.
+            require_indices: Whether indices column is required. Set to False for MLM.
+
+        Returns:
+            Dictionary with pid, seq, and optionally indices, masks, coords.
+        """
         pid = row["pid"]
         seq = row["protein_sequence"]
-        # handle empty/NaN indices cells -> treat as empty list
-        raw = row["indices"]
-        if isinstance(raw, (list, tuple, np.ndarray)):
-            indices = [int(i) for i in list(raw) if i is not None]
-        elif isinstance(raw, float) and pd.isna(raw):
-            indices = []
-        elif isinstance(raw, str):
-            s = raw.strip()
-            indices = [int(i) for i in s.split()] if s else []
-        else:
-            # fallback: try casting to string then parse; if it fails, empty
-            try:
-                s = str(raw).strip()
-                indices = [int(i) for i in s.split()] if s else []
-            except Exception:
-                indices = []
-
-        idx_length = len(indices)
-        pad_length = max(0, max_length - idx_length)
-
-        # pad indices with -1 and create a mask
-        padded_indices = indices + [-1] * pad_length
-        mask = [True] * idx_length + [False] * pad_length
-
-        # make tensors
-        indices_tensor = torch.tensor(padded_indices, dtype=torch.long)
-        mask_tensor = torch.tensor(mask, dtype=torch.bool)
-        nan_mask = indices_tensor != -1
 
         out: dict[str, torch.Tensor | str] = {
             "pid": pid,
-            "indices": indices_tensor,
             "seq": seq,
-            "masks": mask_tensor,
-            "nan_masks": nan_mask,
         }
+
+        # Parse indices if present and required
+        if require_indices or "indices" in row.index:
+            raw = row.get("indices")
+            if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+                indices = []
+            elif isinstance(raw, (list, tuple, np.ndarray)):
+                indices = [int(i) for i in list(raw) if i is not None]
+            elif isinstance(raw, str):
+                s = raw.strip()
+                indices = [int(i) for i in s.split()] if s else []
+            else:
+                # fallback: try casting to string then parse; if it fails, empty
+                try:
+                    s = str(raw).strip()
+                    indices = [int(i) for i in s.split()] if s else []
+                except Exception:
+                    indices = []
+
+            idx_length = len(indices)
+            pad_length = max(0, max_length - idx_length)
+
+            # pad indices with -1 and create a mask
+            padded_indices = indices + [-1] * pad_length
+            mask = [True] * idx_length + [False] * pad_length
+
+            # make tensors
+            indices_tensor = torch.tensor(padded_indices, dtype=torch.long)
+            mask_tensor = torch.tensor(mask, dtype=torch.bool)
+            nan_mask = indices_tensor != -1
+
+            out["indices"] = indices_tensor
+            out["masks"] = mask_tensor
+            out["nan_masks"] = nan_mask
 
         # parse optional 3D-coordinates only from parquet inputs
         if has_coords:
@@ -177,6 +192,8 @@ class TokenizedDataset(Dataset, BaseTokenizedDataset):
     Args:
         dataset_path: Path to CSV/TSV or Parquet file (or Parquet directory).
         max_length: Maximum number of indices to keep (padding with -1).
+        load_coords: Whether to load 3D coordinates (Parquet only).
+        require_indices: Whether the indices column is required. Set to False for MLM.
     """
 
     def __init__(
@@ -185,6 +202,7 @@ class TokenizedDataset(Dataset, BaseTokenizedDataset):
         max_length: int,
         *,
         load_coords: bool = True,
+        require_indices: bool = True,
     ):
         p = Path(dataset_path)
         suffix = p.suffix.lower()
@@ -206,10 +224,23 @@ class TokenizedDataset(Dataset, BaseTokenizedDataset):
                 raise RuntimeError(
                     "Unsupported file format. Provide a CSV/TSV or Parquet file."
                 ) from e
+
         self.max_length = max_length
+        self.require_indices = require_indices
+
+        # Validate required columns
+        required_cols = {"pid", "protein_sequence"}
+        if require_indices:
+            required_cols.add("indices")
+        missing = required_cols - set(self.data.columns)
+        if missing:
+            raise ValueError(f"Missing required columns: {missing}")
+
         # Coordinates are only supported from Parquet-backed datasets
-        self.has_coords = bool(load_coords) and self._is_parquet and (
-            "coordinates" in self.data.columns
+        self.has_coords = (
+            bool(load_coords)
+            and self._is_parquet
+            and ("coordinates" in self.data.columns)
         )
 
     def __len__(self):
@@ -218,7 +249,10 @@ class TokenizedDataset(Dataset, BaseTokenizedDataset):
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         row = self.data.iloc[idx]
         return BaseTokenizedDataset._build_output_from_row(
-            row, max_length=self.max_length, has_coords=self.has_coords
+            row,
+            max_length=self.max_length,
+            has_coords=self.has_coords,
+            require_indices=self.require_indices,
         )
 
 
@@ -274,6 +308,48 @@ class DummySequenceDataset(Dataset):
         return tokens.long(), labels.long()
 
 
+class DummyMLMDataset(Dataset):
+    """Placeholder dataset producing random sequences for MLM smoke tests."""
+
+    def __init__(
+        self,
+        num_samples: int,
+        seq_len: int,
+        vocab_size: int = 32,
+    ):
+        """Initialize dummy MLM dataset.
+
+        Args:
+            num_samples: Number of samples in dataset.
+            seq_len: Sequence length for each sample.
+            vocab_size: Vocabulary size (default 32 for amino acids).
+        """
+        super().__init__()
+        self.num_samples = num_samples
+        self.seq_len = seq_len
+        self.vocab_size = vocab_size
+        # Amino acid characters (indices 4-23 in DEFAULT_VOCAB)
+        self._aa_chars = "LAGVSERTIPDKQNFYMHWC"
+
+    def __len__(self) -> int:
+        return self.num_samples
+
+    def __getitem__(self, idx: int) -> dict[str, str]:
+        """Get a sample from the dataset.
+
+        Args:
+            idx: Sample index.
+
+        Returns:
+            Dict with 'pid' and 'seq' keys.
+        """
+        # Generate random amino acid sequence
+        seq = "".join(
+            self._aa_chars[i] for i in torch.randint(0, 20, (self.seq_len,)).tolist()
+        )
+        return {"pid": f"dummy_{idx}", "seq": seq}
+
+
 class IterableTokenizedDataset(IterableDataset, BaseTokenizedDataset):
     """Shard-wise iterable dataset over a directory of Parquet files.
 
@@ -287,6 +363,8 @@ class IterableTokenizedDataset(IterableDataset, BaseTokenizedDataset):
         shuffle_shards: Whether to shuffle shard order per epoch.
         shuffle_rows: Whether to shuffle selected row indices per shard per epoch.
         seed: Optional base seed for deterministic epoch shuffles.
+        load_coords: Whether to load 3D coordinates.
+        require_indices: Whether the indices column is required. Set to False for MLM.
     """
 
     def __init__(
@@ -298,6 +376,7 @@ class IterableTokenizedDataset(IterableDataset, BaseTokenizedDataset):
         shuffle_rows: bool = True,
         seed: int = 0,
         load_coords: bool = True,
+        require_indices: bool = True,
     ):
         self.dataset_path = Path(dataset_path)
         if not self.dataset_path.is_dir():
@@ -311,6 +390,7 @@ class IterableTokenizedDataset(IterableDataset, BaseTokenizedDataset):
         self._epoch = -1
         # user-intent flag for whether to load coordinates at all
         self._load_coords = bool(load_coords)
+        self._require_indices = bool(require_indices)
 
         # enumerate shard files and stats
         shard_paths = sorted(
@@ -338,8 +418,12 @@ class IterableTokenizedDataset(IterableDataset, BaseTokenizedDataset):
                 pass
         self._offsets = np.cumsum([0] + self._rows_per_shard[:-1]).tolist()
         self._total_rows = int(sum(self._rows_per_shard))
-        # Track whether the directory has any coordinates column at all.
+
+        # Track whether the directory has coordinates and indices columns
         self.has_coords = ("coordinates" in cols_union) if len(cols_union) > 0 else True
+        self._has_indices_col = (
+            ("indices" in cols_union) if len(cols_union) > 0 else True
+        )
 
     def __len__(self) -> int:
         # Per-rank sample cap to keep equal sample counts across ranks
@@ -413,7 +497,14 @@ class IterableTokenizedDataset(IterableDataset, BaseTokenizedDataset):
                 continue
 
             # read only required columns
-            want_cols = ["pid", "protein_sequence", "indices"]
+            want_cols = ["pid", "protein_sequence"]
+            # Only include indices if required and present
+            if self._require_indices and self._has_indices_col:
+                want_cols.append("indices")
+            elif self._has_indices_col:
+                # Include indices if present even if not required
+                want_cols.append("indices")
+
             use_coords = self.has_coords and self._load_coords
             if use_coords:
                 want_cols.append("coordinates")
@@ -427,5 +518,6 @@ class IterableTokenizedDataset(IterableDataset, BaseTokenizedDataset):
                     row,
                     max_length=self.max_length,
                     has_coords=use_coords,
+                    require_indices=self._require_indices,
                 )
                 emitted += 1

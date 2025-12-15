@@ -36,6 +36,23 @@ wandb:
   name: null
   tags: []
 
+# console output
+console:
+  enabled: true
+
+# Training objective: "codebook" (structure token prediction) or "mlm" (masked language modeling)
+objective: "codebook"
+
+# MLM-specific settings (only used when objective="mlm")
+mlm:
+  mask_prob: 0.15           # Probability of selecting a token for masking
+  mask_token_prob: 0.8      # Of selected tokens, prob of replacing with <mask>
+  random_token_prob: 0.1    # Of selected tokens, prob of replacing with random token
+  tie_word_embeddings: true # Whether to tie LM head weights to input embeddings
+
+# Pre-trained encoder checkpoint for initializing codebook training from MLM pre-training
+pretrained_encoder: null
+
 fape:
   enabled: false
   start_step: 0

@@ -2,6 +2,10 @@
 
 Encoder-only protein structure tokenizer using SDPA attention with RoPE and a SwiGLU MLP, managed via Hydra. The classifier can be tied to a frozen VQ codebook for per-residue structure tokens.
 
+STōk supports two training objectives:
+- **Codebook** (default): Predict structure tokens from a frozen VQ codebook per residue
+- **MLM**: Masked language modeling pre-training on amino acid sequences
+
 ## install
 
 ```bash
@@ -62,6 +66,13 @@ Note: Decoder hyperparameters are not configured in YAML; they are defined in co
 
 ## training
 
+STōk supports two training objectives controlled by `train.objective`:
+
+- `codebook` (default): Predict structure tokens from a frozen VQ codebook
+- `mlm`: Masked language modeling pre-training on amino acid sequences
+
+### codebook training (default)
+
 Single‑GPU (quick/dev):
 
 ```bash
@@ -89,6 +100,83 @@ Notes:
   accelerate launch --num_processes 8 -m stok.train ...
   ```
 - DataLoader workers are per process. Tune `data.num_workers` to avoid oversubscription when using many GPUs.
+
+### MLM pre-training
+
+MLM pre-training uses masked language modeling on amino acid sequences to learn protein representations before fine-tuning on structure token prediction. This is useful for:
+
+- Pre-training on large unlabeled sequence datasets
+- Initializing the encoder with learned protein representations
+- Transfer learning to downstream structure prediction tasks
+
+**Basic MLM training:**
+
+```bash
+stok train \
+  train.objective=mlm \
+  data.train=/abs/path/to/sequences.parquet
+```
+
+**MLM with evaluation:**
+
+```bash
+stok train \
+  train.objective=mlm \
+  data.train=/abs/path/to/train.parquet \
+  +data.eval.validation=/abs/path/to/eval.parquet
+```
+
+**MLM configuration options:**
+
+```yaml
+train:
+  objective: mlm
+  mlm:
+    mask_prob: 0.15           # Fraction of tokens to mask (default: 0.15)
+    mask_token_prob: 0.8      # Of masked tokens, fraction replaced with <mask> (default: 0.8)
+    random_token_prob: 0.1    # Of masked tokens, fraction replaced with random AA (default: 0.1)
+    tie_word_embeddings: true # Tie LM head weights to input embeddings (default: true)
+```
+
+CLI example with custom masking:
+
+```bash
+stok train \
+  train.objective=mlm \
+  train.mlm.mask_prob=0.20 \
+  train.mlm.mask_token_prob=0.85 \
+  data.train=/abs/path/to/sequences.parquet
+```
+
+**MLM dataset format:**
+
+For MLM training, datasets only need `pid` and `protein_sequence` columns—no `indices` column required:
+
+```csv
+pid,protein_sequence
+protein_1,MVLSPADKTNVKAAWGKVGAHAGEYGAEALERMF
+protein_2,MNIFEMLRIDKGLQVVAVKAPGFGDNRKNQLKDF
+```
+
+**MLM metrics:**
+
+During MLM training, the following metrics are logged:
+- `mask_acc`: Accuracy on masked token prediction
+- `ppl`: Perplexity (exp of cross-entropy loss)
+- `loss`: Total loss
+
+### initializing codebook training from MLM pre-training
+
+After MLM pre-training, you can initialize the encoder weights for codebook training:
+
+```bash
+stok train \
+  train.objective=codebook \
+  train.pretrained_encoder=/abs/path/to/mlm_checkpoint/model/final.pt \
+  data.train=/abs/path/to/labeled_data.parquet
+```
+
+This loads the embedding and encoder weights from the MLM checkpoint while randomly initializing the codebook classifier head.
 
 ### large, sharded Parquet datasets (iterable)
 
