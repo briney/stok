@@ -11,7 +11,13 @@ import torch
 import torch.nn as nn
 from omegaconf import DictConfig, OmegaConf
 from torch.optim import AdamW
-from torch.utils.data import ConcatDataset, DataLoader, Dataset, IterableDataset, Sampler
+from torch.utils.data import (
+    ConcatDataset,
+    DataLoader,
+    Dataset,
+    IterableDataset,
+    Sampler,
+)
 
 from stok.data.collate import mlm_collate
 from stok.data.dataset import (
@@ -269,12 +275,12 @@ def _load_pretrained_encoder(
     )
 
     # Log what was loaded
-    printer(f"Loaded {len(encoder_keys)} encoder/embedding weights from {checkpoint_path}")
+    printer(
+        f"Loaded {len(encoder_keys)} encoder/embedding weights from {checkpoint_path}"
+    )
     if missing:
         # Filter out expected missing keys (head-specific)
-        missing_encoder = [
-            k for k in missing if k.startswith(("embed.", "encoder."))
-        ]
+        missing_encoder = [k for k in missing if k.startswith(("embed.", "encoder."))]
         if missing_encoder:
             printer(f"  Warning: Missing encoder keys: {missing_encoder}")
 
@@ -443,7 +449,9 @@ def _parse_train_configs(cfg: DictConfig) -> list[dict[str, Any]]:
         if len(unspecified) > 0:
             remaining = 1.0 - total_specified
             # If the specified fractions already exceed 1.0, give unspecified 0.0
-            default_frac = (remaining / float(len(unspecified))) if remaining > 0 else 0.0
+            default_frac = (
+                (remaining / float(len(unspecified))) if remaining > 0 else 0.0
+            )
             for e in unspecified:
                 e["fraction"] = float(default_frac)
 
@@ -488,7 +496,9 @@ class MixtureSampler(Sampler[int]):
             raise ValueError("All dataset lengths must be positive for MixtureSampler")
         fr = np.asarray([float(f) for f in fractions], dtype=np.float64)
         if np.any(fr < 0) or float(fr.sum()) <= 0:
-            raise ValueError("fractions must be non-negative and sum to a positive value")
+            raise ValueError(
+                "fractions must be non-negative and sum to a positive value"
+            )
         fr = fr / float(fr.sum())
 
         self.lengths = [int(L) for L in lengths]
@@ -496,7 +506,9 @@ class MixtureSampler(Sampler[int]):
         self.seed = int(seed)
         self._epoch = 0
         self.offsets = np.cumsum([0] + self.lengths[:-1]).tolist()
-        self.num_samples = int(num_samples) if num_samples is not None else int(sum(self.lengths))
+        self.num_samples = (
+            int(num_samples) if num_samples is not None else int(sum(self.lengths))
+        )
 
     def __len__(self) -> int:
         return int(self.num_samples)
@@ -575,6 +587,7 @@ def _build_dataloaders(
         tokenizer = Tokenizer()
 
         if is_mlm:
+
             def collate(batch):
                 return mlm_collate(
                     batch,
@@ -589,6 +602,7 @@ def _build_dataloaders(
 
             collate_fn = collate
         else:
+
             def collate(batch):
                 return _tokenize_and_align(
                     batch,
@@ -629,7 +643,9 @@ def _build_dataloaders(
                     if isinstance(ds, IterableDataset):
                         itds = ds
                     else:
-                        itds = MapAsIterableDataset(ds, num_samples=len(ds), seed=int(cfg.seed))
+                        itds = MapAsIterableDataset(
+                            ds, num_samples=len(ds), seed=int(cfg.seed)
+                        )
                     iterables.append(itds)
                     fracs.append(float(frac))
                     try:
@@ -648,7 +664,9 @@ def _build_dataloaders(
                 lengths = [int(len(ds)) for ds in map_datasets]
                 fracs = [float(fr) for _, fr in ds_pairs]
                 concat = ConcatDataset(map_datasets)
-                sampler = MixtureSampler(lengths=lengths, fractions=fracs, seed=int(cfg.seed))
+                sampler = MixtureSampler(
+                    lengths=lengths, fractions=fracs, seed=int(cfg.seed)
+                )
                 train_ds = concat
                 train_sampler = sampler
     else:
@@ -689,6 +707,7 @@ def _build_dataloaders(
         tokenizer = Tokenizer()
 
         if is_mlm:
+
             def collate(batch):
                 return mlm_collate(
                     batch,
@@ -703,6 +722,7 @@ def _build_dataloaders(
 
             collate_fn = collate
         else:
+
             def collate(batch):
                 return _tokenize_and_align(
                     batch,
@@ -800,6 +820,7 @@ def _maybe_init_wandb(
 
 
 def run_training(cfg: DictConfig):
+    os.environ["DS_LOG_LEVEL"] = "warn"  # set DeepSpeed log level to warn
     accelerator = _maybe_get_accelerator()
     is_main = accelerator.is_main_process if accelerator else True
     printer = accelerator.print if accelerator else print
@@ -1075,7 +1096,11 @@ def run_training(cfg: DictConfig):
         file=sys.stdout,
     )
     if is_main and log_file_handle is not None:
-        print(f"Training started. Objective: {objective}", file=log_file_handle, flush=True)
+        print(
+            f"Training started. Objective: {objective}",
+            file=log_file_handle,
+            flush=True,
+        )
 
     # additional training accumulators (over the current log window)
     running_cls_loss = 0.0
@@ -1201,7 +1226,9 @@ def run_training(cfg: DictConfig):
             # For MLM, compute masked token accuracy
             if is_mlm:
                 with torch.no_grad():
-                    masked_acc = _compute_accuracy(outputs["logits"], labels, ignore_index)
+                    masked_acc = _compute_accuracy(
+                        outputs["logits"], labels, ignore_index
+                    )
                     running_masked_acc_sum += masked_acc
                     running_masked_acc_count += 1
 
@@ -1284,7 +1311,8 @@ def run_training(cfg: DictConfig):
 
                     if is_mlm:
                         avg_masked_acc = (
-                            running_masked_acc_sum / float(max(1, running_masked_acc_count))
+                            running_masked_acc_sum
+                            / float(max(1, running_masked_acc_count))
                             if running_masked_acc_count > 0
                             else acc
                         )
@@ -1401,38 +1429,53 @@ def run_training(cfg: DictConfig):
                                     pad_id = int(cfg.model.encoder.pad_id)
                                     res_mask = etok != pad_id
                                     method = str(
-                                        getattr(cfg.train.decoding, "eval_method", "argmax")
+                                        getattr(
+                                            cfg.train.decoding, "eval_method", "argmax"
+                                        )
                                     )
                                     if method == "top_p":
                                         temperature = float(
-                                            getattr(cfg.train.decoding, "temperature", 1.0)
+                                            getattr(
+                                                cfg.train.decoding, "temperature", 1.0
+                                            )
                                         )
                                         top_p = float(
                                             getattr(cfg.train.decoding, "top_p", 0.9)
                                         )
                                         probs = torch.softmax(
-                                            out["logits"] / max(1e-8, temperature), dim=-1
+                                            out["logits"] / max(1e-8, temperature),
+                                            dim=-1,
                                         )
                                         idx = sample_indices_top_p(
                                             probs, top_p=top_p, temperature=1.0
                                         )
                                         codes = indices_to_codes(
-                                            _unwrap_model(model, accelerator).classifier.E,
+                                            _unwrap_model(
+                                                model, accelerator
+                                            ).classifier.E,
                                             idx,
                                         )
                                     else:
                                         idx = out["logits"].argmax(dim=-1)
                                         codes = indices_to_codes(
-                                            _unwrap_model(model, accelerator).classifier.E,
+                                            _unwrap_model(
+                                                model, accelerator
+                                            ).classifier.E,
                                             idx,
                                         )
-                                    pred_coords = decode_coords(decoder, codes, res_mask)
+                                    pred_coords = decode_coords(
+                                        decoder, codes, res_mask
+                                    )
                                     out["pred_coords"] = pred_coords
 
                                 if pred_coords is not None and ecoords is not None:
                                     if log_pred_nan_frac:
-                                        _pnan_eval = torch.isnan(pred_coords).float().mean()
-                                        eval_pred_nan_frac_sum += float(_pnan_eval.item())
+                                        _pnan_eval = (
+                                            torch.isnan(pred_coords).float().mean()
+                                        )
+                                        eval_pred_nan_frac_sum += float(
+                                            _pnan_eval.item()
+                                        )
                                         eval_pred_nan_frac_count += 1.0
                                     res_mask = etok != cfg.model.encoder.pad_id
                                     # compute eval metrics; guard against numeric failures (NaN, etc)
@@ -1608,14 +1651,18 @@ def run_training(cfg: DictConfig):
                                         metrics["mask_acc"]
                                     )
                                 if "ppl" in metrics:
-                                    payload[f"eval/{eval_name}/ppl"] = float(metrics["ppl"])
+                                    payload[f"eval/{eval_name}/ppl"] = float(
+                                        metrics["ppl"]
+                                    )
                             else:
                                 payload[f"eval/{eval_name}/acc"] = float(metrics["acc"])
                                 if "cls_loss" in metrics and "ppl" in metrics:
                                     payload[f"eval/{eval_name}/cls_loss"] = float(
                                         metrics["cls_loss"]
                                     )
-                                    payload[f"eval/{eval_name}/ppl"] = float(metrics["ppl"])
+                                    payload[f"eval/{eval_name}/ppl"] = float(
+                                        metrics["ppl"]
+                                    )
                                 if "fape_loss" in metrics:
                                     payload[f"eval/{eval_name}/fape_loss"] = float(
                                         metrics["fape_loss"]
@@ -1628,7 +1675,9 @@ def run_training(cfg: DictConfig):
                                     payload[f"eval/{eval_name}/lddt"] = float(
                                         metrics["lddt"]
                                     )
-                                    payload[f"eval/{eval_name}/tm"] = float(metrics["tm"])
+                                    payload[f"eval/{eval_name}/tm"] = float(
+                                        metrics["tm"]
+                                    )
                                     payload[f"eval/{eval_name}/rmsd"] = float(
                                         metrics["rmsd"]
                                     )
