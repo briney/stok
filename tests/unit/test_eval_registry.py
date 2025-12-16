@@ -237,3 +237,302 @@ def test_build_metrics_passes_config_params():
     assert p_at_l.contact_threshold == 6.0
     assert p_at_l.min_seq_sep == 8
 
+
+def test_build_metrics_only_whitelist():
+    """Test that 'only' list whitelists specific metrics for a dataset."""
+    cfg = OmegaConf.create(
+        {
+            "train": {
+                "eval": {
+                    "metrics": {
+                        "accuracy": {"enabled": True},
+                        "perplexity": {"enabled": True},
+                    }
+                }
+            },
+            "data": {
+                "eval": {
+                    "seq_val": {
+                        "path": "/path/to/seq_val.parquet",
+                        "metrics": {
+                            "only": ["accuracy"],  # Only accuracy for this dataset
+                        },
+                    }
+                }
+            },
+            "model": {"classifier": {"ignore_index": -100}},
+        }
+    )
+
+    # Build for seq_val dataset with 'only' whitelist
+    metrics = build_metrics(cfg, objective="codebook", eval_name="seq_val")
+    metric_names = {type(m).__name__ for m in metrics}
+
+    # Only accuracy should be enabled
+    assert "AccuracyMetric" in metric_names
+    assert "PerplexityMetric" not in metric_names
+
+
+def test_build_metrics_only_whitelist_multiple():
+    """Test 'only' list with multiple metrics."""
+    cfg = OmegaConf.create(
+        {
+            "train": {
+                "eval": {
+                    "metrics": {
+                        "accuracy": {"enabled": True},
+                        "perplexity": {"enabled": True},
+                    }
+                }
+            },
+            "data": {
+                "eval": {
+                    "test_val": {
+                        "path": "/path/to/test.parquet",
+                        "metrics": {
+                            "only": ["accuracy", "perplexity"],  # Both allowed
+                        },
+                    }
+                }
+            },
+            "model": {"classifier": {"ignore_index": -100}},
+        }
+    )
+
+    metrics = build_metrics(cfg, objective="codebook", eval_name="test_val")
+    metric_names = {type(m).__name__ for m in metrics}
+
+    # Both should be enabled
+    assert "AccuracyMetric" in metric_names
+    assert "PerplexityMetric" in metric_names
+
+
+def test_build_metrics_only_with_override():
+    """Test that per-metric enabled can override 'only' list."""
+    cfg = OmegaConf.create(
+        {
+            "train": {
+                "eval": {
+                    "metrics": {
+                        "accuracy": {"enabled": True},
+                        "perplexity": {"enabled": True},
+                    }
+                }
+            },
+            "data": {
+                "eval": {
+                    "hybrid_val": {
+                        "path": "/path/to/hybrid.parquet",
+                        "metrics": {
+                            "only": ["accuracy"],  # Whitelist only accuracy
+                            "perplexity": {"enabled": True},  # But explicitly enable perplexity
+                        },
+                    }
+                }
+            },
+            "model": {"classifier": {"ignore_index": -100}},
+        }
+    )
+
+    metrics = build_metrics(cfg, objective="codebook", eval_name="hybrid_val")
+    metric_names = {type(m).__name__ for m in metrics}
+
+    # Both should be enabled (perplexity via override)
+    assert "AccuracyMetric" in metric_names
+    assert "PerplexityMetric" in metric_names
+
+
+def test_build_metrics_only_disable_override():
+    """Test that per-metric enabled=false can override 'only' list inclusion."""
+    cfg = OmegaConf.create(
+        {
+            "train": {
+                "eval": {
+                    "metrics": {
+                        "accuracy": {"enabled": True},
+                        "perplexity": {"enabled": True},
+                    }
+                }
+            },
+            "data": {
+                "eval": {
+                    "selective_val": {
+                        "path": "/path/to/selective.parquet",
+                        "metrics": {
+                            "only": ["accuracy", "perplexity"],  # Both in whitelist
+                            "accuracy": {"enabled": False},  # But disable accuracy
+                        },
+                    }
+                }
+            },
+            "model": {"classifier": {"ignore_index": -100}},
+        }
+    )
+
+    metrics = build_metrics(cfg, objective="codebook", eval_name="selective_val")
+    metric_names = {type(m).__name__ for m in metrics}
+
+    # Only perplexity should be enabled
+    assert "AccuracyMetric" not in metric_names
+    assert "PerplexityMetric" in metric_names
+
+
+def test_build_metrics_per_dataset_has_coords_load_coords():
+    """Test per-dataset load_coords overrides global has_coords."""
+    cfg = OmegaConf.create(
+        {
+            "train": {
+                "eval": {
+                    "metrics": {
+                        "p_at_l": {"enabled": True},
+                        "perplexity": {"enabled": True},
+                    }
+                }
+            },
+            "data": {
+                "load_coords": False,  # Global: no coords
+                "eval": {
+                    "struct_val": {
+                        "path": "/path/to/struct.parquet",
+                        "load_coords": True,  # Per-dataset: has coords
+                    }
+                },
+            },
+            "model": {"classifier": {"ignore_index": -100}},
+        }
+    )
+
+    # Build for struct_val with per-dataset load_coords=True
+    metrics = build_metrics(
+        cfg, objective="mlm", has_coords=False, eval_name="struct_val"
+    )
+    metric_names = {type(m).__name__ for m in metrics}
+
+    # PrecisionAtLMetric requires coords, should be enabled due to per-dataset override
+    assert "PrecisionAtLMetric" in metric_names
+    assert "PerplexityMetric" in metric_names
+
+
+def test_build_metrics_per_dataset_has_coords_explicit():
+    """Test per-dataset has_coords key (alternative to load_coords)."""
+    cfg = OmegaConf.create(
+        {
+            "train": {
+                "eval": {
+                    "metrics": {
+                        "p_at_l": {"enabled": True},
+                        "perplexity": {"enabled": True},
+                    }
+                }
+            },
+            "data": {
+                "load_coords": True,  # Global: has coords
+                "eval": {
+                    "seq_val": {
+                        "path": "/path/to/seq.parquet",
+                        "has_coords": False,  # Per-dataset: no coords
+                    }
+                },
+            },
+            "model": {"classifier": {"ignore_index": -100}},
+        }
+    )
+
+    # Build for seq_val with per-dataset has_coords=False
+    metrics = build_metrics(
+        cfg, objective="mlm", has_coords=True, eval_name="seq_val"
+    )
+    metric_names = {type(m).__name__ for m in metrics}
+
+    # PrecisionAtLMetric requires coords, should be excluded
+    assert "PrecisionAtLMetric" not in metric_names
+    assert "PerplexityMetric" in metric_names
+
+
+def test_build_metrics_no_per_dataset_override_uses_global():
+    """Test that without per-dataset override, global has_coords is used."""
+    cfg = OmegaConf.create(
+        {
+            "train": {
+                "eval": {
+                    "metrics": {
+                        "p_at_l": {"enabled": True},
+                    }
+                }
+            },
+            "data": {
+                "load_coords": True,  # Global has coords
+                "eval": {
+                    "default_val": {
+                        "path": "/path/to/default.parquet",
+                        # No load_coords or has_coords override
+                    }
+                },
+            },
+            "model": {"classifier": {"ignore_index": -100}},
+        }
+    )
+
+    # Build with global has_coords=True
+    metrics = build_metrics(
+        cfg, objective="mlm", has_coords=True, eval_name="default_val"
+    )
+    metric_names = {type(m).__name__ for m in metrics}
+
+    # Should use global has_coords=True
+    assert "PrecisionAtLMetric" in metric_names
+
+
+def test_build_metrics_combined_only_and_has_coords():
+    """Test combining 'only' whitelist with per-dataset has_coords."""
+    cfg = OmegaConf.create(
+        {
+            "train": {
+                "eval": {
+                    "metrics": {
+                        "accuracy": {"enabled": True},
+                        "perplexity": {"enabled": True},
+                        "p_at_l": {"enabled": True},
+                    }
+                }
+            },
+            "data": {
+                "eval": {
+                    "seq_only": {
+                        "path": "/path/to/seq.parquet",
+                        "load_coords": False,
+                        "metrics": {
+                            "only": ["accuracy", "perplexity"],
+                        },
+                    },
+                    "struct_only": {
+                        "path": "/path/to/struct.parquet",
+                        "load_coords": True,
+                        "metrics": {
+                            "only": ["accuracy", "p_at_l"],
+                        },
+                    },
+                },
+            },
+            "model": {"classifier": {"ignore_index": -100}},
+        }
+    )
+
+    # Sequence-only dataset
+    seq_metrics = build_metrics(
+        cfg, objective="mlm", has_coords=False, eval_name="seq_only"
+    )
+    seq_names = {type(m).__name__ for m in seq_metrics}
+
+    assert "AccuracyMetric" not in seq_names  # Not in mlm objective
+    assert "MaskedAccuracyMetric" not in seq_names  # Not in 'only' list
+    assert "PerplexityMetric" in seq_names  # In 'only' list
+
+    # Structure dataset
+    struct_metrics = build_metrics(
+        cfg, objective="mlm", has_coords=False, eval_name="struct_only"
+    )
+    struct_names = {type(m).__name__ for m in struct_metrics}
+
+    assert "PrecisionAtLMetric" in struct_names  # In 'only' list, has coords via override
+

@@ -389,7 +389,47 @@ stok train ~data.eval.validation
 
 ### per-dataset metric configuration
 
-Each eval dataset can override the global metric settings to enable/disable specific metrics or change their parameters:
+Each eval dataset can specify which metrics to run, allowing you to run different metrics on different datasets. This is useful when you have:
+
+- **Sequence-only eval datasets**: Run only classification metrics (accuracy, perplexity)
+- **Structure eval datasets**: Run structure metrics (lDDT, TM-score, RMSD) in addition to classification metrics
+
+#### whitelist approach (`metrics.only`)
+
+Use `metrics.only` to specify exactly which metrics should run on a dataset:
+
+```yaml
+data:
+  eval:
+    # Sequence-only dataset - run only classification metrics
+    seq_val:
+      path: /abs/path/seq_val.parquet
+      load_coords: false
+      metrics:
+        only: [accuracy, perplexity]
+
+    # Structure dataset - run classification + structure metrics
+    struct_val:
+      path: /abs/path/struct_val.parquet
+      load_coords: true
+      metrics:
+        only: [accuracy, perplexity, lddt, tm_score]
+```
+
+Via CLI:
+
+```bash
+stok train \
+  +data.eval.seq_val.path=/abs/path/seq_val.parquet \
+  '+data.eval.seq_val.metrics.only=[accuracy,perplexity]' \
+  +data.eval.struct_val.path=/abs/path/struct_val.parquet \
+  +data.eval.struct_val.load_coords=true \
+  '+data.eval.struct_val.metrics.only=[accuracy,perplexity,lddt,tm_score]'
+```
+
+#### enable/disable approach
+
+Override individual metric settings per dataset:
 
 ```yaml
 data:
@@ -418,6 +458,42 @@ stok train \
   +data.eval.validation.metrics.lddt.enabled=true \
   +data.eval.validation.metrics.p_at_l.enabled=true \
   +data.eval.validation.metrics.p_at_l.contact_threshold=6.0
+```
+
+#### hybrid approach
+
+Combine `metrics.only` with per-metric overrides:
+
+```yaml
+data:
+  eval:
+    custom_val:
+      path: /abs/path/custom.parquet
+      metrics:
+        only: [accuracy, lddt]     # Start with this whitelist
+        lddt:
+          enabled: false           # But disable lddt (overrides 'only')
+        perplexity:
+          enabled: true            # And add perplexity (overrides 'only' exclusion)
+```
+
+#### per-dataset coordinate loading
+
+Use `load_coords` (or `has_coords`) per dataset to control coordinate availability. Structure metrics automatically skip datasets without coordinates:
+
+```yaml
+data:
+  load_coords: false  # Global default: no coords
+  eval:
+    seq_val:
+      path: /abs/path/seq_val.parquet
+      # Inherits load_coords: false from global
+      # Structure metrics auto-skipped
+
+    struct_val:
+      path: /abs/path/struct_val.parquet
+      load_coords: true  # Override: this dataset has coords
+      # Structure metrics will run
 ```
 
 ### logging and metrics

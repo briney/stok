@@ -42,16 +42,51 @@ train: {}
 #         validation:
 #           path: /path/to/val.parquet
 #           batch_size: 32
-#   - Per-dataset metric overrides (extends train.eval.metrics defaults):
+#           load_coords: true  # Per-dataset coordinate loading
+#
+# Per-dataset metric configuration:
+#   Each eval dataset can specify which metrics to run:
+#
+#   - Whitelist approach (metrics.only): Run ONLY these metrics
 #       eval:
-#         validation:
-#           path: /path/to/val.parquet
+#         seq_val:
+#           path: /path/to/seq_val.parquet
+#           load_coords: false
+#           metrics:
+#             only: [accuracy, perplexity]  # Only run these metrics
+#
+#   - Enable/disable approach: Override individual metric settings
+#       eval:
+#         struct_val:
+#           path: /path/to/struct_val.parquet
+#           load_coords: true
 #           metrics:
 #             lddt:
 #               enabled: true
 #             p_at_l:
 #               enabled: true
 #               contact_threshold: 6.0  # Override default threshold
+#
+#   - Hybrid approach: Combine 'only' with per-metric overrides
+#       eval:
+#         custom_val:
+#           path: /path/to/custom.parquet
+#           metrics:
+#             only: [accuracy, lddt]  # Start with this whitelist
+#             lddt:
+#               enabled: false  # But disable lddt (overrides 'only')
+#             perplexity:
+#               enabled: true   # And add perplexity (overrides 'only' exclusion)
+#
+# CLI examples:
+#   # Single eval with metric whitelist:
+#   stok train data.train=... +data.eval.val.path=/path '+data.eval.val.metrics.only=[accuracy,perplexity]'
+#
+#   # Multiple evals with different metrics:
+#   stok train data.train=... \
+#     +data.eval.seq_val.path=/seq.parquet '+data.eval.seq_val.metrics.only=[accuracy,perplexity]' \
+#     +data.eval.struct_val.path=/struct.parquet +data.eval.struct_val.load_coords=true \
+#     '+data.eval.struct_val.metrics.only=[accuracy,lddt,tm_score]'
 eval: {}
 
 # Iterable directory-of-parquet behavior tuning (ignored for single-file datasets)

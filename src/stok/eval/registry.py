@@ -49,6 +49,10 @@ def _get_metric_config(
     Configuration is merged in order of precedence (later overrides earlier):
     1. Default metric config from train.eval.metrics.{metric_name}
     2. Per-dataset overrides from data.eval.{eval_name}.metrics.{metric_name}
+    3. Per-dataset 'only' whitelist from data.eval.{eval_name}.metrics.only
+
+    If a per-dataset 'only' list is specified, only metrics in that list are
+    enabled for that dataset (unless explicitly disabled via enabled: false).
 
     Args:
         cfg: Full configuration object.
@@ -78,14 +82,68 @@ def _get_metric_config(
             eval_cfg = data_eval[eval_name]
             if isinstance(eval_cfg, (dict, DictConfig)):
                 eval_metrics = eval_cfg.get("metrics", {})
-                if eval_metrics and metric_name in eval_metrics:
-                    override = eval_metrics[metric_name]
-                    if isinstance(override, (dict, DictConfig)):
-                        result.update(OmegaConf.to_container(override, resolve=True))  # type: ignore
-                    elif override is False:
-                        result["enabled"] = False
+                if eval_metrics:
+                    # Check for 'only' whitelist - if specified, metric must be in list
+                    only_list = eval_metrics.get("only")
+                    if only_list is not None:
+                        # Convert to list if needed (handles OmegaConf ListConfig)
+                        if hasattr(only_list, "__iter__") and not isinstance(only_list, str):
+                            only_list = list(only_list)
+                        else:
+                            only_list = [only_list]
+                        
+                        if metric_name not in only_list:
+                            result["enabled"] = False
+
+                    # Apply per-metric overrides (can override 'only' list)
+                    if metric_name in eval_metrics:
+                        override = eval_metrics[metric_name]
+                        if isinstance(override, (dict, DictConfig)):
+                            result.update(OmegaConf.to_container(override, resolve=True))  # type: ignore
+                        elif override is False:
+                            result["enabled"] = False
+                        elif override is True:
+                            # Explicitly enable (can override 'only' list exclusion)
+                            result["enabled"] = True
 
     return result
+
+
+def _get_dataset_has_coords(
+    cfg: DictConfig,
+    eval_name: str | None,
+    default_has_coords: bool,
+) -> bool:
+    """Determine if a specific eval dataset has coordinates available.
+
+    Checks for per-dataset 'load_coords' or 'has_coords' overrides.
+
+    Args:
+        cfg: Full configuration object.
+        eval_name: Name of the eval dataset.
+        default_has_coords: Default value from global config.
+
+    Returns:
+        Whether coordinates are available for this dataset.
+    """
+    if eval_name is None:
+        return default_has_coords
+
+    data_eval = cfg.get("data", {}).get("eval", {})
+    if not data_eval or eval_name not in data_eval:
+        return default_has_coords
+
+    eval_cfg = data_eval[eval_name]
+    if not isinstance(eval_cfg, (dict, DictConfig)):
+        return default_has_coords
+
+    # Check both 'load_coords' (standard) and 'has_coords' (explicit) keys
+    if "load_coords" in eval_cfg:
+        return bool(eval_cfg.get("load_coords"))
+    if "has_coords" in eval_cfg:
+        return bool(eval_cfg.get("has_coords"))
+
+    return default_has_coords
 
 
 def build_metrics(
@@ -101,7 +159,7 @@ def build_metrics(
         cfg: Full configuration object.
         objective: Current training objective ("codebook" or "mlm").
         decoder: Optional decoder model (required for structure metrics).
-        has_coords: Whether coordinate data is available.
+        has_coords: Whether coordinate data is available (global default).
         eval_name: Optional eval dataset name for per-dataset metric overrides.
 
     Returns:
@@ -111,6 +169,9 @@ def build_metrics(
     # Import metrics to ensure they're registered
     # This import is deferred to avoid circular imports
     import stok.eval.metrics  # noqa: F401
+
+    # Resolve per-dataset has_coords override
+    dataset_has_coords = _get_dataset_has_coords(cfg, eval_name, has_coords)
 
     metrics: list[Metric] = []
 
@@ -127,10 +188,10 @@ def build_metrics(
         if cls_objectives is not None and objective not in cls_objectives:
             continue
 
-        # Check resource requirements
+        # Check resource requirements (using per-dataset has_coords)
         if getattr(cls, "requires_decoder", False) and decoder is None:
             continue
-        if getattr(cls, "requires_coords", False) and not has_coords:
+        if getattr(cls, "requires_coords", False) and not dataset_has_coords:
             continue
 
         # Filter out meta-config keys before passing to constructor

@@ -74,9 +74,24 @@ decoding:
 # Evaluation metrics configuration
 # Each metric can be enabled/disabled and configured with specific parameters.
 # Metrics are automatically filtered by objective compatibility and resource availability.
+#
+# These settings define the DEFAULTS for all eval datasets. Per-dataset metric
+# configuration can be specified in data.eval.{dataset_name}.metrics to override
+# these defaults. See configs/data/base.yaml for per-dataset configuration examples.
+#
+# Metric categories:
+#   - Classification metrics: Work with sequence-only data (no coordinates needed)
+#   - Structure metrics: Require coordinates (load_coords: true) and decoder
+#   - Contact metrics: Require coordinates but not decoder
+#
+# Per-dataset metric selection (in data config):
+#   - Use 'metrics.only: [list]' to whitelist specific metrics for a dataset
+#   - Use 'metrics.{metric}.enabled: true/false' to enable/disable specific metrics
+#   - Use 'load_coords: true/false' to control per-dataset coordinate loading
+#   - Structure metrics auto-skip datasets without coordinates
 eval:
   metrics:
-    # Classification metrics
+    # Classification metrics (sequence-only, no coordinates needed)
     accuracy:
       enabled: true
       # objectives: [codebook]  # Auto-filtered by objective
@@ -104,7 +119,7 @@ eval:
     pred_nan_frac:
       enabled: false
 
-    # Contact prediction (MLM only)
+    # Contact prediction (MLM only, requires coordinates)
     p_at_l:
       enabled: false
       contact_threshold: 8.0

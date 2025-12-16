@@ -222,7 +222,7 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
   - Pass criteria: All assertions pass; metrics accumulate and reset correctly.
 
 - Metric registry (`unit/test_eval_registry.py`)
-  - Purpose: Validate the metric registry and `build_metrics` factory function.
+  - Purpose: Validate the metric registry, `build_metrics` factory function, and per-dataset metric configuration.
   - Scope: Tests include:
     - Registry is populated after import (contains `accuracy`, `perplexity`, etc.)
     - `@register_metric` decorator registers classes correctly
@@ -232,7 +232,13 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
     - `build_metrics` respects `enabled` flag in config
     - `build_metrics` filters by decoder/coords requirements
     - Config params are passed to metric constructors
-  - Pass criteria: Correct metrics are registered and built based on objective and config.
+    - Per-dataset metric whitelist (`metrics.only: [list]`) filters to specific metrics
+    - Per-dataset metric overrides can re-enable metrics excluded by `only` list
+    - Per-dataset metric overrides can disable metrics included in `only` list
+    - Per-dataset `load_coords` / `has_coords` overrides global coordinate availability
+    - Metrics requiring coords auto-skip datasets without coordinates
+    - Combined `only` whitelist + per-dataset `has_coords` filtering
+  - Pass criteria: Correct metrics are registered and built based on objective, config, and per-dataset overrides.
 
 - Classification metrics (`unit/test_eval_classification_metrics.py`)
   - Purpose: Verify `AccuracyMetric`, `MaskedAccuracyMetric`, and `PerplexityMetric` implementations.
