@@ -78,20 +78,21 @@ class MultiheadAttention(nn.Module):
             if sdpa_mask is None:
                 sdpa_mask = kpm
             else:
-                # If an attention mask is provided, combine it with key padding.
-                # Prefer boolean combination when possible.
+                # if an attention mask is provided, combine it with key padding.
                 if sdpa_mask.dtype == torch.bool:
                     sdpa_mask = sdpa_mask | kpm
                 else:
-                    # Assume additive mask; add -inf where kpm is True
+                    # assume additive mask; add -inf where kpm is True
                     sdpa_mask = sdpa_mask + kpm.to(sdpa_mask.dtype) * float("-inf")
 
-        # Convert boolean mask to additive mask expected by SDPA
+        # convert boolean mask to additive mask expected by SDPA
         if sdpa_mask is not None and sdpa_mask.dtype == torch.bool:
             sdpa_mask = sdpa_mask.float()
             sdpa_mask = sdpa_mask.masked_fill(sdpa_mask > 0, float("-inf"))
+            # for DeepSpeed, the dtype of the mask must match the dtype of the query
+            sdpa_mask = sdpa_mask.to(dtype=q.dtype)
 
-        # SDPA expects [B,H,L,D]
+        # sdpa expects [B, H, L, D]
         y = F.scaled_dot_product_attention(
             q,
             k,
