@@ -42,6 +42,16 @@ train: {}
 #         validation:
 #           path: /path/to/val.parquet
 #           batch_size: 32
+#   - Per-dataset metric overrides (extends train.eval.metrics defaults):
+#       eval:
+#         validation:
+#           path: /path/to/val.parquet
+#           metrics:
+#             lddt:
+#               enabled: true
+#             p_at_l:
+#               enabled: true
+#               contact_threshold: 6.0  # Override default threshold
 eval: {}
 
 # Iterable directory-of-parquet behavior tuning (ignored for single-file datasets)

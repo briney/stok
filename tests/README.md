@@ -108,6 +108,15 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
   - Scope: Monkeypatches a fake accelerator that wraps the model and hides `.classifier`; runs a short programmatic training with eval-time decoding.
   - Pass criteria: Training completes without `AttributeError` due to unwrap logic.
 
+- Evaluation harness regression (`integration/test_eval_harness_regression.py`)
+  - Purpose: Ensure the modular evaluation harness produces expected metrics and integrates correctly with the training loop.
+  - Scope: Tests include:
+    - Codebook objective: verifies `acc`, `ppl` metrics are logged during eval
+    - MLM objective: verifies `mask_acc`, `ppl` metrics are logged during eval
+    - Multiple eval datasets: validates per-dataset metric logging (`eval/validation`, `eval/test`)
+    - Smoke test with dummy data: ensures training completes without eval triggers
+  - Pass criteria: CLI exits with code 0; expected metrics appear in output; ends with `Training complete.`.
+
 ## Unit Tests
 
 - MLM collate (`unit/test_mlm_collate.py`)
@@ -200,6 +209,61 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
   - Purpose: Verify RMSNorm correctness and stability.
   - Scope: Compares `stok.models.blocks.RMSNorm` to a simple reference implementation, checks positive scale invariance, and ensures output dtype matches input dtype.
   - Pass criteria: Outputs match the reference within tolerance; invariance/dtype assertions hold.
+
+- Evaluation base classes (`unit/test_eval_base.py`)
+  - Purpose: Verify the `MetricBase` abstract class and `Metric` protocol.
+  - Scope: Tests include:
+    - Protocol compliance for `MetricBase` subclasses
+    - Metric initialization with kwargs
+    - Update/compute cycle with accumulation
+    - Reset clears accumulated state
+    - State tensor serialization/deserialization roundtrip for distributed aggregation
+    - Default no-op implementations for simple metrics
+  - Pass criteria: All assertions pass; metrics accumulate and reset correctly.
+
+- Metric registry (`unit/test_eval_registry.py`)
+  - Purpose: Validate the metric registry and `build_metrics` factory function.
+  - Scope: Tests include:
+    - Registry is populated after import (contains `accuracy`, `perplexity`, etc.)
+    - `@register_metric` decorator registers classes correctly
+    - Duplicate registration raises an error
+    - `get_registered_metrics` returns a copy of the registry
+    - `build_metrics` filters by objective (codebook vs MLM)
+    - `build_metrics` respects `enabled` flag in config
+    - `build_metrics` filters by decoder/coords requirements
+    - Config params are passed to metric constructors
+  - Pass criteria: Correct metrics are registered and built based on objective and config.
+
+- Classification metrics (`unit/test_eval_classification_metrics.py`)
+  - Purpose: Verify `AccuracyMetric`, `MaskedAccuracyMetric`, and `PerplexityMetric` implementations.
+  - Scope: Tests include:
+    - AccuracyMetric: perfect predictions (1.0), half correct (0.5), respects `ignore_index`, batch accumulation, reset
+    - MaskedAccuracyMetric: identical computation to accuracy with different name for MLM
+    - PerplexityMetric: computes exp(avg_loss), accumulates across batches, returns `cls_loss`, handles empty state
+  - Pass criteria: Metrics compute expected values; accumulation and reset work correctly.
+
+- Structure metrics (`unit/test_eval_structure_metrics.py`)
+  - Purpose: Verify structure-based metric implementations (lDDT, TM-score, RMSD, FAPE, NaN fraction).
+  - Scope: Tests include:
+    - LDDTMetric: 1.0 for identical structures, skips missing coords, accumulates batches
+    - TMScoreMetric: 1.0 for identical structures
+    - RMSDMetric: 0.0 for identical structures, accepts config options (align, atom_set)
+    - FAPEMetric: 0.0 for identical structures, accepts config options (clamp, length_scale)
+    - PredNaNFracMetric: 0.0 with no NaNs, 1.0 with all NaNs, correct fraction with partial NaNs
+  - Pass criteria: Structure metrics compute expected values for identity cases and handle edge cases.
+
+- Evaluator class (`unit/test_eval_evaluator.py`)
+  - Purpose: Validate the `Evaluator` orchestrator for running evaluations.
+  - Scope: Tests include:
+    - Initialization with config, model, accelerator, decoder
+    - Builds correct metrics for codebook vs MLM objectives
+    - `evaluate()` returns dict of metric values
+    - `evaluate_all()` handles multiple eval datasets
+    - Metric caching per dataset and cache clearing
+    - Model is set to eval mode during evaluation and restored after
+    - Handles batches with coordinates
+    - State tensor aggregation for distributed training (mocked)
+  - Pass criteria: Evaluator runs evaluations correctly; metrics are cached and computed appropriately.
 
 ## Conventions
 

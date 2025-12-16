@@ -330,9 +330,9 @@ Notes:
 
 ## multiple eval datasets
 
-You can run in-training evaluation on multiple datasets, each logged separately.
+You can run in-training evaluation on multiple datasets, each logged separately with independent configurations.
 
-### Single eval dataset
+### single eval dataset
 
 You can specify a single eval dataset directly:
 
@@ -344,36 +344,144 @@ stok train \
 
 When using `data.eval=/path`, eval metrics are logged under the name `default` (for example: `eval/default | step ...`).
 
-Config (`data.eval` as a dict of named datasets):
+### multiple eval datasets via config
+
+Define multiple named eval datasets in your config file:
 
 ```yaml
 data:
   eval:
+    # Simple path (uses global batch_size and other defaults)
     validation: /abs/path/val.parquet
+
+    # Nested options with per-dataset overrides
     test:
       path: /abs/path/test.parquet
-      batch_size: 16   # optional per-dataset override
-      load_coords: true
+      batch_size: 16        # Override batch size for this dataset
+      load_coords: true     # Force coordinate loading
 ```
 
-CLI overrides (Hydra) to add or set datasets:
+### multiple eval datasets via CLI
+
+Use Hydra CLI overrides to add, modify, or remove eval datasets:
 
 ```bash
-# simple paths
+# Add multiple eval datasets with simple paths
 stok train data.train=/abs/path/train.csv \
   +data.eval.validation=/abs/path/val.csv \
   +data.eval.test=/abs/path/test.csv
 
-# nested options
+# Add eval dataset with nested options
 stok train \
   +data.eval.validation.path=/abs/path/val.parquet \
-  +data.eval.validation.batch_size=8
+  +data.eval.validation.batch_size=8 \
+  +data.eval.validation.load_coords=true
 
-# remove a dataset defined in config
+# Mix simple and nested in the same command
+stok train \
+  +data.eval.validation=/abs/path/val.parquet \
+  +data.eval.test.path=/abs/path/test.parquet \
+  +data.eval.test.batch_size=32
+
+# Remove a dataset defined in config
 stok train ~data.eval.validation
 ```
 
-Logging/metrics:
+### per-dataset metric configuration
+
+Each eval dataset can override the global metric settings to enable/disable specific metrics or change their parameters:
+
+```yaml
+data:
+  eval:
+    validation:
+      path: /abs/path/val.parquet
+      metrics:
+        lddt:
+          enabled: true      # Enable lDDT for this dataset
+        p_at_l:
+          enabled: true
+          contact_threshold: 6.0  # Override default (8.0)
+
+    test:
+      path: /abs/path/test_no_coords.parquet
+      metrics:
+        lddt:
+          enabled: false     # Disable structure metrics (no coords)
+```
+
+Via CLI:
+
+```bash
+stok train \
+  +data.eval.validation.path=/abs/path/val.parquet \
+  +data.eval.validation.metrics.lddt.enabled=true \
+  +data.eval.validation.metrics.p_at_l.enabled=true \
+  +data.eval.validation.metrics.p_at_l.contact_threshold=6.0
+```
+
+### logging and metrics
 
 - Console/W&B keys are namespaced: `eval/{name}/loss`, `eval/{name}/acc`, etc.
 - Eval log lines include step then epoch: `eval/validation | step 200 | epoch 2.0 | loss ...`.
+- Each dataset's metrics are computed and logged independently.
+
+## evaluation metrics
+
+STōk provides a modular evaluation metrics system that automatically selects appropriate metrics based on the training objective and available resources (decoder, coordinates).
+
+### available metrics
+
+| Metric | Name | Objectives | Requirements | Description |
+|--------|------|------------|--------------|-------------|
+| Accuracy | `acc` | codebook | - | Token prediction accuracy |
+| Masked Accuracy | `mask_acc` | mlm | - | Masked token prediction accuracy |
+| Perplexity | `ppl` | all | - | exp(cross-entropy loss) |
+| lDDT | `lddt` | codebook | decoder, coords | Local Distance Difference Test (Cα) |
+| TM-score | `tm` | codebook | decoder, coords | Template Modeling score |
+| RMSD | `rmsd` | codebook | decoder, coords | Root Mean Square Deviation |
+| FAPE | `fape_loss` | codebook | decoder, coords | Frame-Aligned Point Error |
+| Pred NaN Frac | `pred_nan_frac` | codebook | decoder | Fraction of NaN predictions |
+| Precision@L | `p_at_l` | mlm | coords | Contact prediction precision |
+
+### configuring metrics
+
+Global metric configuration in `train.eval.metrics`:
+
+```yaml
+train:
+  eval:
+    metrics:
+      accuracy:
+        enabled: true
+      perplexity:
+        enabled: true
+      lddt:
+        enabled: false  # Enable via decoding.eval_enabled or per-dataset override
+      p_at_l:
+        enabled: false
+        contact_threshold: 8.0
+        min_seq_sep: 6
+```
+
+Enable structure metrics for codebook training:
+
+```bash
+# Enable eval-time decoding (auto-enables decoder and structure metrics)
+stok train train.decoding.eval_enabled=true
+
+# Or explicitly enable specific metrics
+stok train \
+  train.decoding.eval_enabled=true \
+  train.eval.metrics.lddt.enabled=true \
+  train.eval.metrics.tm_score.enabled=true
+```
+
+Enable contact prediction metrics for MLM:
+
+```bash
+stok train \
+  train.objective=mlm \
+  train.eval.metrics.p_at_l.enabled=true \
+  train.eval.metrics.p_at_l.contact_threshold=6.0
+```

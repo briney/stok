@@ -70,3 +70,45 @@ decoding:
   eval_method: "argmax"  # "argmax" | "top_p"
   top_p: 0.9
   temperature: 1.0
+
+# Evaluation metrics configuration
+# Each metric can be enabled/disabled and configured with specific parameters.
+# Metrics are automatically filtered by objective compatibility and resource availability.
+eval:
+  metrics:
+    # Classification metrics
+    accuracy:
+      enabled: true
+      # objectives: [codebook]  # Auto-filtered by objective
+    masked_accuracy:
+      enabled: true
+      # objectives: [mlm]  # Auto-filtered by objective
+    perplexity:
+      enabled: true
+      # objectives: null  # Works for all objectives
+
+    # Structure metrics (require decoder and coordinates)
+    lddt:
+      enabled: false  # Enable via decoding.eval_enabled or per-dataset override
+      # objectives: [codebook]
+      # requires_decoder: true
+      # requires_coords: true
+    tm_score:
+      enabled: false
+    rmsd:
+      enabled: false
+    fape:
+      enabled: false
+
+    # Diagnostic metrics
+    pred_nan_frac:
+      enabled: false
+
+    # Contact prediction (MLM only)
+    p_at_l:
+      enabled: false
+      contact_threshold: 8.0
+      min_seq_sep: 6
+      use_attention: true
+      # objectives: [mlm]
+      # requires_coords: true
