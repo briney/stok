@@ -16,7 +16,6 @@ num_steps: 10000
 epochs: null
 
 # intervals (in steps)
-eval_steps: 1000
 log_steps: 50
 checkpoint_steps: null
 
@@ -40,17 +39,17 @@ wandb:
 console:
   enabled: true
 
-# Training objective: "codebook" (structure token prediction) or "mlm" (masked language modeling)
-objective: "codebook"
+# training objective
+objective: "codebook"  # "codebook" (structure token prediction) or "mlm" (masked language modeling)
 
 # MLM-specific settings (only used when objective="mlm")
 mlm:
-  mask_prob: 0.15           # Probability of selecting a token for masking
-  mask_token_prob: 0.8      # Of selected tokens, prob of replacing with <mask>
-  random_token_prob: 0.1    # Of selected tokens, prob of replacing with random token
-  tie_word_embeddings: true # Whether to tie LM head weights to input embeddings
+  mask_prob: 0.15 
+  mask_token_prob: 0.8  # of selected tokens, prob of replacing with <mask>
+  random_token_prob: 0.1  # of selected tokens, prob of replacing with random token
+  tie_word_embeddings: true # whether to tie LM head weights to input embeddings
 
-# Pre-trained encoder checkpoint for initializing codebook training from MLM pre-training
+# pre-trained encoder checkpoint for initializing codebook training from MLM pre-training
 pretrained_encoder: null
 
 fape:
@@ -90,8 +89,9 @@ decoding:
 #   - Use 'load_coords: true/false' to control per-dataset coordinate loading
 #   - Structure metrics auto-skip datasets without coordinates
 eval:
+  steps: 1000
   metrics:
-    # Classification metrics (sequence-only, no coordinates needed)
+    # classification metrics (sequence-only, no coordinates needed)
     accuracy:
       enabled: true
       # objectives: [codebook]  # Auto-filtered by objective
@@ -102,7 +102,7 @@ eval:
       enabled: true
       # objectives: null  # Works for all objectives
 
-    # Structure metrics (require decoder and coordinates)
+    # structure metrics (require decoder and coordinates)
     lddt:
       enabled: false  # Enable via decoding.eval_enabled or per-dataset override
       # objectives: [codebook]

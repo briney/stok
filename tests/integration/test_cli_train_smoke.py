@@ -23,7 +23,7 @@ def test_cli_train_smoke_runs_end_to_end_cpu(tmp_path):
         # fast training
         "train.num_steps=3",
         "train.log_steps=1",
-        "train.eval_steps=100000",
+        "train.eval.steps=100000",
         "train.grad_accum_steps=1",
         # disable external logging
         "train.wandb.enabled=false",
@@ -58,7 +58,7 @@ def test_cli_train_smoke_runs_end_to_end_cpu_rmsnorm(tmp_path):
         # fast training
         "train.num_steps=3",
         "train.log_steps=1",
-        "train.eval_steps=100000",
+        "train.eval.steps=100000",
         "train.grad_accum_steps=1",
         # disable external logging
         "train.wandb.enabled=false",

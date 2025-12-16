@@ -38,7 +38,7 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
 
 - CLI training with CSV (`integration/test_cli_train_with_csv.py`)
   - Purpose: End-to-end training on a tiny real CSV-backed dataset to validate tokenizer alignment and `TokenizedDataset` integration.
-  - Scope: Generates small `train.csv` and `eval.csv` with columns `pid,protein_sequence,indices`, sets a small `data.max_len` and indices length (`max_len-2`), uses the same tiny model overrides, and triggers evaluation (`train.eval_steps=2`).
+  - Scope: Generates small `train.csv` and `eval.csv` with columns `pid,protein_sequence,indices`, sets a small `data.max_len` and indices length (`max_len-2`), uses the same tiny model overrides, and triggers evaluation (`train.eval.steps=2`).
   - Pass criteria: CLI exits with code 0, prints an eval line that includes step, epoch, and loss (e.g., `eval/default | step ... | epoch ... | loss ...`), and ends with `Training complete.`.
 
 - CLI training with CSV (variable-length sequences) (`integration/test_cli_train_with_csv_varlen.py`)
@@ -48,13 +48,13 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
 
 - CLI training with Parquet (`integration/test_cli_train_with_parquet.py`)
   - Purpose: End-to-end training on a tiny real Parquet-backed dataset to validate tokenizer alignment and `TokenizedDataset` integration for nested list indices.
-  - Scope: Generates small `train.parquet` and `eval.parquet` with columns `pid,protein_sequence,indices` where `indices` is a list[int] (no padding tokens). Uses the same tiny model overrides and triggers evaluation (`train.eval_steps=2`).
+  - Scope: Generates small `train.parquet` and `eval.parquet` with columns `pid,protein_sequence,indices` where `indices` is a list[int] (no padding tokens). Uses the same tiny model overrides and triggers evaluation (`train.eval.steps=2`).
   - Pass criteria: CLI exits with code 0 and ends with `Training complete.`.
   - Notes: Requires a Parquet engine (e.g., `pyarrow` or `fastparquet`). The test auto-skips if no engine is available.
 
 - CLI training with Parquet + coordinates (`integration/test_cli_train_with_parquet_coords.py`)
   - Purpose: End-to-end training on a tiny Parquet-backed dataset that includes optional N–CA–C coordinates to validate dataset loading and training compatibility.
-  - Scope: Generates `train.parquet` and `eval.parquet` with columns `pid,protein_sequence,indices,coordinates` where `coordinates` is a nested list shaped `[L, 3, 3]` (atoms ordered N, CA, C). Uses the same tiny model overrides and triggers evaluation (`train.eval_steps=2`).
+  - Scope: Generates `train.parquet` and `eval.parquet` with columns `pid,protein_sequence,indices,coordinates` where `coordinates` is a nested list shaped `[L, 3, 3]` (atoms ordered N, CA, C). Uses the same tiny model overrides and triggers evaluation (`train.eval.steps=2`).
   - Pass criteria: CLI exits with code 0 and ends with `Training complete.`.
   - Notes: Requires a Parquet engine (e.g., `pyarrow` or `fastparquet`). The test auto-skips if no engine is available.
 
@@ -66,7 +66,7 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
 
 - CLI training with multiple eval datasets (`integration/test_cli_train_multi_eval.py`)
   - Purpose: Validate Hydra overrides for multiple eval datasets and per-dataset logging.
-  - Scope: Generates CSV train plus two eval CSVs; passes `+data.eval.validation=...` and `+data.eval.test=...` overrides; short run with `train.eval_steps=2`.
+  - Scope: Generates CSV train plus two eval CSVs; passes `+data.eval.validation=...` and `+data.eval.test=...` overrides; short run with `train.eval.steps=2`.
   - Pass criteria: CLI exits with code 0; output contains per-dataset eval lines (`eval/validation | step ... | epoch ...`, `eval/test | ...`); ends with `Training complete.`.
 
 - CLI training with MLM objective (`integration/test_cli_train_mlm.py`)

@@ -53,7 +53,7 @@ def test_cli_train_with_multiple_eval_datasets(tmp_path):
         # short run and ensure eval triggers
         "train.num_steps=3",
         "train.log_steps=1",
-        "train.eval_steps=2",
+        "train.eval.steps=2",
         # disable external logging
         "train.wandb.enabled=false",
         # write artifacts to temp dir
@@ -100,7 +100,7 @@ def test_cli_train_with_single_eval_dataset_via_data_eval_equals(tmp_path):
         # short run and ensure eval triggers
         "train.num_steps=3",
         "train.log_steps=1",
-        "train.eval_steps=2",
+        "train.eval.steps=2",
         # disable external logging
         "train.wandb.enabled=false",
         # write artifacts to temp dir

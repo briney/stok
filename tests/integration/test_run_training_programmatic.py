@@ -24,7 +24,7 @@ def test_run_training_programmatic_smoke(capsys, tmp_path):
         # fast training
         "train.num_steps=3",
         "train.log_steps=1",
-        "train.eval_steps=100000",
+        "train.eval.steps=100000",
         "train.grad_accum_steps=1",
         # disable external logging
         "train.wandb.enabled=false",

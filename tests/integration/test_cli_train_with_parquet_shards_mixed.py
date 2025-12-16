@@ -66,7 +66,7 @@ def test_cli_train_with_parquet_dir_train_and_file_eval(tmp_path):
         # short run and ensure eval triggers
         "train.num_steps=4",
         "train.log_steps=1",
-        "train.eval_steps=2",
+        "train.eval.steps=2",
         # disable external logging
         "train.wandb.enabled=false",
         # write artifacts to temp dir

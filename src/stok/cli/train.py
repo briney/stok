@@ -1070,7 +1070,7 @@ def run_training(cfg: DictConfig):
     global_step = 0
     running_loss = 0.0
     log_interval = int(cfg.train.get("log_steps", 50))
-    eval_interval = int(cfg.train.get("eval_steps", 1000))
+    eval_interval = int(cfg.train.get("eval", {}).get("steps", 1000))
     ignore_index = int(cfg.model.classifier.ignore_index)
     grad_clip = float(cfg.train.get("grad_clip_norm", 1.0))
 

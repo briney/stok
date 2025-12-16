@@ -99,7 +99,7 @@ def test_eval_decode_with_wrapped_model(monkeypatch, tmp_path):
         "model.decoder.enabled=true",
         f"model.decoder.path={ckpt.as_posix()}",
         "train.decoding.eval_enabled=true",
-        "train.eval_steps=1",
+        "train.eval.steps=1",
         # short run
         "train.num_steps=2",
         "train.log_steps=1",

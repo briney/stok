@@ -52,7 +52,7 @@ def test_eval_harness_produces_expected_metrics_codebook(tmp_path):
         f"+data.eval.validation={eval_csv.as_posix()}",
         "train.num_steps=4",
         "train.log_steps=2",
-        "train.eval_steps=2",
+        "train.eval.steps=2",
         "train.wandb.enabled=false",
         f"train.project_path={tmp_path.as_posix()}",
     ]
@@ -107,7 +107,7 @@ def test_eval_harness_produces_expected_metrics_mlm(tmp_path):
         f"+data.eval.validation={eval_csv.as_posix()}",
         "train.num_steps=4",
         "train.log_steps=2",
-        "train.eval_steps=2",
+        "train.eval.steps=2",
         "train.wandb.enabled=false",
         f"train.project_path={tmp_path.as_posix()}",
     ]
@@ -175,7 +175,7 @@ def test_eval_harness_multiple_eval_datasets(tmp_path):
         f"+data.eval.test={eval_test_csv.as_posix()}",
         "train.num_steps=4",
         "train.log_steps=2",
-        "train.eval_steps=2",
+        "train.eval.steps=2",
         "train.wandb.enabled=false",
         f"train.project_path={tmp_path.as_posix()}",
     ]
@@ -207,7 +207,7 @@ def test_eval_harness_smoke_dummy_data(tmp_path):
         "data.pin_memory=false",
         "train.num_steps=3",
         "train.log_steps=1",
-        "train.eval_steps=100000",  # Don't trigger eval
+        "train.eval.steps=100000",  # Don't trigger eval
         "train.wandb.enabled=false",
         f"train.project_path={tmp_path.as_posix()}",
     ]
