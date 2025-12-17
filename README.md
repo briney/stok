@@ -496,6 +496,60 @@ data:
       # Structure metrics will run
 ```
 
+### structure folder datasets (PDB/mmCIF)
+
+For evaluation on raw protein structures (PDB or mmCIF files), you can point to a folder containing structure files. This is useful for benchmarks like CAMEO or custom structure test sets.
+
+**Supported file extensions:** `.pdb`, `.ent`, `.cif`, `.mmcif`
+
+#### explicit format specification (recommended)
+
+```yaml
+data:
+  eval:
+    cameo:
+      path: /abs/path/to/pdb_folder
+      format: structure        # Required for explicit structure folder
+      chain_id: A              # Optional: extract specific chain (default: first chain)
+      recursive: false         # Optional: search subdirectories (default: false)
+      metrics:
+        only: [lddt, tm_score, rmsd]
+```
+
+Via CLI:
+
+```bash
+stok train data.train=/abs/path/train.parquet \
+  +data.eval.cameo.path=/abs/path/pdb_folder \
+  +data.eval.cameo.format=structure \
+  +data.eval.cameo.chain_id=A \
+  '+data.eval.cameo.metrics.only=[lddt,tm_score,rmsd]'
+```
+
+#### auto-detection
+
+A directory containing `.pdb` or `.cif` files (but no `.parquet` files) is automatically detected as a structure folder:
+
+```bash
+# Auto-detected as structure folder if directory has .pdb/.cif files
+stok train data.train=/abs/path/train.parquet \
+  +data.eval.benchmark.path=/abs/path/pdb_benchmark_folder
+```
+
+#### compatible metrics
+
+Structure folder datasets provide coordinates but no VQ indices. Compatible metrics:
+
+| Objective | Compatible Metrics |
+|-----------|-------------------|
+| codebook | `accuracy`, `perplexity`, `lddt`, `tm_score`, `rmsd`, `fape` (with decoder) |
+| mlm | `mask_acc`, `perplexity`, `p_at_l` (contact prediction) |
+
+**Notes:**
+- Structure folders always have `load_coords=true` implicitly
+- Sequences are extracted from the structure files (no separate sequence column needed)
+- For structure metrics, ensure `train.decoding.eval_enabled=true` is set
+
 ### logging and metrics
 
 - Console/W&B keys are namespaced: `eval/{name}/loss`, `eval/{name}/acc`, etc.

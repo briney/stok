@@ -117,6 +117,16 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
     - Smoke test with dummy data: ensures training completes without eval triggers
   - Pass criteria: CLI exits with code 0; expected metrics appear in output; ends with `Training complete.`.
 
+- Structure folder evaluation (`integration/test_structure_folder_eval.py`)
+  - Purpose: Validate training with PDB/mmCIF structure folder evaluation datasets.
+  - Scope: Tests include:
+    - CLI training with structure folder eval using explicit `format=structure`
+    - Auto-detection of structure folder (directory with .pdb/.cif files, no .parquet)
+    - MLM training with structure folder for P@L metric compatibility
+    - Per-dataset metric whitelist with structure folders
+    - Chain selection via `chain_id` parameter
+  - Pass criteria: CLI exits with code 0; training completes successfully with structure folder eval; ends with `Training complete.`.
+
 ## Unit Tests
 
 - MLM collate (`unit/test_mlm_collate.py`)
@@ -282,6 +292,32 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
       - Structure metrics (`LDDTMetric`) state tensor handling
       - Contact metrics (`PrecisionAtLMetric`) state tensor handling
   - Pass criteria: Evaluator runs evaluations correctly; metrics are cached and computed appropriately; distributed gather reshaping produces correct tensor shapes (never 0-dim scalars).
+
+- Structure parser (`unit/test_structure_parser.py`)
+  - Purpose: Validate PDB and mmCIF structure file parsing using Biopython.
+  - Scope: Tests include:
+    - Parse valid PDB file: verify sequence and coordinates shape `[L, 3, 3]`
+    - Parse valid mmCIF file
+    - Missing backbone atoms: `strict=False` fills with NaN, `strict=True` raises
+    - Chain selection with `chain_id` parameter
+    - First polymer chain fallback when `chain_id=None`
+    - Non-standard amino acid mapping (e.g., MSE → M)
+    - File not found raises `FileNotFoundError`
+    - Empty structure raises `ValueError`
+  - Pass criteria: All assertions pass; parsing produces correct sequence and coordinate data.
+
+- Structure folder dataset (`unit/test_structure_dataset.py`)
+  - Purpose: Validate `StructureFolderDataset` for loading PDB/mmCIF folders.
+  - Scope: Tests include:
+    - Load folder with PDB files, verify `__len__` and `__getitem__`
+    - Output dict has keys: `pid`, `seq`, `coords`, `masks`, `nan_masks` (no `indices`)
+    - Coords shape is `[max_length, 3, 3]` with NaN padding
+    - Truncation for sequences longer than `max_length`
+    - `recursive=True` searches subdirectories
+    - Empty folder raises `ValueError`
+    - `has_coords` attribute is `True`
+    - `chain_id` parameter passed to parser
+  - Pass criteria: Dataset loads structure files correctly; output format matches expected schema.
 
 ## Conventions
 

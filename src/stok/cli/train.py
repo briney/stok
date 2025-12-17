@@ -307,13 +307,12 @@ def _tokenize_and_align(
         tokens, labels = zip(*batch)  # type: ignore[arg-type]
         return torch.stack(tokens, dim=0), torch.stack(labels, dim=0)
 
-    # else TokenizedDataset dicts with 'seq' and 'indices'
+    # else TokenizedDataset dicts with 'seq' and optionally 'indices'
     input_ids = []
     label_ids = []
     coords_batch: list[torch.Tensor] = []
     for item in batch:  # type: ignore[assignment]
         seq: str = item["seq"]
-        indices: torch.Tensor = item["indices"].long()
 
         enc = tokenizer(
             seq,
@@ -329,12 +328,16 @@ def _tokenize_and_align(
         L = ids.size(0)
         labels = torch.full((L,), ignore_index, dtype=torch.long)
 
-        # copy only non-negative indices; positions 1..(1+copy_len) receive labels,
-        # respecting truncation before EOS
-        valid_indices = indices[indices >= 0]
-        copy_len = min(int(valid_indices.numel()), max(0, L - 2))
-        if copy_len > 0:
-            labels[1 : 1 + copy_len] = valid_indices[:copy_len]
+        # Handle indices if present (may be absent for structure folder datasets)
+        indices_raw = item.get("indices")
+        if indices_raw is not None:
+            indices: torch.Tensor = indices_raw.long()
+            # copy only non-negative indices; positions 1..(1+copy_len) receive labels,
+            # respecting truncation before EOS
+            valid_indices = indices[indices >= 0]
+            copy_len = min(int(valid_indices.numel()), max(0, L - 2))
+            if copy_len > 0:
+                labels[1 : 1 + copy_len] = valid_indices[:copy_len]
 
         input_ids.append(ids)
         label_ids.append(labels)
@@ -359,6 +362,7 @@ def _parse_eval_configs(cfg: DictConfig) -> dict[str, dict[str, Any]]:
       - Legacy single path: data.eval="/path" -> {"default": {"path": "/path"}}
       - Dict of paths: data.eval.val="/p" -> {"val": {"path": "/p"}}
       - Dict of configs: data.eval.val.path="/p" -> {"val": {"path": "/p", ...}}
+      - Structure folder format: data.eval.pdb.format="structure" for PDB/mmCIF folders
     """
     raw_eval = cfg.data.get("eval")
     if raw_eval is None:
@@ -375,7 +379,12 @@ def _parse_eval_configs(cfg: DictConfig) -> dict[str, dict[str, Any]]:
             elif isinstance(value, (dict, DictConfig)):
                 if value.get("path") is None:
                     continue
-                result[name] = dict(value)
+                entry = dict(value)
+                # Preserve format-related keys for structure folder support
+                for key in ("format", "chain_id", "recursive"):
+                    if key in value:
+                        entry[key] = value.get(key)
+                result[name] = entry
             else:
                 raise ValueError(f"Invalid eval config for '{name}': {type(value)}")
         return result
@@ -552,9 +561,32 @@ def _build_dataloaders(
         mask_token_prob = float(mlm_cfg.get("mask_token_prob", 0.8))
         random_token_prob = float(mlm_cfg.get("random_token_prob", 0.1))
 
+    # Supported structure file extensions for auto-detection
+    structure_exts = {".pdb", ".ent", ".cif", ".mmcif"}
+
     # dataset picker usable for train/eval
-    def _pick_dataset(path: str, load_coords: bool, require_indices: bool = True):
+    def _pick_dataset(
+        path: str,
+        load_coords: bool,
+        require_indices: bool = True,
+        *,
+        dataset_format: str | None = None,
+        chain_id: str | None = None,
+        recursive: bool = False,
+    ):
         p = Path(path)
+
+        # Explicit structure folder format
+        if dataset_format == "structure":
+            from stok.data.structure_dataset import StructureFolderDataset
+
+            return StructureFolderDataset(
+                folder_path=str(p),
+                max_length=max_len,
+                chain_id=chain_id,
+                recursive=recursive,
+            )
+
         # heuristic: directory containing parquet shards -> Iterable; else map-style
         if p.is_dir():
             has_parquet = (
@@ -571,6 +603,21 @@ def _build_dataloaders(
                     load_coords=bool(load_coords),
                     require_indices=require_indices,
                 )
+
+            # Auto-detect structure folder (no parquet, has structure files)
+            has_structures = any(
+                f.suffix.lower() in structure_exts for f in p.iterdir() if f.is_file()
+            )
+            if has_structures:
+                from stok.data.structure_dataset import StructureFolderDataset
+
+                return StructureFolderDataset(
+                    folder_path=str(p),
+                    max_length=max_len,
+                    chain_id=chain_id,
+                    recursive=recursive,
+                )
+
         return TokenizedDataset(
             dataset_path=str(path),
             max_length=max_len,
@@ -765,10 +812,20 @@ def _build_dataloaders(
         eval_path = eval_cfg["path"]
         eval_batch_size = int(eval_cfg.get("batch_size", batch_size))
         eval_load_coords = eval_cfg.get("load_coords", user_load_coords)
+        # Extract structure folder format options
+        eval_format = eval_cfg.get("format")
+        eval_chain_id = eval_cfg.get("chain_id")
+        eval_recursive = bool(eval_cfg.get("recursive", False))
+
+        # Structure folders always have coords, don't require indices
+        is_structure_format = eval_format == "structure"
         ds = _pick_dataset(
             eval_path,
-            bool(eval_load_coords) if not is_mlm else False,
-            require_indices=not is_mlm,
+            bool(eval_load_coords) if not is_mlm and not is_structure_format else True,
+            require_indices=not is_mlm and not is_structure_format,
+            dataset_format=eval_format,
+            chain_id=eval_chain_id,
+            recursive=eval_recursive,
         )
         eval_loaders[name] = DataLoader(
             ds,

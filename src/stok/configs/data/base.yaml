@@ -87,6 +87,39 @@ train: {}
 #     +data.eval.seq_val.path=/seq.parquet '+data.eval.seq_val.metrics.only=[accuracy,perplexity]' \
 #     +data.eval.struct_val.path=/struct.parquet +data.eval.struct_val.load_coords=true \
 #     '+data.eval.struct_val.metrics.only=[accuracy,lddt,tm_score]'
+#
+# Structure folder format (PDB/mmCIF files):
+#   For eval datasets containing PDB or mmCIF structure files, use format: "structure".
+#   Supported file extensions: .pdb, .ent, .cif, .mmcif
+#
+#   - Explicit structure folder (recommended):
+#       eval:
+#         cameo:
+#           path: /path/to/pdb_folder
+#           format: structure        # Required for explicit structure folder
+#           chain_id: A              # Optional: specific chain to extract (default: first chain)
+#           recursive: false         # Optional: search subdirectories (default: false)
+#           metrics:
+#             only: [lddt, tm_score, rmsd]
+#
+#   - Auto-detection: A directory containing .pdb/.cif files (but no .parquet files)
+#     is automatically treated as a structure folder.
+#
+#   CLI examples:
+#     # Explicit structure folder:
+#     stok train data.train=... \
+#       +data.eval.cameo.path=/cameo_pdbs +data.eval.cameo.format=structure \
+#       '+data.eval.cameo.metrics.only=[lddt,tm_score,rmsd]'
+#
+#     # With chain selection:
+#     stok train data.train=... \
+#       +data.eval.test.path=/pdbs +data.eval.test.format=structure \
+#       +data.eval.test.chain_id=A
+#
+#   Notes:
+#     - Structure folders always have coordinates available (load_coords is implicit)
+#     - No VQ indices are available; classification metrics use sequence predictions
+#     - Compatible metrics: lddt, tm_score, rmsd, fape, p_at_l (for MLM)
 eval: {}
 
 # Iterable directory-of-parquet behavior tuning (ignored for single-file datasets)
