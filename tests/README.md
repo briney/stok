@@ -129,6 +129,16 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
 
 ## Unit Tests
 
+- Attention need_weights (`unit/test_attention.py`)
+  - Purpose: Verify that the optimized SDPA path and manual attention implementation produce equivalent results, and that attention weights are correctly returned when requested.
+  - Scope: Tests include:
+    - **Output equivalence**: SDPA and manual paths produce matching outputs with no mask, key padding mask, additive attention mask, boolean attention mask, and combined masks
+    - **Attention weights properties**: Correct shape `[B, H, L, S]`, sum to 1 along key dimension, non-negative values, zero weight on masked positions, dtype matching
+    - **Return types**: `need_weights=False` returns tensor, `need_weights=True` returns tuple, default behavior
+    - **Gradient flow**: Gradients flow correctly through both paths, gradient equivalence between paths
+    - **Edge cases**: Single token sequences, batch size 1, different dtypes (float32, float64), all-but-one masked positions
+  - Pass criteria: Both attention implementations produce equivalent outputs (within tolerance); attention weights have expected mathematical properties.
+
 - MLM collate (`unit/test_mlm_collate.py`)
   - Purpose: Verify masked language modeling collate function correctness.
   - Scope: Tests include:

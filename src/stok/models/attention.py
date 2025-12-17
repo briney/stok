@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -9,7 +11,8 @@ class MultiheadAttention(nn.Module):
     """Multi-head self-attention using PyTorch SDPA with RoPE.
 
     Uses `scaled_dot_product_attention` to leverage backend optimizations
-    (Flash/Memory-Efficient attention) when available.
+    (Flash/Memory-Efficient attention) when available. Falls back to a
+    manual implementation when attention weights are requested.
     """
 
     def __init__(
@@ -40,7 +43,8 @@ class MultiheadAttention(nn.Module):
         x: torch.Tensor,
         key_padding_mask: torch.Tensor | None = None,
         attn_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        need_weights: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Forward pass through multi-head attention with RoPE.
 
         Args:
@@ -50,9 +54,14 @@ class MultiheadAttention(nn.Module):
             attn_mask: Attention mask of shape [B, H, L, S] or [B, 1, L, S].
                 Additive (negative values) or boolean masks are supported.
                 Defaults to None.
+            need_weights: If True, returns attention weights along with output.
+                Uses a slower manual implementation instead of optimized SDPA.
+                Defaults to False.
 
         Returns:
-            Output tensor of shape [B, L, d_model].
+            If need_weights=False: Output tensor of shape [B, L, d_model].
+            If need_weights=True: Tuple of (output, attention_weights) where
+                attention_weights has shape [B, H, L, S].
         """
         B, L, _ = x.shape
         qkv = self.qkv(x)  # [B, L, 3*d_model]
@@ -92,14 +101,60 @@ class MultiheadAttention(nn.Module):
             # for DeepSpeed, the dtype of the mask must match the dtype of the query
             sdpa_mask = sdpa_mask.to(dtype=q.dtype)
 
-        # sdpa expects [B, H, L, D]
-        y = F.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            attn_mask=sdpa_mask,
-            dropout_p=self.dropout if self.training else 0.0,
-            is_causal=False,
-        )  # [B, H, L, D]
+        if need_weights:
+            # Manual attention computation to capture weights
+            y, attn_weights = self._attention_with_weights(q, k, v, sdpa_mask)
+        else:
+            # sdpa expects [B, H, L, D] - use optimized kernels
+            y = F.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=sdpa_mask,
+                dropout_p=self.dropout if self.training else 0.0,
+                is_causal=False,
+            )  # [B, H, L, D]
+            attn_weights = None
+
         y = y.transpose(1, 2).contiguous().view(B, L, self.d_model)
-        return self.out(y)
+        output = self.out(y)
+
+        if need_weights:
+            return output, attn_weights
+        return output
+
+    def _attention_with_weights(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        attn_mask: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute attention with explicit weight calculation.
+
+        Args:
+            q: Query tensor [B, H, L, D]
+            k: Key tensor [B, H, S, D]
+            v: Value tensor [B, H, S, D]
+            attn_mask: Additive attention mask [B, 1, L, S] or [B, H, L, S]
+
+        Returns:
+            Tuple of (output [B, H, L, D], attention_weights [B, H, L, S])
+        """
+        scale = 1.0 / math.sqrt(self.head_dim)
+        attn_scores = torch.matmul(q, k.transpose(-2, -1)) * scale  # [B, H, L, S]
+
+        if attn_mask is not None:
+            attn_scores = attn_scores + attn_mask
+
+        attn_weights = F.softmax(attn_scores, dim=-1)
+
+        # Apply dropout during training
+        attn_weights_dropped = F.dropout(
+            attn_weights, p=self.dropout, training=self.training
+        )
+
+        output = torch.matmul(attn_weights_dropped, v)  # [B, H, L, D]
+
+        # Return pre-dropout weights for interpretability
+        return output, attn_weights
