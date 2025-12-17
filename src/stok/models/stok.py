@@ -138,6 +138,8 @@ class STokModel(nn.Module):
         coords: torch.Tensor | None = None,
         coords_loss_weight: float = 0.1,
         ignore_index: int = -100,
+        output_attentions: bool = False,
+        output_hidden_states: bool = False,
     ):
         """Forward pass through STOK model.
 
@@ -151,12 +153,21 @@ class STokModel(nn.Module):
                 If None, the structure-based FAPE loss is not computed. Defaults to None.
             coords_loss_weight: Weight for the structure-based FAPE loss. Defaults to 0.1.
             ignore_index: Index to ignore in loss computation. Defaults to -100.
+            output_attentions: If True, also returns attention weights from all
+                encoder layers. Defaults to False.
+            output_hidden_states: If True, also returns hidden states from all
+                encoder layers (including initial embeddings). Defaults to False.
 
         Returns:
             Dictionary containing:
                 - logits: Output logits of shape [B, L, C] or [B, L, vocab_size].
                 - loss: Cross-entropy loss if labels provided, else None.
                 - classification_loss: Same as loss (for compatibility).
+                - attentions: Tuple of attention weights from each encoder layer,
+                    each of shape [B, H, L, L]. Only present if output_attentions=True.
+                - hidden_states: Tuple of hidden states from each encoder layer
+                    (including initial embeddings), each of shape [B, L, d_model].
+                    Only present if output_hidden_states=True.
         """
         # embedding
         h = self.embed(tokens)  # [B, L, d_model]
@@ -166,9 +177,26 @@ class STokModel(nn.Module):
             key_padding_mask = tokens == self.pad_id  # [B, L], True = pad
 
         # encode
-        h = self.encoder(
-            h, key_padding_mask=key_padding_mask, attn_mask=None
-        )  # [B, L, d_model]
+        encoder_output = self.encoder(
+            h,
+            key_padding_mask=key_padding_mask,
+            attn_mask=None,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+        )
+
+        # Unpack encoder output based on flags
+        all_attentions = None
+        all_hidden_states = None
+
+        if output_attentions and output_hidden_states:
+            h, all_attentions, all_hidden_states = encoder_output
+        elif output_attentions:
+            h, all_attentions = encoder_output
+        elif output_hidden_states:
+            h, all_hidden_states = encoder_output
+        else:
+            h = encoder_output
 
         # classify based on head type
         if self.head_type == "codebook":
@@ -191,8 +219,16 @@ class STokModel(nn.Module):
         if classification_loss is not None:
             loss = classification_loss
 
-        return {
+        result = {
             "logits": logits,
             "loss": loss,
             "classification_loss": classification_loss,
         }
+
+        if output_attentions:
+            result["attentions"] = all_attentions
+
+        if output_hidden_states:
+            result["hidden_states"] = all_hidden_states
+
+        return result

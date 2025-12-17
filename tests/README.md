@@ -129,15 +129,22 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
 
 ## Unit Tests
 
-- Attention need_weights (`unit/test_attention.py`)
-  - Purpose: Verify that the optimized SDPA path and manual attention implementation produce equivalent results, and that attention weights are correctly returned when requested.
+- Attention need_weights, output_attentions, and output_hidden_states (`unit/test_attention.py`)
+  - Purpose: Verify that the optimized SDPA path and manual attention implementation produce equivalent results, and that attention weights and hidden states are correctly returned when requested. Also tests propagation of `output_attentions` and `output_hidden_states` through `EncoderBlock`, `Encoder`, and `STokModel`.
   - Scope: Tests include:
     - **Output equivalence**: SDPA and manual paths produce matching outputs with no mask, key padding mask, additive attention mask, boolean attention mask, and combined masks
     - **Attention weights properties**: Correct shape `[B, H, L, S]`, sum to 1 along key dimension, non-negative values, zero weight on masked positions, dtype matching
     - **Return types**: `need_weights=False` returns tensor, `need_weights=True` returns tuple, default behavior
     - **Gradient flow**: Gradients flow correctly through both paths, gradient equivalence between paths
     - **Edge cases**: Single token sequences, batch size 1, different dtypes (float32, float64), all-but-one masked positions
-  - Pass criteria: Both attention implementations produce equivalent outputs (within tolerance); attention weights have expected mathematical properties.
+    - **EncoderBlock propagation**: `output_attentions` parameter correctly returns attention weights from the block's attention layer
+    - **Encoder propagation**: `output_attentions` collects attention weights from all layers as a tuple
+    - **STokModel propagation**: `output_attentions=True` adds `attentions` key to output dict with per-layer attention weights
+    - **Integration**: Attention weights respect padding masks through the full model stack
+    - **Hidden states (Encoder)**: `output_hidden_states=True` returns tuple of `n_layers + 1` tensors (including initial embeddings), first hidden state equals input, shapes correct `[B, L, d_model]`
+    - **Hidden states (STokModel)**: `output_hidden_states=True` adds `hidden_states` key to output dict with per-layer hidden states
+    - **Combined outputs**: Both `output_attentions` and `output_hidden_states` can be enabled simultaneously with correct return ordering
+  - Pass criteria: Both attention implementations produce equivalent outputs (within tolerance); attention weights have expected mathematical properties; attention and hidden states propagate correctly through all model layers.
 
 - MLM collate (`unit/test_mlm_collate.py`)
   - Purpose: Verify masked language modeling collate function correctness.

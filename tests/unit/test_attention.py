@@ -2,13 +2,18 @@
 
 Verifies that the optimized SDPA path and manual attention implementation
 produce equivalent results, and that attention weights are correctly returned.
+Also tests propagation of output_attentions through EncoderBlock, Encoder,
+and STokModel.
 """
 
 import pytest
 import torch
 
 from stok.models.attention import MultiheadAttention
+from stok.models.blocks import EncoderBlock
+from stok.models.encoder import Encoder
 from stok.models.rope import RotaryEmbedding
+from stok.models.stok import STokModel
 
 
 @pytest.fixture
@@ -373,4 +378,492 @@ class TestEdgeCases:
         expected_weights = torch.zeros_like(weights)
         expected_weights[:, :, :, 0] = 1.0
         assert torch.allclose(weights, expected_weights, atol=1e-5)
+
+
+# ==============================================================================
+# Tests for output_attentions propagation through model layers
+# ==============================================================================
+
+
+class TestEncoderBlockOutputAttentions:
+    """Test output_attentions propagation through EncoderBlock."""
+
+    @pytest.fixture
+    def encoder_block(self):
+        """Create an EncoderBlock for testing."""
+        torch.manual_seed(42)
+        d_model = 64
+        n_heads = 4
+        rope = RotaryEmbedding(base=10000.0)
+        block = EncoderBlock(
+            d_model=d_model,
+            n_heads=n_heads,
+            attn_dropout=0.0,
+            resid_dropout=0.0,
+            rope=rope,
+        )
+        block.eval()
+        return block
+
+    def test_output_attentions_false_returns_tensor(self, encoder_block):
+        """output_attentions=False returns only output tensor."""
+        x = torch.randn(2, 16, 64)
+        result = encoder_block(x, output_attentions=False)
+
+        assert isinstance(result, torch.Tensor)
+        assert result.shape == x.shape
+
+    def test_output_attentions_true_returns_tuple(self, encoder_block):
+        """output_attentions=True returns tuple of (output, weights)."""
+        x = torch.randn(2, 16, 64)
+        result = encoder_block(x, output_attentions=True)
+
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+
+        output, weights = result
+        assert output.shape == x.shape
+        assert weights.shape == (2, 4, 16, 16)  # [B, H, L, L]
+
+    def test_outputs_equivalent_with_and_without_attentions(self, encoder_block):
+        """Output tensor is the same regardless of output_attentions."""
+        x = torch.randn(2, 16, 64)
+
+        out_no_attn = encoder_block(x, output_attentions=False)
+        out_with_attn, _ = encoder_block(x, output_attentions=True)
+
+        assert torch.allclose(out_no_attn, out_with_attn, atol=1e-5)
+
+    def test_default_output_attentions_is_false(self, encoder_block):
+        """Default behavior returns tensor (output_attentions=False)."""
+        x = torch.randn(2, 16, 64)
+        result = encoder_block(x)
+
+        assert isinstance(result, torch.Tensor)
+
+
+class TestEncoderOutputAttentions:
+    """Test output_attentions propagation through Encoder stack."""
+
+    @pytest.fixture
+    def encoder(self):
+        """Create an Encoder for testing."""
+        torch.manual_seed(42)
+        encoder = Encoder(
+            d_model=64,
+            n_heads=4,
+            n_layers=3,
+            dropout=0.0,
+            attn_dropout=0.0,
+        )
+        encoder.eval()
+        return encoder
+
+    def test_output_attentions_false_returns_tensor(self, encoder):
+        """output_attentions=False returns only output tensor."""
+        x = torch.randn(2, 16, 64)
+        result = encoder(x, output_attentions=False)
+
+        assert isinstance(result, torch.Tensor)
+        assert result.shape == x.shape
+
+    def test_output_attentions_true_returns_tuple(self, encoder):
+        """output_attentions=True returns tuple of (output, all_attentions)."""
+        x = torch.randn(2, 16, 64)
+        result = encoder(x, output_attentions=True)
+
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+
+        output, all_attentions = result
+        assert output.shape == x.shape
+        assert isinstance(all_attentions, tuple)
+        assert len(all_attentions) == 3  # n_layers
+
+    def test_attention_shapes_per_layer(self, encoder):
+        """Each layer's attention weights have correct shape."""
+        B, L, d_model = 2, 16, 64
+        n_heads = 4
+        x = torch.randn(B, L, d_model)
+
+        _, all_attentions = encoder(x, output_attentions=True)
+
+        for layer_idx, attn_weights in enumerate(all_attentions):
+            assert attn_weights.shape == (B, n_heads, L, L), (
+                f"Layer {layer_idx} attention shape mismatch"
+            )
+
+    def test_outputs_equivalent_with_and_without_attentions(self, encoder):
+        """Output tensor is the same regardless of output_attentions."""
+        x = torch.randn(2, 16, 64)
+
+        out_no_attn = encoder(x, output_attentions=False)
+        out_with_attn, _ = encoder(x, output_attentions=True)
+
+        assert torch.allclose(out_no_attn, out_with_attn, atol=1e-5)
+
+    def test_default_output_attentions_is_false(self, encoder):
+        """Default behavior returns tensor (output_attentions=False)."""
+        x = torch.randn(2, 16, 64)
+        result = encoder(x)
+
+        assert isinstance(result, torch.Tensor)
+
+    def test_attention_weights_properties(self, encoder):
+        """Attention weights from encoder have valid properties."""
+        x = torch.randn(2, 16, 64)
+        _, all_attentions = encoder(x, output_attentions=True)
+
+        for layer_idx, attn_weights in enumerate(all_attentions):
+            # Non-negative
+            assert (attn_weights >= 0).all(), f"Layer {layer_idx} has negative weights"
+            # Sum to 1
+            sums = attn_weights.sum(dim=-1)
+            assert torch.allclose(sums, torch.ones_like(sums), atol=1e-5), (
+                f"Layer {layer_idx} weights don't sum to 1"
+            )
+
+
+class TestSTokModelOutputAttentions:
+    """Test output_attentions propagation through STokModel."""
+
+    @pytest.fixture
+    def stok_model(self):
+        """Create a STokModel for testing."""
+        torch.manual_seed(42)
+        # Create a small codebook for testing
+        codebook = torch.randn(32, 16)
+        model = STokModel(
+            vocab_size=30,
+            pad_id=0,
+            d_model=64,
+            n_heads=4,
+            n_layers=2,
+            ffn_mult=2.0,
+            dropout=0.0,
+            attn_dropout=0.0,
+            codebook=codebook,
+        )
+        model.eval()
+        return model
+
+    def test_output_attentions_false_no_attentions_key(self, stok_model):
+        """output_attentions=False does not include attentions in output."""
+        tokens = torch.randint(1, 30, (2, 16))
+        result = stok_model(tokens, output_attentions=False)
+
+        assert "attentions" not in result
+        assert "logits" in result
+
+    def test_output_attentions_true_includes_attentions(self, stok_model):
+        """output_attentions=True includes attentions in output dict."""
+        tokens = torch.randint(1, 30, (2, 16))
+        result = stok_model(tokens, output_attentions=True)
+
+        assert "attentions" in result
+        assert "logits" in result
+        assert isinstance(result["attentions"], tuple)
+        assert len(result["attentions"]) == 2  # n_layers
+
+    def test_attention_shapes(self, stok_model):
+        """Attention weights have correct shape [B, H, L, L]."""
+        B, L = 2, 16
+        n_heads = 4
+        tokens = torch.randint(1, 30, (B, L))
+
+        result = stok_model(tokens, output_attentions=True)
+
+        for layer_idx, attn_weights in enumerate(result["attentions"]):
+            assert attn_weights.shape == (B, n_heads, L, L), (
+                f"Layer {layer_idx} attention shape mismatch"
+            )
+
+    def test_logits_equivalent_with_and_without_attentions(self, stok_model):
+        """Logits are the same regardless of output_attentions."""
+        tokens = torch.randint(1, 30, (2, 16))
+
+        result_no_attn = stok_model(tokens, output_attentions=False)
+        result_with_attn = stok_model(tokens, output_attentions=True)
+
+        assert torch.allclose(
+            result_no_attn["logits"], result_with_attn["logits"], atol=1e-5
+        )
+
+    def test_default_output_attentions_is_false(self, stok_model):
+        """Default behavior does not include attentions."""
+        tokens = torch.randint(1, 30, (2, 16))
+        result = stok_model(tokens)
+
+        assert "attentions" not in result
+
+    def test_output_attentions_with_labels(self, stok_model):
+        """output_attentions works correctly with loss computation."""
+        tokens = torch.randint(1, 30, (2, 16))
+        labels = torch.randint(0, 32, (2, 16))
+
+        result = stok_model(tokens, labels=labels, output_attentions=True)
+
+        assert "attentions" in result
+        assert result["loss"] is not None
+        assert len(result["attentions"]) == 2
+
+    def test_output_attentions_with_padding_mask(self, stok_model):
+        """Attention weights respect padding mask."""
+        B, L = 2, 16
+        tokens = torch.randint(1, 30, (B, L))
+
+        # Create padding mask (last 4 positions are padding)
+        key_padding_mask = torch.zeros(B, L, dtype=torch.bool)
+        key_padding_mask[:, -4:] = True
+
+        result = stok_model(
+            tokens, key_padding_mask=key_padding_mask, output_attentions=True
+        )
+
+        # Check that attention to padded positions is ~0
+        for attn_weights in result["attentions"]:
+            padded_attention = attn_weights[:, :, :, -4:]
+            assert torch.allclose(
+                padded_attention, torch.zeros_like(padded_attention), atol=1e-6
+            )
+
+
+# ==============================================================================
+# Tests for output_hidden_states functionality
+# ==============================================================================
+
+
+class TestEncoderOutputHiddenStates:
+    """Test output_hidden_states in Encoder."""
+
+    @pytest.fixture
+    def encoder(self):
+        """Create an Encoder for testing."""
+        torch.manual_seed(42)
+        encoder = Encoder(
+            d_model=64,
+            n_heads=4,
+            n_layers=3,
+            dropout=0.0,
+            attn_dropout=0.0,
+        )
+        encoder.eval()
+        return encoder
+
+    def test_output_hidden_states_false_returns_tensor(self, encoder):
+        """output_hidden_states=False returns only output tensor."""
+        x = torch.randn(2, 16, 64)
+        result = encoder(x, output_hidden_states=False)
+
+        assert isinstance(result, torch.Tensor)
+        assert result.shape == x.shape
+
+    def test_output_hidden_states_true_returns_tuple(self, encoder):
+        """output_hidden_states=True returns tuple of (output, all_hidden_states)."""
+        x = torch.randn(2, 16, 64)
+        result = encoder(x, output_hidden_states=True)
+
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+
+        output, all_hidden_states = result
+        assert output.shape == x.shape
+        assert isinstance(all_hidden_states, tuple)
+
+    def test_hidden_states_count(self, encoder):
+        """Returns n_layers + 1 hidden states (including initial embeddings)."""
+        x = torch.randn(2, 16, 64)
+        _, all_hidden_states = encoder(x, output_hidden_states=True)
+
+        # n_layers=3, so we expect 4 hidden states (initial + 3 layers)
+        assert len(all_hidden_states) == 4
+
+    def test_hidden_states_shapes(self, encoder):
+        """Each hidden state has correct shape [B, L, d_model]."""
+        B, L, d_model = 2, 16, 64
+        x = torch.randn(B, L, d_model)
+        _, all_hidden_states = encoder(x, output_hidden_states=True)
+
+        for idx, hidden_state in enumerate(all_hidden_states):
+            assert hidden_state.shape == (B, L, d_model), (
+                f"Hidden state {idx} has wrong shape"
+            )
+
+    def test_first_hidden_state_equals_input(self, encoder):
+        """First hidden state should equal the input embeddings."""
+        x = torch.randn(2, 16, 64)
+        _, all_hidden_states = encoder(x, output_hidden_states=True)
+
+        assert torch.equal(all_hidden_states[0], x)
+
+    def test_outputs_equivalent_with_and_without_hidden_states(self, encoder):
+        """Output tensor is the same regardless of output_hidden_states."""
+        x = torch.randn(2, 16, 64)
+
+        out_without = encoder(x, output_hidden_states=False)
+        out_with, _ = encoder(x, output_hidden_states=True)
+
+        assert torch.allclose(out_without, out_with, atol=1e-5)
+
+    def test_default_output_hidden_states_is_false(self, encoder):
+        """Default behavior returns tensor only."""
+        x = torch.randn(2, 16, 64)
+        result = encoder(x)
+
+        assert isinstance(result, torch.Tensor)
+
+    def test_both_attentions_and_hidden_states(self, encoder):
+        """Both output_attentions and output_hidden_states can be True."""
+        x = torch.randn(2, 16, 64)
+        result = encoder(x, output_attentions=True, output_hidden_states=True)
+
+        assert isinstance(result, tuple)
+        assert len(result) == 3
+
+        output, all_attentions, all_hidden_states = result
+
+        # Verify output
+        assert output.shape == x.shape
+
+        # Verify attentions (n_layers)
+        assert isinstance(all_attentions, tuple)
+        assert len(all_attentions) == 3
+
+        # Verify hidden states (n_layers + 1)
+        assert isinstance(all_hidden_states, tuple)
+        assert len(all_hidden_states) == 4
+
+    def test_outputs_equivalent_with_all_combinations(self, encoder):
+        """Output is equivalent across all flag combinations."""
+        x = torch.randn(2, 16, 64)
+
+        out_none = encoder(x)
+        out_attn, _ = encoder(x, output_attentions=True)
+        out_hidden, _ = encoder(x, output_hidden_states=True)
+        out_both, _, _ = encoder(x, output_attentions=True, output_hidden_states=True)
+
+        assert torch.allclose(out_none, out_attn, atol=1e-5)
+        assert torch.allclose(out_none, out_hidden, atol=1e-5)
+        assert torch.allclose(out_none, out_both, atol=1e-5)
+
+
+class TestSTokModelOutputHiddenStates:
+    """Test output_hidden_states propagation through STokModel."""
+
+    @pytest.fixture
+    def stok_model(self):
+        """Create a STokModel for testing."""
+        torch.manual_seed(42)
+        codebook = torch.randn(32, 16)
+        model = STokModel(
+            vocab_size=30,
+            pad_id=0,
+            d_model=64,
+            n_heads=4,
+            n_layers=2,
+            ffn_mult=2.0,
+            dropout=0.0,
+            attn_dropout=0.0,
+            codebook=codebook,
+        )
+        model.eval()
+        return model
+
+    def test_output_hidden_states_false_no_key(self, stok_model):
+        """output_hidden_states=False does not include hidden_states in output."""
+        tokens = torch.randint(1, 30, (2, 16))
+        result = stok_model(tokens, output_hidden_states=False)
+
+        assert "hidden_states" not in result
+        assert "logits" in result
+
+    def test_output_hidden_states_true_includes_key(self, stok_model):
+        """output_hidden_states=True includes hidden_states in output dict."""
+        tokens = torch.randint(1, 30, (2, 16))
+        result = stok_model(tokens, output_hidden_states=True)
+
+        assert "hidden_states" in result
+        assert "logits" in result
+        assert isinstance(result["hidden_states"], tuple)
+
+    def test_hidden_states_count(self, stok_model):
+        """Returns n_layers + 1 hidden states."""
+        tokens = torch.randint(1, 30, (2, 16))
+        result = stok_model(tokens, output_hidden_states=True)
+
+        # n_layers=2, so we expect 3 hidden states
+        assert len(result["hidden_states"]) == 3
+
+    def test_hidden_states_shapes(self, stok_model):
+        """Each hidden state has correct shape [B, L, d_model]."""
+        B, L = 2, 16
+        d_model = 64
+        tokens = torch.randint(1, 30, (B, L))
+
+        result = stok_model(tokens, output_hidden_states=True)
+
+        for idx, hidden_state in enumerate(result["hidden_states"]):
+            assert hidden_state.shape == (B, L, d_model), (
+                f"Hidden state {idx} has wrong shape"
+            )
+
+    def test_logits_equivalent_with_and_without_hidden_states(self, stok_model):
+        """Logits are the same regardless of output_hidden_states."""
+        tokens = torch.randint(1, 30, (2, 16))
+
+        result_without = stok_model(tokens, output_hidden_states=False)
+        result_with = stok_model(tokens, output_hidden_states=True)
+
+        assert torch.allclose(
+            result_without["logits"], result_with["logits"], atol=1e-5
+        )
+
+    def test_default_output_hidden_states_is_false(self, stok_model):
+        """Default behavior does not include hidden_states."""
+        tokens = torch.randint(1, 30, (2, 16))
+        result = stok_model(tokens)
+
+        assert "hidden_states" not in result
+
+    def test_output_hidden_states_with_labels(self, stok_model):
+        """output_hidden_states works correctly with loss computation."""
+        tokens = torch.randint(1, 30, (2, 16))
+        labels = torch.randint(0, 32, (2, 16))
+
+        result = stok_model(tokens, labels=labels, output_hidden_states=True)
+
+        assert "hidden_states" in result
+        assert result["loss"] is not None
+        assert len(result["hidden_states"]) == 3
+
+    def test_both_attentions_and_hidden_states(self, stok_model):
+        """Both output_attentions and output_hidden_states can be True."""
+        tokens = torch.randint(1, 30, (2, 16))
+        result = stok_model(
+            tokens, output_attentions=True, output_hidden_states=True
+        )
+
+        assert "attentions" in result
+        assert "hidden_states" in result
+        assert "logits" in result
+
+        # n_layers=2
+        assert len(result["attentions"]) == 2
+        # n_layers + 1
+        assert len(result["hidden_states"]) == 3
+
+    def test_logits_equivalent_all_combinations(self, stok_model):
+        """Logits are equivalent across all flag combinations."""
+        tokens = torch.randint(1, 30, (2, 16))
+
+        result_none = stok_model(tokens)
+        result_attn = stok_model(tokens, output_attentions=True)
+        result_hidden = stok_model(tokens, output_hidden_states=True)
+        result_both = stok_model(
+            tokens, output_attentions=True, output_hidden_states=True
+        )
+
+        assert torch.allclose(result_none["logits"], result_attn["logits"], atol=1e-5)
+        assert torch.allclose(result_none["logits"], result_hidden["logits"], atol=1e-5)
+        assert torch.allclose(result_none["logits"], result_both["logits"], atol=1e-5)
 
