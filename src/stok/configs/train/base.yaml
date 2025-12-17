@@ -10,6 +10,7 @@ scheduler:
   stable_steps: 0      # if 0, no stable hold, decay starts immediately after warmup
   decay_steps: null    # if null, auto-derived as (num_steps − warmup_steps − stable_steps), clamped at 0
 
+seed: 1337
 
 # step/epoch governance
 num_steps: 10000

@@ -9,6 +9,7 @@ from typing import Any, Optional
 import numpy as np
 import torch
 import torch.nn as nn
+from accelerate.utils import set_seed
 from omegaconf import DictConfig, OmegaConf
 from torch.optim import AdamW
 from torch.utils.data import (
@@ -644,7 +645,9 @@ def _build_dataloaders(
                         itds = ds
                     else:
                         itds = MapAsIterableDataset(
-                            ds, num_samples=len(ds), seed=int(cfg.seed)
+                            ds,
+                            num_samples=len(ds),
+                            seed=int(cfg.train.get("seed", 1337)),
                         )
                     iterables.append(itds)
                     fracs.append(float(frac))
@@ -656,7 +659,7 @@ def _build_dataloaders(
                     iterables,
                     fracs,
                     num_samples=total_samples if total_samples > 0 else None,
-                    seed=int(cfg.seed),
+                    seed=int(cfg.train.get("seed", 1337)),
                 )
             else:
                 # Efficient mixture sampler over a ConcatDataset
@@ -665,7 +668,9 @@ def _build_dataloaders(
                 fracs = [float(fr) for _, fr in ds_pairs]
                 concat = ConcatDataset(map_datasets)
                 sampler = MixtureSampler(
-                    lengths=lengths, fractions=fracs, seed=int(cfg.seed)
+                    lengths=lengths,
+                    fractions=fracs,
+                    seed=int(cfg.train.get("seed", 1337)),
                 )
                 train_ds = concat
                 train_sampler = sampler
@@ -821,6 +826,11 @@ def _maybe_init_wandb(
 
 def run_training(cfg: DictConfig):
     os.environ["DS_LOG_LEVEL"] = "warn"  # set DeepSpeed log level to warn
+
+    # set global seed (BEFORE Accelerator init)
+    seed = int(cfg.train.get("seed", cfg.get("seed", 1337)))
+    set_seed(seed)
+
     accelerator = _maybe_get_accelerator()
     is_main = accelerator.is_main_process if accelerator else True
     printer = accelerator.print if accelerator else print
