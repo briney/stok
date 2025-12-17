@@ -4,8 +4,7 @@ defaults:
   - data: base
   - train: base
 
-# Runtime overrides shared across entries; safe for accelerate later
-seed: 1337
+# Runtime overrides shared across entries
 print_model_summary: true
 
 
