@@ -536,3 +536,156 @@ def test_build_metrics_combined_only_and_has_coords():
 
     assert "PrecisionAtLMetric" in struct_names  # In 'only' list, has coords via override
 
+
+def test_build_metrics_structure_format_has_coords():
+    """Test that format='structure' automatically enables has_coords."""
+    cfg = OmegaConf.create(
+        {
+            "train": {
+                "eval": {
+                    "metrics": {
+                        "p_at_l": {"enabled": True},
+                        "perplexity": {"enabled": True},
+                    }
+                }
+            },
+            "data": {
+                "load_coords": False,  # Global: no coords
+                "eval": {
+                    "cameo": {
+                        "path": "/path/to/pdb_folder",
+                        "format": "structure",  # Structure folder format
+                        # No explicit load_coords or has_coords
+                    }
+                },
+            },
+            "model": {"classifier": {"ignore_index": -100}},
+        }
+    )
+
+    # Build for cameo dataset with format="structure"
+    metrics = build_metrics(
+        cfg, objective="mlm", has_coords=False, eval_name="cameo"
+    )
+    metric_names = {type(m).__name__ for m in metrics}
+
+    # PrecisionAtLMetric requires coords, should be enabled due to format="structure"
+    assert "PrecisionAtLMetric" in metric_names
+    assert "PerplexityMetric" in metric_names
+
+
+def test_build_metrics_auto_detect_structure_folder(tmp_path):
+    """Test auto-detection of structure folder by checking for PDB files."""
+    # Create a temporary folder with PDB files
+    pdb_folder = tmp_path / "pdb_eval"
+    pdb_folder.mkdir()
+    (pdb_folder / "test1.pdb").write_text("ATOM placeholder")
+    (pdb_folder / "test2.pdb").write_text("ATOM placeholder")
+
+    cfg = OmegaConf.create(
+        {
+            "train": {
+                "eval": {
+                    "metrics": {
+                        "p_at_l": {"enabled": True},
+                        "perplexity": {"enabled": True},
+                    }
+                }
+            },
+            "data": {
+                "load_coords": False,  # Global: no coords
+                "eval": {
+                    "pdb_val": {
+                        "path": str(pdb_folder),
+                        # No format specified - should auto-detect
+                    }
+                },
+            },
+            "model": {"classifier": {"ignore_index": -100}},
+        }
+    )
+
+    # Build for pdb_val dataset (should auto-detect structure folder)
+    metrics = build_metrics(
+        cfg, objective="mlm", has_coords=False, eval_name="pdb_val"
+    )
+    metric_names = {type(m).__name__ for m in metrics}
+
+    # PrecisionAtLMetric requires coords, should be enabled due to auto-detection
+    assert "PrecisionAtLMetric" in metric_names
+    assert "PerplexityMetric" in metric_names
+
+
+def test_build_metrics_auto_detect_mmcif_folder(tmp_path):
+    """Test auto-detection of structure folder with mmCIF files."""
+    # Create a temporary folder with mmCIF files
+    cif_folder = tmp_path / "cif_eval"
+    cif_folder.mkdir()
+    (cif_folder / "structure.cif").write_text("_entry.id placeholder")
+
+    cfg = OmegaConf.create(
+        {
+            "train": {
+                "eval": {
+                    "metrics": {
+                        "p_at_l": {"enabled": True},
+                    }
+                }
+            },
+            "data": {
+                "load_coords": False,
+                "eval": {
+                    "cif_val": {
+                        "path": str(cif_folder),
+                    }
+                },
+            },
+            "model": {"classifier": {"ignore_index": -100}},
+        }
+    )
+
+    metrics = build_metrics(
+        cfg, objective="mlm", has_coords=False, eval_name="cif_val"
+    )
+    metric_names = {type(m).__name__ for m in metrics}
+
+    # Should auto-detect mmCIF folder
+    assert "PrecisionAtLMetric" in metric_names
+
+
+def test_build_metrics_no_auto_detect_for_parquet_folder(tmp_path):
+    """Test that parquet folders are not auto-detected as structure folders."""
+    # Create a temporary folder with parquet files (not structure files)
+    parquet_folder = tmp_path / "parquet_eval"
+    parquet_folder.mkdir()
+    (parquet_folder / "data.parquet").write_bytes(b"parquet placeholder")
+
+    cfg = OmegaConf.create(
+        {
+            "train": {
+                "eval": {
+                    "metrics": {
+                        "p_at_l": {"enabled": True},
+                    }
+                }
+            },
+            "data": {
+                "load_coords": False,
+                "eval": {
+                    "parquet_val": {
+                        "path": str(parquet_folder),
+                    }
+                },
+            },
+            "model": {"classifier": {"ignore_index": -100}},
+        }
+    )
+
+    metrics = build_metrics(
+        cfg, objective="mlm", has_coords=False, eval_name="parquet_val"
+    )
+    metric_names = {type(m).__name__ for m in metrics}
+
+    # Should NOT auto-detect as structure folder (no PDB/CIF files)
+    assert "PrecisionAtLMetric" not in metric_names
+

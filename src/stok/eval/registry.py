@@ -117,6 +117,8 @@ def _get_dataset_has_coords(
     """Determine if a specific eval dataset has coordinates available.
 
     Checks for per-dataset 'load_coords' or 'has_coords' overrides.
+    Also returns True for structure folder format datasets, which
+    always have coordinates.
 
     Args:
         cfg: Full configuration object.
@@ -137,11 +139,36 @@ def _get_dataset_has_coords(
     if not isinstance(eval_cfg, (dict, DictConfig)):
         return default_has_coords
 
+    # Structure folder format always has coordinates
+    if eval_cfg.get("format") == "structure":
+        return True
+
     # Check both 'load_coords' (standard) and 'has_coords' (explicit) keys
     if "load_coords" in eval_cfg:
         return bool(eval_cfg.get("load_coords"))
     if "has_coords" in eval_cfg:
         return bool(eval_cfg.get("has_coords"))
+
+    # Auto-detect structure folder by checking path for structure files
+    # (covers the case where format is not explicitly set but PDB files are detected)
+    eval_path = eval_cfg.get("path")
+    if eval_path:
+        from pathlib import Path
+
+        p = Path(eval_path)
+        if p.is_dir():
+            structure_exts = {".pdb", ".ent", ".cif", ".mmcif"}
+            try:
+                has_structures = any(
+                    f.suffix.lower() in structure_exts
+                    for f in p.iterdir()
+                    if f.is_file()
+                )
+                if has_structures:
+                    return True
+            except (OSError, PermissionError):
+                # If we can't read the directory, fall back to default
+                pass
 
     return default_has_coords
 

@@ -248,6 +248,9 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
     - Per-dataset `load_coords` / `has_coords` overrides global coordinate availability
     - Metrics requiring coords auto-skip datasets without coordinates
     - Combined `only` whitelist + per-dataset `has_coords` filtering
+    - **Structure folder detection**: `format="structure"` automatically enables `has_coords`
+    - **Auto-detection**: Folders containing PDB/mmCIF files are detected as structure folders
+    - Auto-detection does not trigger for parquet folders
   - Pass criteria: Correct metrics are registered and built based on objective, config, and per-dataset overrides.
 
 - Classification metrics (`unit/test_eval_classification_metrics.py`)
@@ -267,6 +270,18 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
     - FAPEMetric: 0.0 for identical structures, accepts config options (clamp, length_scale)
     - PredNaNFracMetric: 0.0 with no NaNs, 1.0 with all NaNs, correct fraction with partial NaNs
   - Pass criteria: Structure metrics compute expected values for identity cases and handle edge cases.
+
+- Metric logger (`unit/test_eval_logger.py`)
+  - Purpose: Validate the `MetricLogger` class for console and W&B logging.
+  - Scope: Tests include:
+    - Known metrics (loss, mask_acc, ppl, p_at_l, lddt, etc.) are formatted with their preferred display names
+    - Structure metrics include Ångström suffix for RMSD
+    - Unknown/custom metrics are logged with default formatting (`.4f`)
+    - All computed metrics appear in console log messages (dynamic logging)
+    - W&B receives all metrics in the payload
+    - Non-main processes do not produce output
+    - Known metrics appear in preferred order, unknown metrics sorted alphabetically after
+  - Pass criteria: All assertions pass; all computed metrics are logged to both console and W&B.
 
 - Evaluator class (`unit/test_eval_evaluator.py`)
   - Purpose: Validate the `Evaluator` orchestrator for running evaluations.

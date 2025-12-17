@@ -94,6 +94,9 @@ class MetricLogger:
     ) -> str:
         """Format an evaluation log message.
 
+        Logs all computed metrics, with known metrics displayed in a preferred
+        order with nice formatting, followed by any additional metrics.
+
         Args:
             eval_name: Name of the evaluation dataset.
             metrics: Dictionary of metric values.
@@ -107,37 +110,41 @@ class MetricLogger:
         if epoch is not None:
             msg += f" | epoch {epoch:.3f}"
 
-        # Loss
-        if "loss" in metrics:
-            msg += f" | loss {metrics['loss']:.4f}"
-
-        # Objective-specific metrics
-        if self.objective == "mlm":
-            if "mask_acc" in metrics:
-                msg += f" | mask_acc {metrics['mask_acc']:.4f}"
-            if "ppl" in metrics:
-                msg += f" | ppl {metrics['ppl']:.2f}"
-            if "p_at_l" in metrics:
-                msg += f" | P@L {metrics['p_at_l']:.4f}"
-        else:
-            if "acc" in metrics:
-                msg += f" | acc {metrics['acc']:.4f}"
-            if "cls_loss" in metrics:
-                msg += f" | cls {metrics['cls_loss']:.4f}"
-            if "ppl" in metrics:
-                msg += f" | ppl {metrics['ppl']:.2f}"
-            if "fape_loss" in metrics:
-                msg += f" | fape {metrics['fape_loss']:.4f}"
-            if "pred_nan_frac" in metrics:
-                msg += f" | pnan {metrics['pred_nan_frac']:.3f}"
-
+        # Define formatting for known metrics (order matters for readability)
+        # Format: (key, display_name, format_string, suffix)
+        known_metrics = [
+            ("loss", "loss", ".4f", ""),
+            # MLM metrics
+            ("mask_acc", "mask_acc", ".4f", ""),
+            ("ppl", "ppl", ".2f", ""),
+            ("p_at_l", "P@L", ".4f", ""),
+            # Codebook metrics
+            ("acc", "acc", ".4f", ""),
+            ("cls_loss", "cls", ".4f", ""),
+            ("fape_loss", "fape", ".4f", ""),
+            ("pred_nan_frac", "pnan", ".3f", ""),
             # Structure metrics
-            if "lddt" in metrics:
-                msg += f" | lDDT {metrics['lddt']:.3f}"
-            if "tm" in metrics:
-                msg += f" | TM {metrics['tm']:.3f}"
-            if "rmsd" in metrics:
-                msg += f" | RMSD {metrics['rmsd']:.3f}Å"
+            ("lddt", "lDDT", ".3f", ""),
+            ("tm", "TM", ".3f", ""),
+            ("rmsd", "RMSD", ".3f", "Å"),
+        ]
+
+        # Build set of already-logged keys
+        logged_keys: set[str] = set()
+
+        # Log known metrics in preferred order
+        for key, display_name, fmt, suffix in known_metrics:
+            if key in metrics:
+                value = metrics[key]
+                msg += f" | {display_name} {value:{fmt}}{suffix}"
+                logged_keys.add(key)
+
+        # Log any remaining metrics not in the known list
+        for key in sorted(metrics.keys()):
+            if key not in logged_keys:
+                value = metrics[key]
+                # Use reasonable default formatting
+                msg += f" | {key} {value:.4f}"
 
         return msg
 
