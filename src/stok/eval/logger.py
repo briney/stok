@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import IO, Any
+from typing import IO
 
 
 class MetricLogger:
@@ -132,6 +132,10 @@ class MetricLogger:
         # Build set of already-logged keys
         logged_keys: set[str] = set()
 
+        # Epoch is handled explicitly in the header above, so exclude it from
+        # dynamic logging to avoid duplicate output
+        logged_keys.add("epoch")
+
         # Log known metrics in preferred order
         for key, display_name, fmt, suffix in known_metrics:
             if key in metrics:
@@ -235,4 +239,3 @@ class MetricLogger:
         """
         for eval_name, metrics in all_metrics.items():
             self.log_eval(eval_name, metrics, step, epoch)
-

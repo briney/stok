@@ -138,6 +138,8 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
     - Special tokens (CLS, PAD, EOS, UNK) are never masked
     - Labels at masked positions match original token values
     - Random token replacement occurs for a subset of masked positions
+    - **Coordinate passthrough**: Returns 3-tuple `(tokens, labels, coords)` when `coords` key present in batch
+    - Returns 2-tuple `(tokens, labels)` when no coordinates present
   - Pass criteria: All assertions pass; mask ratios are within expected ranges.
 
 - MLM model (`unit/test_mlm_model.py`)
@@ -281,6 +283,7 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
     - W&B receives all metrics in the payload
     - Non-main processes do not produce output
     - Known metrics appear in preferred order, unknown metrics sorted alphabetically after
+    - **Epoch deduplication**: Epoch is not logged twice when present in metrics dict (handled in header only)
   - Pass criteria: All assertions pass; all computed metrics are logged to both console and W&B.
 
 - Evaluator class (`unit/test_eval_evaluator.py`)

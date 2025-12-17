@@ -250,3 +250,65 @@ def test_format_eval_message_metric_ordering():
 
     assert ppl_pos < alpha_pos < zebra_pos, "Unknown metrics should be sorted after known ones"
 
+
+def test_format_eval_message_epoch_not_logged_twice():
+    """Test that epoch is not logged twice when present in metrics dict.
+
+    The epoch is handled in the message header, so if it's also present in the
+    metrics dict (as train.py injects it), it should not be logged again.
+    """
+    logger = MetricLogger(
+        console=None,
+        wandb=None,
+        log_file=None,
+        is_main=True,
+        objective="mlm",
+    )
+
+    # Simulate what train.py does: inject epoch into metrics dict
+    metrics = {
+        "loss": 0.5,
+        "mask_acc": 0.85,
+        "epoch": 1.5,  # Injected by train.py
+    }
+
+    msg = logger._format_eval_message("test_eval", metrics, step=100, epoch=1.5)
+
+    # Count occurrences of "epoch" in the message
+    epoch_count = msg.count("epoch")
+
+    # epoch should appear exactly once (in the header)
+    assert epoch_count == 1, f"'epoch' appeared {epoch_count} times in message: {msg}"
+
+    # Verify the epoch value is correct (header format is ".3f")
+    assert "epoch 1.500" in msg
+
+
+def test_log_eval_epoch_in_metrics_not_duplicated():
+    """Test full log_eval flow doesn't duplicate epoch when in metrics."""
+    console = MockConsole()
+    logger = MetricLogger(
+        console=console,
+        wandb=None,
+        log_file=None,
+        is_main=True,
+        objective="mlm",
+    )
+
+    # Metrics with epoch injected (as train.py does)
+    metrics = {
+        "loss": 0.5,
+        "p_at_l": 0.65,
+        "epoch": 2.0,
+    }
+    logger.log_eval("cameo", metrics, step=100, epoch=2.0)
+
+    assert len(console.eval_messages) == 1
+    msg = console.eval_messages[0]
+
+    # epoch should appear exactly once
+    assert msg.count("epoch") == 1, f"Duplicate epoch in: {msg}"
+
+    # P@L should be logged
+    assert "P@L" in msg or "p_at_l" in msg
+
