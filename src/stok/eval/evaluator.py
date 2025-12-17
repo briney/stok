@@ -162,13 +162,20 @@ class Evaluator:
                 gathered = self.accelerator.gather_for_metrics(t_device)
 
                 # Sum across processes
-                # gathered may be same shape as t (single process) or have extra leading dim
-                if gathered.shape == t_device.shape:
+                # Accelerate's gather_for_metrics concatenates tensors along dim=0,
+                # so a tensor of shape [2] becomes [N*2] with N processes (flattened).
+                # We need to reshape back to [N, *original_shape] before summing.
+                original_size = t_device.numel()
+                gathered_size = gathered.numel()
+
+                if gathered_size == original_size:
                     # Single process, no aggregation needed
                     summed = gathered
                 else:
-                    # Multi-process: sum along the process dimension (dim=0)
-                    summed = gathered.sum(dim=0)
+                    # Multi-process: reshape to [num_processes, *original_shape] then sum
+                    num_processes = gathered_size // original_size
+                    reshaped = gathered.view(num_processes, *t_device.shape)
+                    summed = reshaped.sum(dim=0)
 
                 gathered_tensors.append(summed)
 

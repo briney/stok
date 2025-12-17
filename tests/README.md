@@ -269,7 +269,19 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
     - Model is set to eval mode during evaluation and restored after
     - Handles batches with coordinates
     - State tensor aggregation for distributed training (mocked)
-  - Pass criteria: Evaluator runs evaluations correctly; metrics are cached and computed appropriately.
+    - **Gather tensor reshaping** (`TestGatherMetricStatesReshaping`):
+      - Single process passthrough (no reshaping needed)
+      - 2-process and 4-process tensor reshaping for distributed gather
+      - Regression: ensures gathered result is never a 0-dim scalar tensor
+      - Regression: ensures gathered tensor can be indexed (prevents `IndexError`)
+      - Metrics (`AccuracyMetric`, `PerplexityMetric`, `MaskedAccuracyMetric`) correctly load reshaped state
+    - **Distributed gather regression tests** (`TestGatherMetricStatesRegression`):
+      - Documents the bug: old code produced 0-dim scalar from flattened gather
+      - Verifies fixed code produces correct tensor shape
+      - Mock accelerator simulation of full `_gather_metric_states` flow
+      - Structure metrics (`LDDTMetric`) state tensor handling
+      - Contact metrics (`PrecisionAtLMetric`) state tensor handling
+  - Pass criteria: Evaluator runs evaluations correctly; metrics are cached and computed appropriately; distributed gather reshaping produces correct tensor shapes (never 0-dim scalars).
 
 ## Conventions
 
