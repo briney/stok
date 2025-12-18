@@ -49,7 +49,7 @@ def test_cli_train_with_csv_e2e(tmp_path):
         # short run and ensure eval triggers
         "train.num_steps=3",
         "train.log_steps=1",
-        "train.eval_steps=2",
+        "train.eval.steps=2",
         # disable external logging
         "train.wandb.enabled=false",
         # write artifacts to temp dir

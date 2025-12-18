@@ -102,7 +102,7 @@ def test_training_with_decoder_and_fape(tmp_path):
         # short run and ensure eval triggers
         "train.num_steps=3",
         "train.log_steps=1",
-        "train.eval_steps=2",
+        "train.eval.steps=2",
         # disable external logging
         "train.wandb.enabled=false",
         # write artifacts to temp dir

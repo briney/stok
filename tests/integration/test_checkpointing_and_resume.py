@@ -35,7 +35,7 @@ def test_checkpointing_artifacts(tmp_path):
     overrides_first = base_overrides + [
         "train.num_steps=3",
         "train.log_steps=1",
-        "train.eval_steps=100000",
+        "train.eval.steps=100000",
         "train.grad_accum_steps=1",
     ]
     with as_file(files("stok").joinpath("configs")) as cfg_dir:

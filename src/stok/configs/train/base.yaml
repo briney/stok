@@ -17,7 +17,6 @@ num_steps: 10000
 epochs: null
 
 # intervals (in steps)
-eval_steps: 1000
 log_steps: 50
 checkpoint_steps: null
 
@@ -41,17 +40,17 @@ wandb:
 console:
   enabled: true
 
-# Training objective: "codebook" (structure token prediction) or "mlm" (masked language modeling)
-objective: "codebook"
+# training objective
+objective: "codebook"  # "codebook" (structure token prediction) or "mlm" (masked language modeling)
 
 # MLM-specific settings (only used when objective="mlm")
 mlm:
-  mask_prob: 0.15           # Probability of selecting a token for masking
-  mask_token_prob: 0.8      # Of selected tokens, prob of replacing with <mask>
-  random_token_prob: 0.1    # Of selected tokens, prob of replacing with random token
-  tie_word_embeddings: true # Whether to tie LM head weights to input embeddings
+  mask_prob: 0.15 
+  mask_token_prob: 0.8  # of selected tokens, prob of replacing with <mask>
+  random_token_prob: 0.1  # of selected tokens, prob of replacing with random token
+  tie_word_embeddings: true # whether to tie LM head weights to input embeddings
 
-# Pre-trained encoder checkpoint for initializing codebook training from MLM pre-training
+# pre-trained encoder checkpoint for initializing codebook training from MLM pre-training
 pretrained_encoder: null
 
 fape:
@@ -71,3 +70,61 @@ decoding:
   eval_method: "argmax"  # "argmax" | "top_p"
   top_p: 0.9
   temperature: 1.0
+
+# Evaluation metrics configuration
+# Each metric can be enabled/disabled and configured with specific parameters.
+# Metrics are automatically filtered by objective compatibility and resource availability.
+#
+# These settings define the DEFAULTS for all eval datasets. Per-dataset metric
+# configuration can be specified in data.eval.{dataset_name}.metrics to override
+# these defaults. See configs/data/base.yaml for per-dataset configuration examples.
+#
+# Metric categories:
+#   - Classification metrics: Work with sequence-only data (no coordinates needed)
+#   - Structure metrics: Require coordinates (load_coords: true) and decoder
+#   - Contact metrics: Require coordinates but not decoder
+#
+# Per-dataset metric selection (in data config):
+#   - Use 'metrics.only: [list]' to whitelist specific metrics for a dataset
+#   - Use 'metrics.{metric}.enabled: true/false' to enable/disable specific metrics
+#   - Use 'load_coords: true/false' to control per-dataset coordinate loading
+#   - Structure metrics auto-skip datasets without coordinates
+eval:
+  steps: 1000
+  metrics:
+    # classification metrics (sequence-only, no coordinates needed)
+    accuracy:
+      enabled: true
+      # objectives: [codebook]  # Auto-filtered by objective
+    masked_accuracy:
+      enabled: true
+      # objectives: [mlm]  # Auto-filtered by objective
+    perplexity:
+      enabled: true
+      # objectives: null  # Works for all objectives
+
+    # structure metrics (require decoder and coordinates)
+    lddt:
+      enabled: false  # Enable via decoding.eval_enabled or per-dataset override
+      # objectives: [codebook]
+      # requires_decoder: true
+      # requires_coords: true
+    tm_score:
+      enabled: false
+    rmsd:
+      enabled: false
+    fape:
+      enabled: false
+
+    # Diagnostic metrics
+    pred_nan_frac:
+      enabled: false
+
+    # Contact prediction (MLM only, requires coordinates)
+    p_at_l:
+      enabled: true
+      contact_threshold: 8.0
+      min_seq_sep: 6
+      use_attention: true
+      # objectives: [mlm]
+      # requires_coords: true

@@ -205,3 +205,69 @@ def test_mlm_collate_random_token_replacement():
 
     assert found_random, "No random token replacements found after multiple iterations"
 
+
+def test_mlm_collate_returns_coords_when_present():
+    """Test that MLM collate returns coordinates when present in batch items."""
+    tokenizer = Tokenizer()
+    max_len = 16
+    seq_len = 10  # Sequence length (coords should be [max_len, 3, 3])
+
+    # Create batch with coordinates
+    batch = [
+        {
+            "pid": "test1",
+            "seq": "MVLSPADKTN",
+            "coords": torch.randn(max_len, 3, 3),
+        },
+        {
+            "pid": "test2",
+            "seq": "LAGVSERQNF",
+            "coords": torch.randn(max_len, 3, 3),
+        },
+    ]
+
+    result = mlm_collate(
+        batch,
+        tokenizer,
+        max_len=max_len,
+        mask_prob=0.15,
+        pad_id=1,
+        ignore_index=-100,
+    )
+
+    # Should return 3-tuple (tokens, labels, coords)
+    assert len(result) == 3
+    tokens, labels, coords = result
+
+    assert tokens.shape == (2, max_len)
+    assert labels.shape == (2, max_len)
+    assert coords.shape == (2, max_len, 3, 3)
+
+
+def test_mlm_collate_returns_2tuple_without_coords():
+    """Test that MLM collate returns 2-tuple when no coords present."""
+    tokenizer = Tokenizer()
+    max_len = 16
+
+    # Create batch WITHOUT coordinates
+    batch = [
+        {"pid": "test1", "seq": "MVLSPADKTN"},
+        {"pid": "test2", "seq": "LAGVSERQNF"},
+    ]
+
+    result = mlm_collate(
+        batch,
+        tokenizer,
+        max_len=max_len,
+        mask_prob=0.15,
+        pad_id=1,
+        ignore_index=-100,
+    )
+
+    # Should return 2-tuple (tokens, labels)
+    assert len(result) == 2
+    tokens, labels = result
+
+    assert tokens.shape == (2, max_len)
+    assert labels.shape == (2, max_len)
+

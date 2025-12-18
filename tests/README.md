@@ -38,7 +38,7 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
 
 - CLI training with CSV (`integration/test_cli_train_with_csv.py`)
   - Purpose: End-to-end training on a tiny real CSV-backed dataset to validate tokenizer alignment and `TokenizedDataset` integration.
-  - Scope: Generates small `train.csv` and `eval.csv` with columns `pid,protein_sequence,indices`, sets a small `data.max_len` and indices length (`max_len-2`), uses the same tiny model overrides, and triggers evaluation (`train.eval_steps=2`).
+  - Scope: Generates small `train.csv` and `eval.csv` with columns `pid,protein_sequence,indices`, sets a small `data.max_len` and indices length (`max_len-2`), uses the same tiny model overrides, and triggers evaluation (`train.eval.steps=2`).
   - Pass criteria: CLI exits with code 0, prints an eval line that includes step, epoch, and loss (e.g., `eval/default | step ... | epoch ... | loss ...`), and ends with `Training complete.`.
 
 - CLI training with CSV (variable-length sequences) (`integration/test_cli_train_with_csv_varlen.py`)
@@ -48,13 +48,13 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
 
 - CLI training with Parquet (`integration/test_cli_train_with_parquet.py`)
   - Purpose: End-to-end training on a tiny real Parquet-backed dataset to validate tokenizer alignment and `TokenizedDataset` integration for nested list indices.
-  - Scope: Generates small `train.parquet` and `eval.parquet` with columns `pid,protein_sequence,indices` where `indices` is a list[int] (no padding tokens). Uses the same tiny model overrides and triggers evaluation (`train.eval_steps=2`).
+  - Scope: Generates small `train.parquet` and `eval.parquet` with columns `pid,protein_sequence,indices` where `indices` is a list[int] (no padding tokens). Uses the same tiny model overrides and triggers evaluation (`train.eval.steps=2`).
   - Pass criteria: CLI exits with code 0 and ends with `Training complete.`.
   - Notes: Requires a Parquet engine (e.g., `pyarrow` or `fastparquet`). The test auto-skips if no engine is available.
 
 - CLI training with Parquet + coordinates (`integration/test_cli_train_with_parquet_coords.py`)
   - Purpose: End-to-end training on a tiny Parquet-backed dataset that includes optional N–CA–C coordinates to validate dataset loading and training compatibility.
-  - Scope: Generates `train.parquet` and `eval.parquet` with columns `pid,protein_sequence,indices,coordinates` where `coordinates` is a nested list shaped `[L, 3, 3]` (atoms ordered N, CA, C). Uses the same tiny model overrides and triggers evaluation (`train.eval_steps=2`).
+  - Scope: Generates `train.parquet` and `eval.parquet` with columns `pid,protein_sequence,indices,coordinates` where `coordinates` is a nested list shaped `[L, 3, 3]` (atoms ordered N, CA, C). Uses the same tiny model overrides and triggers evaluation (`train.eval.steps=2`).
   - Pass criteria: CLI exits with code 0 and ends with `Training complete.`.
   - Notes: Requires a Parquet engine (e.g., `pyarrow` or `fastparquet`). The test auto-skips if no engine is available.
 
@@ -66,7 +66,7 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
 
 - CLI training with multiple eval datasets (`integration/test_cli_train_multi_eval.py`)
   - Purpose: Validate Hydra overrides for multiple eval datasets and per-dataset logging.
-  - Scope: Generates CSV train plus two eval CSVs; passes `+data.eval.validation=...` and `+data.eval.test=...` overrides; short run with `train.eval_steps=2`.
+  - Scope: Generates CSV train plus two eval CSVs; passes `+data.eval.validation=...` and `+data.eval.test=...` overrides; short run with `train.eval.steps=2`.
   - Pass criteria: CLI exits with code 0; output contains per-dataset eval lines (`eval/validation | step ... | epoch ...`, `eval/test | ...`); ends with `Training complete.`.
 
 - CLI training with MLM objective (`integration/test_cli_train_mlm.py`)
@@ -108,7 +108,70 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
   - Scope: Monkeypatches a fake accelerator that wraps the model and hides `.classifier`; runs a short programmatic training with eval-time decoding.
   - Pass criteria: Training completes without `AttributeError` due to unwrap logic.
 
+- Evaluation harness regression (`integration/test_eval_harness_regression.py`)
+  - Purpose: Ensure the modular evaluation harness produces expected metrics and integrates correctly with the training loop.
+  - Scope: Tests include:
+    - Codebook objective: verifies `acc`, `ppl` metrics are logged during eval
+    - MLM objective: verifies `mask_acc`, `ppl` metrics are logged during eval
+    - Multiple eval datasets: validates per-dataset metric logging (`eval/validation`, `eval/test`)
+    - Smoke test with dummy data: ensures training completes without eval triggers
+  - Pass criteria: CLI exits with code 0; expected metrics appear in output; ends with `Training complete.`.
+
+- Structure folder evaluation (`integration/test_structure_folder_eval.py`)
+  - Purpose: Validate training with PDB/mmCIF structure folder evaluation datasets.
+  - Scope: Tests include:
+    - CLI training with structure folder eval using explicit `format=structure`
+    - Auto-detection of structure folder (directory with .pdb/.cif files, no .parquet)
+    - MLM training with structure folder for P@L metric compatibility
+    - Per-dataset metric whitelist with structure folders
+    - Chain selection via `chain_id` parameter
+  - Pass criteria: CLI exits with code 0; training completes successfully with structure folder eval; ends with `Training complete.`.
+
+- MLM P@L metric with structure evaluation (`integration/test_mlm_p_at_l_structure_eval.py`)
+  - Purpose: Comprehensive end-to-end testing of the P@L (Precision@L) contact prediction metric with real PDB structure files during MLM training.
+  - Scope: Uses real-world CAMEO benchmark PDB files from `tests/test_data/cameo/`. Tests include:
+    - **Structure dataset pipeline** (`TestStructureDatasetPipeline`):
+      - `StructureFolderDataset` correctly loads real CAMEO PDB files
+      - `mlm_collate` preserves coordinate tensors in returned 3-tuple
+    - **Contact map computation** (`TestContactMapComputation`):
+      - Contact map shape and dtype correctness
+      - NaN padding handling (padded positions marked as no-contact)
+    - **P@L metric directly** (`TestPAtLMetricDirectly`):
+      - Metric instantiation with correct attributes (`name`, `requires_coords`, `objectives`)
+      - Metric update with attention weights (no exceptions)
+      - Fallback to logits similarity when attention not available
+    - **Metric building** (`TestMetricBuildingWithStructureFolder`):
+      - `_get_dataset_has_coords` returns True for `format="structure"`
+      - P@L metric built for MLM objective with structure folder coords
+      - P@L metric NOT built for codebook objective (restricted to MLM)
+    - **Evaluator attention propagation** (`TestEvaluatorAttentionPropagation`):
+      - Evaluator detects when p_at_l metric needs attention weights
+      - `_needs_attentions()` returns True for datasets with p_at_l enabled
+    - **End-to-end MLM with CAMEO eval** (`TestEndToEndMLMWithCameoEval`):
+      - Full CLI training with CAMEO structure folder, verifies P@L appears in output
+      - Structure folder auto-detection (no explicit `format=structure`)
+      - P@L not logged when coords unavailable (CSV-only eval dataset)
+  - Pass criteria: All 14 tests pass; P@L metric correctly computed and logged with real PDB data; attention weights flow through evaluator; NaN padding handled gracefully.
+  - Notes: Requires `tests/test_data/cameo/` with real CAMEO PDB files (5 files included: 7YPD_B.pdb, 8JVC_A.pdb, 8RF7_A.pdb, 8TYZ_B.pdb, 8XAT_B.pdb). Tests skip if CAMEO data not found.
+
 ## Unit Tests
+
+- Attention need_weights, output_attentions, and output_hidden_states (`unit/test_attention.py`)
+  - Purpose: Verify that the optimized SDPA path and manual attention implementation produce equivalent results, and that attention weights and hidden states are correctly returned when requested. Also tests propagation of `output_attentions` and `output_hidden_states` through `EncoderBlock`, `Encoder`, and `STokModel`.
+  - Scope: Tests include:
+    - **Output equivalence**: SDPA and manual paths produce matching outputs with no mask, key padding mask, additive attention mask, boolean attention mask, and combined masks
+    - **Attention weights properties**: Correct shape `[B, H, L, S]`, sum to 1 along key dimension, non-negative values, zero weight on masked positions, dtype matching
+    - **Return types**: `need_weights=False` returns tensor, `need_weights=True` returns tuple, default behavior
+    - **Gradient flow**: Gradients flow correctly through both paths, gradient equivalence between paths
+    - **Edge cases**: Single token sequences, batch size 1, different dtypes (float32, float64), all-but-one masked positions
+    - **EncoderBlock propagation**: `output_attentions` parameter correctly returns attention weights from the block's attention layer
+    - **Encoder propagation**: `output_attentions` collects attention weights from all layers as a tuple
+    - **STokModel propagation**: `output_attentions=True` adds `attentions` key to output dict with per-layer attention weights
+    - **Integration**: Attention weights respect padding masks through the full model stack
+    - **Hidden states (Encoder)**: `output_hidden_states=True` returns tuple of `n_layers + 1` tensors (including initial embeddings), first hidden state equals input, shapes correct `[B, L, d_model]`
+    - **Hidden states (STokModel)**: `output_hidden_states=True` adds `hidden_states` key to output dict with per-layer hidden states
+    - **Combined outputs**: Both `output_attentions` and `output_hidden_states` can be enabled simultaneously with correct return ordering
+  - Pass criteria: Both attention implementations produce equivalent outputs (within tolerance); attention weights have expected mathematical properties; attention and hidden states propagate correctly through all model layers.
 
 - MLM collate (`unit/test_mlm_collate.py`)
   - Purpose: Verify masked language modeling collate function correctness.
@@ -119,6 +182,8 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
     - Special tokens (CLS, PAD, EOS, UNK) are never masked
     - Labels at masked positions match original token values
     - Random token replacement occurs for a subset of masked positions
+    - **Coordinate passthrough**: Returns 3-tuple `(tokens, labels, coords)` when `coords` key present in batch
+    - Returns 2-tuple `(tokens, labels)` when no coordinates present
   - Pass criteria: All assertions pass; mask ratios are within expected ranges.
 
 - MLM model (`unit/test_mlm_model.py`)
@@ -201,9 +266,132 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
   - Scope: Compares `stok.models.blocks.RMSNorm` to a simple reference implementation, checks positive scale invariance, and ensures output dtype matches input dtype.
   - Pass criteria: Outputs match the reference within tolerance; invariance/dtype assertions hold.
 
+- Evaluation base classes (`unit/test_eval_base.py`)
+  - Purpose: Verify the `MetricBase` abstract class and `Metric` protocol.
+  - Scope: Tests include:
+    - Protocol compliance for `MetricBase` subclasses
+    - Metric initialization with kwargs
+    - Update/compute cycle with accumulation
+    - Reset clears accumulated state
+    - State tensor serialization/deserialization roundtrip for distributed aggregation
+    - Default no-op implementations for simple metrics
+  - Pass criteria: All assertions pass; metrics accumulate and reset correctly.
+
+- Metric registry (`unit/test_eval_registry.py`)
+  - Purpose: Validate the metric registry, `build_metrics` factory function, and per-dataset metric configuration.
+  - Scope: Tests include:
+    - Registry is populated after import (contains `accuracy`, `perplexity`, etc.)
+    - `@register_metric` decorator registers classes correctly
+    - Duplicate registration raises an error
+    - `get_registered_metrics` returns a copy of the registry
+    - `build_metrics` filters by objective (codebook vs MLM)
+    - `build_metrics` respects `enabled` flag in config
+    - `build_metrics` filters by decoder/coords requirements
+    - Config params are passed to metric constructors
+    - Per-dataset metric whitelist (`metrics.only: [list]`) filters to specific metrics
+    - Per-dataset metric overrides can re-enable metrics excluded by `only` list
+    - Per-dataset metric overrides can disable metrics included in `only` list
+    - Per-dataset `load_coords` / `has_coords` overrides global coordinate availability
+    - Metrics requiring coords auto-skip datasets without coordinates
+    - Combined `only` whitelist + per-dataset `has_coords` filtering
+    - **Structure folder detection**: `format="structure"` automatically enables `has_coords`
+    - **Auto-detection**: Folders containing PDB/mmCIF files are detected as structure folders
+    - Auto-detection does not trigger for parquet folders
+  - Pass criteria: Correct metrics are registered and built based on objective, config, and per-dataset overrides.
+
+- Classification metrics (`unit/test_eval_classification_metrics.py`)
+  - Purpose: Verify `AccuracyMetric`, `MaskedAccuracyMetric`, and `PerplexityMetric` implementations.
+  - Scope: Tests include:
+    - AccuracyMetric: perfect predictions (1.0), half correct (0.5), respects `ignore_index`, batch accumulation, reset
+    - MaskedAccuracyMetric: identical computation to accuracy with different name for MLM
+    - PerplexityMetric: computes exp(avg_loss), accumulates across batches, returns `cls_loss`, handles empty state
+  - Pass criteria: Metrics compute expected values; accumulation and reset work correctly.
+
+- Structure metrics (`unit/test_eval_structure_metrics.py`)
+  - Purpose: Verify structure-based metric implementations (lDDT, TM-score, RMSD, FAPE, NaN fraction).
+  - Scope: Tests include:
+    - LDDTMetric: 1.0 for identical structures, skips missing coords, accumulates batches
+    - TMScoreMetric: 1.0 for identical structures
+    - RMSDMetric: 0.0 for identical structures, accepts config options (align, atom_set)
+    - FAPEMetric: 0.0 for identical structures, accepts config options (clamp, length_scale)
+    - PredNaNFracMetric: 0.0 with no NaNs, 1.0 with all NaNs, correct fraction with partial NaNs
+  - Pass criteria: Structure metrics compute expected values for identity cases and handle edge cases.
+
+- Metric logger (`unit/test_eval_logger.py`)
+  - Purpose: Validate the `MetricLogger` class for console and W&B logging.
+  - Scope: Tests include:
+    - Known metrics (loss, mask_acc, ppl, p_at_l, lddt, etc.) are formatted with their preferred display names
+    - Structure metrics include Ångström suffix for RMSD
+    - Unknown/custom metrics are logged with default formatting (`.4f`)
+    - All computed metrics appear in console log messages (dynamic logging)
+    - W&B receives all metrics in the payload
+    - Non-main processes do not produce output
+    - Known metrics appear in preferred order, unknown metrics sorted alphabetically after
+    - **Epoch deduplication**: Epoch is not logged twice when present in metrics dict (handled in header only)
+  - Pass criteria: All assertions pass; all computed metrics are logged to both console and W&B.
+
+- Evaluator class (`unit/test_eval_evaluator.py`)
+  - Purpose: Validate the `Evaluator` orchestrator for running evaluations.
+  - Scope: Tests include:
+    - Initialization with config, model, accelerator, decoder
+    - Builds correct metrics for codebook vs MLM objectives
+    - `evaluate()` returns dict of metric values
+    - `evaluate_all()` handles multiple eval datasets
+    - Metric caching per dataset and cache clearing
+    - Model is set to eval mode during evaluation and restored after
+    - Handles batches with coordinates
+    - State tensor aggregation for distributed training (mocked)
+    - **Gather tensor reshaping** (`TestGatherMetricStatesReshaping`):
+      - Single process passthrough (no reshaping needed)
+      - 2-process and 4-process tensor reshaping for distributed gather
+      - Regression: ensures gathered result is never a 0-dim scalar tensor
+      - Regression: ensures gathered tensor can be indexed (prevents `IndexError`)
+      - Metrics (`AccuracyMetric`, `PerplexityMetric`, `MaskedAccuracyMetric`) correctly load reshaped state
+    - **Distributed gather regression tests** (`TestGatherMetricStatesRegression`):
+      - Documents the bug: old code produced 0-dim scalar from flattened gather
+      - Verifies fixed code produces correct tensor shape
+      - Mock accelerator simulation of full `_gather_metric_states` flow
+      - Structure metrics (`LDDTMetric`) state tensor handling
+      - Contact metrics (`PrecisionAtLMetric`) state tensor handling
+  - Pass criteria: Evaluator runs evaluations correctly; metrics are cached and computed appropriately; distributed gather reshaping produces correct tensor shapes (never 0-dim scalars).
+
+- Structure parser (`unit/test_structure_parser.py`)
+  - Purpose: Validate PDB and mmCIF structure file parsing using Biopython.
+  - Scope: Tests include:
+    - Parse valid PDB file: verify sequence and coordinates shape `[L, 3, 3]`
+    - Parse valid mmCIF file
+    - Missing backbone atoms: `strict=False` fills with NaN, `strict=True` raises
+    - Chain selection with `chain_id` parameter
+    - First polymer chain fallback when `chain_id=None`
+    - Non-standard amino acid mapping (e.g., MSE → M)
+    - File not found raises `FileNotFoundError`
+    - Empty structure raises `ValueError`
+  - Pass criteria: All assertions pass; parsing produces correct sequence and coordinate data.
+
+- Structure folder dataset (`unit/test_structure_dataset.py`)
+  - Purpose: Validate `StructureFolderDataset` for loading PDB/mmCIF folders.
+  - Scope: Tests include:
+    - Load folder with PDB files, verify `__len__` and `__getitem__`
+    - Output dict has keys: `pid`, `seq`, `coords`, `masks`, `nan_masks` (no `indices`)
+    - Coords shape is `[max_length, 3, 3]` with NaN padding
+    - Truncation for sequences longer than `max_length`
+    - `recursive=True` searches subdirectories
+    - Empty folder raises `ValueError`
+    - `has_coords` attribute is `True`
+    - `chain_id` parameter passed to parser
+  - Pass criteria: Dataset loads structure files correctly; output format matches expected schema.
+
+## Test Data
+
+- `test_data/cameo/` - Real-world PDB structure files from the CAMEO benchmark:
+  - 7YPD_B.pdb, 8JVC_A.pdb, 8RF7_A.pdb, 8TYZ_B.pdb, 8XAT_B.pdb
+  - Used by `test_mlm_p_at_l_structure_eval.py` for end-to-end P@L metric testing
+  - Provides realistic protein structures for validating structure-based evaluation
+
 ## Conventions
 
 - Tests are CPU-only to ensure CI reliability and speed.
 - Tiny model sizes and small codebooks keep runtime to a few seconds.
 - Synthetic utilities live in `tests/utils` and are shared across tests.
+- Real test data (e.g., CAMEO PDB files) live in `tests/test_data/` for integration tests requiring realistic inputs.
 As new tests are added, update this README with a concise description of each test and its purpose.

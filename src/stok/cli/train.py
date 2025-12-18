@@ -29,18 +29,13 @@ from stok.data.dataset import (
     MapAsIterableDataset,
     TokenizedDataset,
 )
+from stok.eval import Evaluator, MetricLogger
 from stok.models.decoder import load_pretrained_decoder
 from stok.models.stok import STokModel
 from stok.utils.codebook import load_codebook
 from stok.utils.console import ConsoleLogger
-from stok.utils.decoding import (
-    decode_coords,
-    indices_to_codes,
-    logits_to_soft_codes_gumbel,
-    sample_indices_top_p,
-)
+from stok.utils.decoding import logits_to_soft_codes_gumbel
 from stok.utils.losses import fape_loss
-from stok.utils.metrics import lddt_ca, rmsd, tm_score
 from stok.utils.tokenizer import Tokenizer
 
 
@@ -312,13 +307,12 @@ def _tokenize_and_align(
         tokens, labels = zip(*batch)  # type: ignore[arg-type]
         return torch.stack(tokens, dim=0), torch.stack(labels, dim=0)
 
-    # else TokenizedDataset dicts with 'seq' and 'indices'
+    # else TokenizedDataset dicts with 'seq' and optionally 'indices'
     input_ids = []
     label_ids = []
     coords_batch: list[torch.Tensor] = []
     for item in batch:  # type: ignore[assignment]
         seq: str = item["seq"]
-        indices: torch.Tensor = item["indices"].long()
 
         enc = tokenizer(
             seq,
@@ -334,12 +328,16 @@ def _tokenize_and_align(
         L = ids.size(0)
         labels = torch.full((L,), ignore_index, dtype=torch.long)
 
-        # copy only non-negative indices; positions 1..(1+copy_len) receive labels,
-        # respecting truncation before EOS
-        valid_indices = indices[indices >= 0]
-        copy_len = min(int(valid_indices.numel()), max(0, L - 2))
-        if copy_len > 0:
-            labels[1 : 1 + copy_len] = valid_indices[:copy_len]
+        # Handle indices if present (may be absent for structure folder datasets)
+        indices_raw = item.get("indices")
+        if indices_raw is not None:
+            indices: torch.Tensor = indices_raw.long()
+            # copy only non-negative indices; positions 1..(1+copy_len) receive labels,
+            # respecting truncation before EOS
+            valid_indices = indices[indices >= 0]
+            copy_len = min(int(valid_indices.numel()), max(0, L - 2))
+            if copy_len > 0:
+                labels[1 : 1 + copy_len] = valid_indices[:copy_len]
 
         input_ids.append(ids)
         label_ids.append(labels)
@@ -364,6 +362,7 @@ def _parse_eval_configs(cfg: DictConfig) -> dict[str, dict[str, Any]]:
       - Legacy single path: data.eval="/path" -> {"default": {"path": "/path"}}
       - Dict of paths: data.eval.val="/p" -> {"val": {"path": "/p"}}
       - Dict of configs: data.eval.val.path="/p" -> {"val": {"path": "/p", ...}}
+      - Structure folder format: data.eval.pdb.format="structure" for PDB/mmCIF folders
     """
     raw_eval = cfg.data.get("eval")
     if raw_eval is None:
@@ -380,7 +379,12 @@ def _parse_eval_configs(cfg: DictConfig) -> dict[str, dict[str, Any]]:
             elif isinstance(value, (dict, DictConfig)):
                 if value.get("path") is None:
                     continue
-                result[name] = dict(value)
+                entry = dict(value)
+                # Preserve format-related keys for structure folder support
+                for key in ("format", "chain_id", "recursive"):
+                    if key in value:
+                        entry[key] = value.get(key)
+                result[name] = entry
             else:
                 raise ValueError(f"Invalid eval config for '{name}': {type(value)}")
         return result
@@ -557,9 +561,32 @@ def _build_dataloaders(
         mask_token_prob = float(mlm_cfg.get("mask_token_prob", 0.8))
         random_token_prob = float(mlm_cfg.get("random_token_prob", 0.1))
 
+    # Supported structure file extensions for auto-detection
+    structure_exts = {".pdb", ".ent", ".cif", ".mmcif"}
+
     # dataset picker usable for train/eval
-    def _pick_dataset(path: str, load_coords: bool, require_indices: bool = True):
+    def _pick_dataset(
+        path: str,
+        load_coords: bool,
+        require_indices: bool = True,
+        *,
+        dataset_format: str | None = None,
+        chain_id: str | None = None,
+        recursive: bool = False,
+    ):
         p = Path(path)
+
+        # Explicit structure folder format
+        if dataset_format == "structure":
+            from stok.data.structure_dataset import StructureFolderDataset
+
+            return StructureFolderDataset(
+                folder_path=str(p),
+                max_length=max_len,
+                chain_id=chain_id,
+                recursive=recursive,
+            )
+
         # heuristic: directory containing parquet shards -> Iterable; else map-style
         if p.is_dir():
             has_parquet = (
@@ -576,6 +603,21 @@ def _build_dataloaders(
                     load_coords=bool(load_coords),
                     require_indices=require_indices,
                 )
+
+            # Auto-detect structure folder (no parquet, has structure files)
+            has_structures = any(
+                f.suffix.lower() in structure_exts for f in p.iterdir() if f.is_file()
+            )
+            if has_structures:
+                from stok.data.structure_dataset import StructureFolderDataset
+
+                return StructureFolderDataset(
+                    folder_path=str(p),
+                    max_length=max_len,
+                    chain_id=chain_id,
+                    recursive=recursive,
+                )
+
         return TokenizedDataset(
             dataset_path=str(path),
             max_length=max_len,
@@ -770,10 +812,20 @@ def _build_dataloaders(
         eval_path = eval_cfg["path"]
         eval_batch_size = int(eval_cfg.get("batch_size", batch_size))
         eval_load_coords = eval_cfg.get("load_coords", user_load_coords)
+        # Extract structure folder format options
+        eval_format = eval_cfg.get("format")
+        eval_chain_id = eval_cfg.get("chain_id")
+        eval_recursive = bool(eval_cfg.get("recursive", False))
+
+        # Structure folders always have coords, don't require indices
+        is_structure_format = eval_format == "structure"
         ds = _pick_dataset(
             eval_path,
-            bool(eval_load_coords) if not is_mlm else False,
-            require_indices=not is_mlm,
+            bool(eval_load_coords) if not is_mlm and not is_structure_format else True,
+            require_indices=not is_mlm and not is_structure_format,
+            dataset_format=eval_format,
+            chain_id=eval_chain_id,
+            recursive=eval_recursive,
         )
         eval_loaders[name] = DataLoader(
             ds,
@@ -1085,7 +1137,7 @@ def run_training(cfg: DictConfig):
     global_step = 0
     running_loss = 0.0
     log_interval = int(cfg.train.get("log_steps", 50))
-    eval_interval = int(cfg.train.get("eval_steps", 1000))
+    eval_interval = int(cfg.train.get("eval", {}).get("steps", 1000))
     ignore_index = int(cfg.model.classifier.ignore_index)
     grad_clip = float(cfg.train.get("grad_clip_norm", 1.0))
 
@@ -1111,6 +1163,21 @@ def run_training(cfg: DictConfig):
             file=log_file_handle,
             flush=True,
         )
+
+    # Initialize modular evaluation system
+    evaluator = Evaluator(
+        cfg=cfg,
+        model=model,
+        accelerator=accelerator,
+        decoder=decoder,
+    )
+    metric_logger = MetricLogger(
+        console=console,
+        wandb=wb,
+        log_file=log_file_handle,
+        is_main=is_main,
+        objective=objective,
+    )
 
     # additional training accumulators (over the current log window)
     running_cls_loss = 0.0
@@ -1365,336 +1432,19 @@ def run_training(cfg: DictConfig):
                 running_masked_acc_sum = 0.0
                 running_masked_acc_count = 0
 
-            # eval across all configured eval loaders
+            # eval across all configured eval loaders (using modular eval system)
             if current_step % eval_interval == 0 and len(eval_loaders) > 0:
-                model.eval()
-                all_eval_metrics: dict[str, dict[str, float]] = {}
+                all_eval_metrics = evaluator.evaluate_all(eval_loaders)
 
-                for eval_name, eval_loader in eval_loaders.items():
-                    eval_loss_sum = 0.0
-                    eval_acc_sum = 0.0
-                    eval_batches = 0.0
-                    eval_cls_loss_sum = 0.0
-                    eval_cls_batches = 0.0
-                    eval_fape_loss_sum = 0.0
-                    eval_fape_batches = 0.0
-                    eval_lddt_sum = 0.0
-                    eval_tm_sum = 0.0
-                    eval_rmsd_sum = 0.0
-                    eval_struct_count = 0.0
-                    eval_pred_nan_frac_sum = 0.0
-                    eval_pred_nan_frac_count = 0.0
-                    # MLM-specific eval accumulators
-                    eval_masked_acc_sum = 0.0
-                    eval_masked_acc_count = 0.0
-
-                    with torch.no_grad():
-                        for ev in eval_loader:
-                            # eval batch may also include coords (to compute structure-based metrics)
-                            if isinstance(ev, (list, tuple)) and len(ev) == 3:
-                                etok, elab, ecoords = ev
-                            else:
-                                etok, elab = ev
-                                ecoords = None
-                            if accelerator is None:
-                                _dev = _get_model_device(model, accelerator)
-                                etok = etok.to(_dev)
-                                elab = elab.to(_dev)
-                                if ecoords is not None:
-                                    ecoords = ecoords.to(_dev)
-                            out = model(
-                                tokens=etok, labels=elab, ignore_index=ignore_index
-                            )
-                            eval_loss_sum += float(out["loss"].item())
-                            batch_acc = _compute_accuracy(
-                                out["logits"], elab, ignore_index
-                            )
-                            eval_acc_sum += batch_acc
-                            eval_batches += 1.0
-
-                            # MLM-specific: track masked accuracy
-                            if is_mlm:
-                                eval_masked_acc_sum += batch_acc
-                                eval_masked_acc_count += 1.0
-
-                            # accumulate loss components
-                            cls_loss_tensor = out.get("classification_loss")
-                            if cls_loss_tensor is not None:
-                                eval_cls_loss_sum += float(cls_loss_tensor.item())
-                                eval_cls_batches += 1.0
-                            fape_loss_tensor = out.get("structure_loss")
-                            if fape_loss_tensor is not None:
-                                eval_fape_loss_sum += float(fape_loss_tensor.item())
-                                eval_fape_batches += 1.0
-
-                            # optional structure metrics if predicted coords available (codebook only)
-                            if not is_mlm:
-                                pred_coords = out.get("pred_coords", None)
-                                # if decoder is available and eval decoding is enabled, produce pred_coords
-                                if (
-                                    pred_coords is None
-                                    and decoder is not None
-                                    and want_eval_decode
-                                ):
-                                    pad_id = int(cfg.model.encoder.pad_id)
-                                    res_mask = etok != pad_id
-                                    method = str(
-                                        getattr(
-                                            cfg.train.decoding, "eval_method", "argmax"
-                                        )
-                                    )
-                                    if method == "top_p":
-                                        temperature = float(
-                                            getattr(
-                                                cfg.train.decoding, "temperature", 1.0
-                                            )
-                                        )
-                                        top_p = float(
-                                            getattr(cfg.train.decoding, "top_p", 0.9)
-                                        )
-                                        probs = torch.softmax(
-                                            out["logits"] / max(1e-8, temperature),
-                                            dim=-1,
-                                        )
-                                        idx = sample_indices_top_p(
-                                            probs, top_p=top_p, temperature=1.0
-                                        )
-                                        codes = indices_to_codes(
-                                            _unwrap_model(
-                                                model, accelerator
-                                            ).classifier.E,
-                                            idx,
-                                        )
-                                    else:
-                                        idx = out["logits"].argmax(dim=-1)
-                                        codes = indices_to_codes(
-                                            _unwrap_model(
-                                                model, accelerator
-                                            ).classifier.E,
-                                            idx,
-                                        )
-                                    pred_coords = decode_coords(
-                                        decoder, codes, res_mask
-                                    )
-                                    out["pred_coords"] = pred_coords
-
-                                if pred_coords is not None and ecoords is not None:
-                                    if log_pred_nan_frac:
-                                        _pnan_eval = (
-                                            torch.isnan(pred_coords).float().mean()
-                                        )
-                                        eval_pred_nan_frac_sum += float(
-                                            _pnan_eval.item()
-                                        )
-                                        eval_pred_nan_frac_count += 1.0
-                                    res_mask = etok != cfg.model.encoder.pad_id
-                                    # compute eval metrics; guard against numeric failures (NaN, etc)
-                                    try:
-                                        lddt_b, _ = lddt_ca(
-                                            pred_coords, ecoords, residue_mask=res_mask
-                                        )
-                                        tm_b, _ = tm_score(
-                                            pred_coords, ecoords, residue_mask=res_mask
-                                        )
-                                        rmsd_b = rmsd(
-                                            pred_coords,
-                                            ecoords,
-                                            residue_mask=res_mask,
-                                            align=True,
-                                            atom_set="CA",
-                                        )
-                                        eval_lddt_sum += float(lddt_b.mean().item())
-                                        eval_tm_sum += float(tm_b.mean().item())
-                                        eval_rmsd_sum += float(rmsd_b.mean().item())
-                                        eval_struct_count += 1.0
-                                    except Exception:
-                                        pass
-                                    # also compute FAPE on eval if predicted coords are present (as a metric)
-                                    try:
-                                        fape_eval = fape_loss(
-                                            pred_coords, ecoords, residue_mask=res_mask
-                                        )
-                                        eval_fape_loss_sum += float(fape_eval.item())
-                                        eval_fape_batches += 1.0
-                                    except Exception:
-                                        pass
-
-                    # aggregate across processes if using Accelerate
-                    if accelerator:
-                        metrics_device = accelerator.device
-                        metrics_local = torch.tensor(
-                            [
-                                eval_loss_sum,
-                                eval_acc_sum,
-                                eval_batches,
-                                eval_cls_loss_sum,
-                                eval_cls_batches,
-                                eval_fape_loss_sum,
-                                eval_fape_batches,
-                                eval_masked_acc_sum,
-                                eval_masked_acc_count,
-                            ],
-                            dtype=torch.float32,
-                            device=metrics_device,
-                        )
-                        gathered = accelerator.gather_for_metrics(metrics_local)
-                        # gathered can be shape [9] on single process or [N, 9] on multi
-                        if gathered.dim() == 1:
-                            eval_loss_sum = float(gathered[0].item())
-                            eval_acc_sum = float(gathered[1].item())
-                            eval_batches = float(gathered[2].item())
-                            eval_cls_loss_sum = float(gathered[3].item())
-                            eval_cls_batches = float(gathered[4].item())
-                            eval_fape_loss_sum = float(gathered[5].item())
-                            eval_fape_batches = float(gathered[6].item())
-                            eval_masked_acc_sum = float(gathered[7].item())
-                            eval_masked_acc_count = float(gathered[8].item())
-                        else:
-                            eval_loss_sum = float(gathered[:, 0].sum().item())
-                            eval_acc_sum = float(gathered[:, 1].sum().item())
-                            eval_batches = float(gathered[:, 2].sum().item())
-                            eval_cls_loss_sum = float(gathered[:, 3].sum().item())
-                            eval_cls_batches = float(gathered[:, 4].sum().item())
-                            eval_fape_loss_sum = float(gathered[:, 5].sum().item())
-                            eval_fape_batches = float(gathered[:, 6].sum().item())
-                            eval_masked_acc_sum = float(gathered[:, 7].sum().item())
-                            eval_masked_acc_count = float(gathered[:, 8].sum().item())
-
-                    eval_loss = eval_loss_sum / max(1.0, eval_batches)
-                    eval_acc = eval_acc_sum / max(1.0, eval_batches)
-                    eval_cls_loss = (
-                        eval_cls_loss_sum / max(1.0, eval_cls_batches)
-                        if eval_cls_batches > 0
-                        else None
-                    )
-                    eval_fape_loss = (
-                        eval_fape_loss_sum / max(1.0, eval_fape_batches)
-                        if eval_fape_batches > 0
-                        else None
-                    )
-                    eval_ppl = (
-                        math.exp(eval_cls_loss) if eval_cls_loss is not None else None
-                    )
-                    eval_pred_nan_frac = (
-                        eval_pred_nan_frac_sum / max(1.0, eval_pred_nan_frac_count)
-                        if eval_pred_nan_frac_count > 0
-                        else None
-                    )
-                    eval_masked_acc = (
-                        eval_masked_acc_sum / max(1.0, eval_masked_acc_count)
-                        if eval_masked_acc_count > 0
-                        else None
-                    )
-
-                    metrics: dict[str, float] = {
-                        "loss": float(eval_loss),
-                    }
-
-                    if is_mlm:
-                        if eval_masked_acc is not None:
-                            metrics["mask_acc"] = float(eval_masked_acc)
-                        if eval_ppl is not None:
-                            metrics["ppl"] = float(eval_ppl)
-                    else:
-                        metrics["acc"] = float(eval_acc)
-                        if eval_cls_loss is not None and eval_ppl is not None:
-                            metrics["cls_loss"] = float(eval_cls_loss)
-                            metrics["ppl"] = float(eval_ppl)
-                        if eval_fape_loss is not None:
-                            metrics["fape_loss"] = float(eval_fape_loss)
-                        if log_pred_nan_frac and (eval_pred_nan_frac is not None):
-                            metrics["pred_nan_frac"] = float(eval_pred_nan_frac)
-                        if eval_struct_count > 0:
-                            metrics["lddt"] = float(eval_lddt_sum / eval_struct_count)
-                            metrics["tm"] = float(eval_tm_sum / eval_struct_count)
-                            metrics["rmsd"] = float(eval_rmsd_sum / eval_struct_count)
-
-                    if current_epoch is not None:
+                # Add epoch to metrics if available
+                if current_epoch is not None:
+                    for metrics in all_eval_metrics.values():
                         metrics["epoch"] = float(current_epoch)
 
-                    all_eval_metrics[eval_name] = metrics
-
-                model.train()
-
-                if is_main:
-                    for eval_name, metrics in all_eval_metrics.items():
-                        msg = f"eval/{eval_name} | step {current_step}"
-                        epoch_val = metrics.get("epoch")
-                        if epoch_val is not None:
-                            msg += f" | epoch {epoch_val:.3f}"
-                        msg += f" | loss {metrics['loss']:.4f}"
-
-                        if is_mlm:
-                            if "mask_acc" in metrics:
-                                msg += f" | mask_acc {metrics['mask_acc']:.4f}"
-                            if "ppl" in metrics:
-                                msg += f" | ppl {metrics['ppl']:.2f}"
-                        else:
-                            msg += f" | acc {metrics['acc']:.4f}"
-                            if "cls_loss" in metrics and "ppl" in metrics:
-                                msg += (
-                                    f" | cls {metrics['cls_loss']:.4f}"
-                                    f" | ppl {metrics['ppl']:.2f}"
-                                )
-                            if "fape_loss" in metrics:
-                                msg += f" | fape {metrics['fape_loss']:.4f}"
-                            if log_pred_nan_frac and ("pred_nan_frac" in metrics):
-                                msg += f" | pnan {metrics['pred_nan_frac']:.3f}"
-                            if "lddt" in metrics:
-                                msg += (
-                                    f" | lDDT {metrics['lddt']:.3f}"
-                                    f" | TM {metrics['tm']:.3f}"
-                                    f" | RMSD {metrics['rmsd']:.3f}Å"
-                                )
-
-                        console.eval(msg)
-                        if log_file_handle is not None:
-                            print(msg, file=log_file_handle, flush=True)
-                        if wb is not None:
-                            payload: dict[str, float] = {
-                                f"eval/{eval_name}/loss": float(metrics["loss"]),
-                            }
-
-                            if is_mlm:
-                                if "mask_acc" in metrics:
-                                    payload[f"eval/{eval_name}/mask_acc"] = float(
-                                        metrics["mask_acc"]
-                                    )
-                                if "ppl" in metrics:
-                                    payload[f"eval/{eval_name}/ppl"] = float(
-                                        metrics["ppl"]
-                                    )
-                            else:
-                                payload[f"eval/{eval_name}/acc"] = float(metrics["acc"])
-                                if "cls_loss" in metrics and "ppl" in metrics:
-                                    payload[f"eval/{eval_name}/cls_loss"] = float(
-                                        metrics["cls_loss"]
-                                    )
-                                    payload[f"eval/{eval_name}/ppl"] = float(
-                                        metrics["ppl"]
-                                    )
-                                if "fape_loss" in metrics:
-                                    payload[f"eval/{eval_name}/fape_loss"] = float(
-                                        metrics["fape_loss"]
-                                    )
-                                if log_pred_nan_frac and ("pred_nan_frac" in metrics):
-                                    payload[f"eval/{eval_name}/pred_nan_frac"] = float(
-                                        metrics["pred_nan_frac"]
-                                    )
-                                if "lddt" in metrics:
-                                    payload[f"eval/{eval_name}/lddt"] = float(
-                                        metrics["lddt"]
-                                    )
-                                    payload[f"eval/{eval_name}/tm"] = float(
-                                        metrics["tm"]
-                                    )
-                                    payload[f"eval/{eval_name}/rmsd"] = float(
-                                        metrics["rmsd"]
-                                    )
-
-                            if epoch_val is not None:
-                                payload[f"eval/{eval_name}/epoch"] = float(epoch_val)
-                            wb.log(payload, step=current_step)
+                # Log all eval metrics
+                metric_logger.log_eval_all(
+                    all_eval_metrics, current_step, current_epoch
+                )
 
             global_step += 1
             console.step(1)

@@ -62,7 +62,9 @@ class Encoder(nn.Module):
         h: torch.Tensor,
         key_padding_mask: torch.Tensor | None = None,
         attn_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        output_attentions: bool = False,
+        output_hidden_states: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, ...]:
         """Forward pass through encoder stack.
 
         Args:
@@ -71,10 +73,53 @@ class Encoder(nn.Module):
                 padding positions. Defaults to None.
             attn_mask: Attention mask of shape [B, H, L, S] or [B, 1, L, S].
                 Defaults to None.
+            output_attentions: If True, also returns attention weights from
+                all layers. Defaults to False.
+            output_hidden_states: If True, also returns hidden states from
+                all layers (including initial embeddings). Defaults to False.
 
         Returns:
-            Output tensor of shape [B, L, d_model].
+            Depends on output_attentions and output_hidden_states flags:
+            - Neither: Output tensor of shape [B, L, d_model].
+            - output_attentions only: (output, all_attentions) where
+                all_attentions is a tuple of n_layers tensors [B, H, L, L].
+            - output_hidden_states only: (output, all_hidden_states) where
+                all_hidden_states is a tuple of n_layers+1 tensors [B, L, d_model].
+            - Both: (output, all_attentions, all_hidden_states).
         """
+        all_attentions: list[torch.Tensor] | None = [] if output_attentions else None
+        all_hidden_states: list[torch.Tensor] | None = (
+            [] if output_hidden_states else None
+        )
+
+        # Collect initial hidden state (before any layers)
+        if output_hidden_states:
+            all_hidden_states.append(h)
+
         for layer in self.layers:
-            h = layer(h, key_padding_mask=key_padding_mask, attn_mask=attn_mask)
-        return self.final_norm(h)
+            layer_output = layer(
+                h,
+                key_padding_mask=key_padding_mask,
+                attn_mask=attn_mask,
+                output_attentions=output_attentions,
+            )
+            if output_attentions:
+                h, attn_weights = layer_output
+                all_attentions.append(attn_weights)
+            else:
+                h = layer_output
+
+            # Collect hidden state after each layer (before final norm)
+            if output_hidden_states:
+                all_hidden_states.append(h)
+
+        h = self.final_norm(h)
+
+        # Build return value based on flags
+        if output_attentions and output_hidden_states:
+            return h, tuple(all_attentions), tuple(all_hidden_states)
+        elif output_attentions:
+            return h, tuple(all_attentions)
+        elif output_hidden_states:
+            return h, tuple(all_hidden_states)
+        return h

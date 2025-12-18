@@ -67,7 +67,8 @@ class EncoderBlock(nn.Module):
         x: torch.Tensor,
         key_padding_mask: torch.Tensor | None = None,
         attn_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        output_attentions: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Forward pass through encoder block.
 
         Args:
@@ -76,15 +77,34 @@ class EncoderBlock(nn.Module):
                 padding positions. Defaults to None.
             attn_mask: Attention mask of shape [B, H, L, S] or [B, 1, L, S].
                 Defaults to None.
+            output_attentions: If True, also returns attention weights.
+                Defaults to False.
 
         Returns:
-            Output tensor of shape [B, L, d_model].
+            If output_attentions=False: Output tensor of shape [B, L, d_model].
+            If output_attentions=True: Tuple of (output, attention_weights) where
+                attention_weights has shape [B, H, L, L].
         """
         h = self.norm1(x)
-        h = self.attn(h, key_padding_mask=key_padding_mask, attn_mask=attn_mask)
+        attn_output = self.attn(
+            h,
+            key_padding_mask=key_padding_mask,
+            attn_mask=attn_mask,
+            need_weights=output_attentions,
+        )
+
+        if output_attentions:
+            h, attn_weights = attn_output
+        else:
+            h = attn_output
+            attn_weights = None
+
         x = x + self.drop1(h)
 
         h = self.norm2(x)
         h = self.mlp(h)
         x = x + self.drop2(h)
+
+        if output_attentions:
+            return x, attn_weights
         return x

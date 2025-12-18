@@ -29,7 +29,7 @@ def test_cli_train_mlm_smoke_runs_end_to_end_cpu(tmp_path):
         # fast training
         "train.num_steps=5",
         "train.log_steps=2",
-        "train.eval_steps=100000",
+        "train.eval.steps=100000",
         "train.grad_accum_steps=1",
         # disable external logging
         "train.wandb.enabled=false",
@@ -64,7 +64,7 @@ def test_cli_train_mlm_logs_mask_accuracy(tmp_path):
         "data.pin_memory=false",
         "train.num_steps=4",
         "train.log_steps=2",
-        "train.eval_steps=100000",
+        "train.eval.steps=100000",
         "train.wandb.enabled=false",
         f"train.project_path={tmp_path.as_posix()}",
     ]
@@ -92,7 +92,7 @@ def test_cli_train_mlm_logs_perplexity(tmp_path):
         "data.pin_memory=false",
         "train.num_steps=4",
         "train.log_steps=2",
-        "train.eval_steps=100000",
+        "train.eval.steps=100000",
         "train.wandb.enabled=false",
         f"train.project_path={tmp_path.as_posix()}",
     ]
@@ -134,7 +134,7 @@ def test_cli_train_mlm_with_csv_dataset(tmp_path):
         f"data.train={train_csv.as_posix()}",
         "train.num_steps=3",
         "train.log_steps=1",
-        "train.eval_steps=100000",
+        "train.eval.steps=100000",
         "train.wandb.enabled=false",
         f"train.project_path={tmp_path.as_posix()}",
     ]
@@ -190,7 +190,7 @@ def test_cli_train_mlm_with_eval_dataset(tmp_path):
         f"+data.eval.validation={eval_csv.as_posix()}",
         "train.num_steps=4",
         "train.log_steps=2",
-        "train.eval_steps=2",  # Trigger eval
+        "train.eval.steps=2",  # Trigger eval
         "train.wandb.enabled=false",
         f"train.project_path={tmp_path.as_posix()}",
     ]
@@ -220,7 +220,7 @@ def test_cli_train_mlm_saves_checkpoint(tmp_path):
         "data.pin_memory=false",
         "train.num_steps=5",
         "train.log_steps=1",
-        "train.eval_steps=100000",
+        "train.eval.steps=100000",
         "train.checkpoint_steps=2",  # Save checkpoint every 2 steps
         "train.wandb.enabled=false",
         f"train.project_path={tmp_path.as_posix()}",
@@ -258,7 +258,7 @@ def test_cli_train_codebook_still_works(tmp_path):
         "data.pin_memory=false",
         "train.num_steps=3",
         "train.log_steps=1",
-        "train.eval_steps=100000",
+        "train.eval.steps=100000",
         "train.wandb.enabled=false",
         f"train.project_path={tmp_path.as_posix()}",
     ]

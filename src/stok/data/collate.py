@@ -33,7 +33,7 @@ def mlm_collate(
     mask_id: int = 31,
     ignore_index: int = -100,
     special_token_ids: set[int] | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Collate batch for masked language modeling.
 
     Applies BERT-style masking:
@@ -45,6 +45,7 @@ def mlm_collate(
 
     Args:
         batch: List of dicts with 'seq' key containing amino acid sequences.
+            May also contain 'coords' key with coordinate tensors [L, 3, 3].
         tokenizer: Tokenizer instance for encoding sequences.
         max_len: Maximum sequence length.
         mask_prob: Probability of selecting a token for masking.
@@ -56,7 +57,8 @@ def mlm_collate(
         special_token_ids: Set of token IDs to never mask (e.g., CLS, EOS, PAD).
 
     Returns:
-        Tuple of (input_ids, labels) tensors with shape [B, L].
+        Tuple of (input_ids, labels) tensors with shape [B, L], or
+        (input_ids, labels, coords) if coordinates are present in batch items.
     """
     if special_token_ids is None:
         # Default special tokens: <cls>=0, <pad>=1, <eos>=2, <unk>=3
@@ -64,6 +66,7 @@ def mlm_collate(
 
     input_ids_list = []
     labels_list = []
+    coords_list: list[torch.Tensor] = []
 
     for item in batch:
         seq: str = item["seq"]
@@ -118,4 +121,14 @@ def mlm_collate(
         input_ids_list.append(ids)
         labels_list.append(labels)
 
-    return torch.stack(input_ids_list), torch.stack(labels_list)
+        # Extract optional coordinates tensor
+        coords = item.get("coords")
+        if coords is not None and isinstance(coords, torch.Tensor):
+            coords_list.append(coords)
+
+    tokens = torch.stack(input_ids_list)
+    labels = torch.stack(labels_list)
+
+    if len(coords_list) > 0:
+        return tokens, labels, torch.stack(coords_list)
+    return tokens, labels
