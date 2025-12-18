@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -75,6 +76,9 @@ class Evaluator:
         # Cache for metrics per eval dataset
         self._metrics_cache: dict[str, list[Metric]] = {}
 
+        # Cache for whether attention weights are needed per eval dataset
+        self._needs_attentions_cache: dict[str, bool] = {}
+
     def _get_metrics(self, eval_name: str | None = None) -> list[Metric]:
         """Get or build metrics for an eval dataset.
 
@@ -86,14 +90,36 @@ class Evaluator:
         """
         cache_key = eval_name or "__default__"
         if cache_key not in self._metrics_cache:
-            self._metrics_cache[cache_key] = build_metrics(
+            metrics = build_metrics(
                 cfg=self.cfg,
                 objective=self.objective,
                 decoder=self.decoder,
                 has_coords=self.has_coords,
                 eval_name=eval_name,
             )
+            self._metrics_cache[cache_key] = metrics
+
+            # Check if any metric needs attention weights (e.g., p_at_l)
+            self._needs_attentions_cache[cache_key] = any(
+                getattr(m, "name", "") == "p_at_l" for m in metrics
+            )
+
         return self._metrics_cache[cache_key]
+
+    def _needs_attentions(self, eval_name: str | None = None) -> bool:
+        """Check if attention weights are needed for an eval dataset.
+
+        Args:
+            eval_name: Name of the eval dataset.
+
+        Returns:
+            True if any metric for this dataset needs attention weights.
+        """
+        cache_key = eval_name or "__default__"
+        # Ensure metrics are built (which populates the cache)
+        if cache_key not in self._needs_attentions_cache:
+            self._get_metrics(eval_name)
+        return self._needs_attentions_cache.get(cache_key, False)
 
     def _decode_predictions(
         self,
@@ -116,7 +142,11 @@ class Evaluator:
             return None
 
         # Import decoding utilities
-        from stok.utils.decoding import decode_coords, indices_to_codes, sample_indices_top_p
+        from stok.utils.decoding import (
+            decode_coords,
+            indices_to_codes,
+            sample_indices_top_p,
+        )
 
         logits = outputs["logits"]
         pad_id = int(self.cfg.model.encoder.pad_id)
@@ -130,7 +160,9 @@ class Evaluator:
             if self.decode_method == "top_p":
                 temperature = max(1e-8, self.decode_temperature)
                 probs = torch.softmax(logits / temperature, dim=-1)
-                idx = sample_indices_top_p(probs, top_p=self.decode_top_p, temperature=1.0)
+                idx = sample_indices_top_p(
+                    probs, top_p=self.decode_top_p, temperature=1.0
+                )
             else:  # argmax
                 idx = logits.argmax(dim=-1)
 
@@ -203,9 +235,13 @@ class Evaluator:
 
         # Check if any metrics require decoding
         needs_decoding = any(
-            getattr(m, "requires_decoder", False) or getattr(m, "requires_coords", False)
+            getattr(m, "requires_decoder", False)
+            or getattr(m, "requires_coords", False)
             for m in metrics
         )
+
+        # Check if any metrics need attention weights (e.g., p_at_l)
+        needs_attentions = self._needs_attentions(eval_name)
 
         self.model.eval()
         ignore_index = int(self.cfg.model.classifier.get("ignore_index", -100))
@@ -227,15 +263,20 @@ class Evaluator:
                     if coords is not None:
                         coords = coords.to(device)
 
-                # Forward pass
+                # Forward pass (request attention weights if needed for metrics like p_at_l)
                 outputs = self.model(
                     tokens=tokens,
                     labels=labels,
                     ignore_index=ignore_index,
+                    output_attentions=needs_attentions,
                 )
 
                 # Decode predictions for structure metrics
-                if needs_decoding and self.decoder is not None and "pred_coords" not in outputs:
+                if (
+                    needs_decoding
+                    and self.decoder is not None
+                    and "pred_coords" not in outputs
+                ):
                     pred_coords = self._decode_predictions(outputs, tokens)
                     if pred_coords is not None:
                         outputs["pred_coords"] = pred_coords
@@ -244,9 +285,8 @@ class Evaluator:
                 for metric in metrics:
                     try:
                         metric.update(outputs, tokens, labels, coords, self.cfg)
-                    except Exception:
-                        # Continue on metric failure (graceful degradation)
-                        pass
+                    except Exception as e:
+                        warnings.warn(f"Metric '{metric.name}' update failed: {e}")
 
         # Aggregate across distributed processes
         self._gather_metric_states(metrics)
@@ -257,8 +297,8 @@ class Evaluator:
             try:
                 computed = metric.compute()
                 results.update(computed)
-            except Exception:
-                pass
+            except Exception as e:
+                warnings.warn(f"Metric '{metric.name}' compute failed: {e}")
 
         self.model.train()
         return results
@@ -283,4 +323,4 @@ class Evaluator:
     def clear_cache(self) -> None:
         """Clear the metrics cache (e.g., after config changes)."""
         self._metrics_cache.clear()
-
+        self._needs_attentions_cache.clear()

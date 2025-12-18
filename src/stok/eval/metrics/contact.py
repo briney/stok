@@ -16,20 +16,25 @@ def _compute_contact_map(coords: torch.Tensor, threshold: float = 8.0) -> torch.
 
     Args:
         coords: Coordinates tensor [B, L, 3, 3] with N, CA, C atoms.
+            Padded positions may contain NaN values.
         threshold: Distance threshold in Ångströms for defining contacts.
 
     Returns:
         Binary contact map [B, L, L] where True indicates a contact.
+        Positions with NaN coordinates are marked as False (no contact).
     """
-    # Use Cβ for contact definition (approximate as 2*CA - N for simplicity)
-    # This is a common approximation when Cβ is not available
+    # Use CA atoms for contact definition
     ca = coords[:, :, 1, :]  # [B, L, 3]
 
     # Compute pairwise distances
     diff = ca.unsqueeze(2) - ca.unsqueeze(1)  # [B, L, L, 3]
     dist = torch.sqrt((diff**2).sum(dim=-1) + 1e-8)  # [B, L, L]
 
-    return dist < threshold
+    # NaN positions (from padding) should not be counted as contacts
+    # When any coordinate is NaN, the distance will be NaN
+    contact_map = (dist < threshold) & ~torch.isnan(dist)
+
+    return contact_map
 
 
 def _extract_attention_contacts(

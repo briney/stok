@@ -127,6 +127,33 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
     - Chain selection via `chain_id` parameter
   - Pass criteria: CLI exits with code 0; training completes successfully with structure folder eval; ends with `Training complete.`.
 
+- MLM P@L metric with structure evaluation (`integration/test_mlm_p_at_l_structure_eval.py`)
+  - Purpose: Comprehensive end-to-end testing of the P@L (Precision@L) contact prediction metric with real PDB structure files during MLM training.
+  - Scope: Uses real-world CAMEO benchmark PDB files from `tests/test_data/cameo/`. Tests include:
+    - **Structure dataset pipeline** (`TestStructureDatasetPipeline`):
+      - `StructureFolderDataset` correctly loads real CAMEO PDB files
+      - `mlm_collate` preserves coordinate tensors in returned 3-tuple
+    - **Contact map computation** (`TestContactMapComputation`):
+      - Contact map shape and dtype correctness
+      - NaN padding handling (padded positions marked as no-contact)
+    - **P@L metric directly** (`TestPAtLMetricDirectly`):
+      - Metric instantiation with correct attributes (`name`, `requires_coords`, `objectives`)
+      - Metric update with attention weights (no exceptions)
+      - Fallback to logits similarity when attention not available
+    - **Metric building** (`TestMetricBuildingWithStructureFolder`):
+      - `_get_dataset_has_coords` returns True for `format="structure"`
+      - P@L metric built for MLM objective with structure folder coords
+      - P@L metric NOT built for codebook objective (restricted to MLM)
+    - **Evaluator attention propagation** (`TestEvaluatorAttentionPropagation`):
+      - Evaluator detects when p_at_l metric needs attention weights
+      - `_needs_attentions()` returns True for datasets with p_at_l enabled
+    - **End-to-end MLM with CAMEO eval** (`TestEndToEndMLMWithCameoEval`):
+      - Full CLI training with CAMEO structure folder, verifies P@L appears in output
+      - Structure folder auto-detection (no explicit `format=structure`)
+      - P@L not logged when coords unavailable (CSV-only eval dataset)
+  - Pass criteria: All 14 tests pass; P@L metric correctly computed and logged with real PDB data; attention weights flow through evaluator; NaN padding handled gracefully.
+  - Notes: Requires `tests/test_data/cameo/` with real CAMEO PDB files (5 files included: 7YPD_B.pdb, 8JVC_A.pdb, 8RF7_A.pdb, 8TYZ_B.pdb, 8XAT_B.pdb). Tests skip if CAMEO data not found.
+
 ## Unit Tests
 
 - Attention need_weights, output_attentions, and output_hidden_states (`unit/test_attention.py`)
@@ -354,9 +381,17 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
     - `chain_id` parameter passed to parser
   - Pass criteria: Dataset loads structure files correctly; output format matches expected schema.
 
+## Test Data
+
+- `test_data/cameo/` - Real-world PDB structure files from the CAMEO benchmark:
+  - 7YPD_B.pdb, 8JVC_A.pdb, 8RF7_A.pdb, 8TYZ_B.pdb, 8XAT_B.pdb
+  - Used by `test_mlm_p_at_l_structure_eval.py` for end-to-end P@L metric testing
+  - Provides realistic protein structures for validating structure-based evaluation
+
 ## Conventions
 
 - Tests are CPU-only to ensure CI reliability and speed.
 - Tiny model sizes and small codebooks keep runtime to a few seconds.
 - Synthetic utilities live in `tests/utils` and are shared across tests.
+- Real test data (e.g., CAMEO PDB files) live in `tests/test_data/` for integration tests requiring realistic inputs.
 As new tests are added, update this README with a concise description of each test and its purpose.
