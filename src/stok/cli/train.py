@@ -35,6 +35,7 @@ from stok.models.stok import STokModel
 from stok.utils.codebook import load_codebook
 from stok.utils.console import ConsoleLogger
 from stok.utils.decoding import logits_to_soft_codes_gumbel
+from stok.utils.flops import compute_flops_6n, count_parameters, format_flops_scientific
 from stok.utils.losses import fape_loss
 from stok.utils.tokenizer import Tokenizer
 
@@ -986,6 +987,11 @@ def run_training(cfg: DictConfig):
             printer=printer,
         )
 
+    # Count trainable parameters for FLOPs tracking (6N approximation)
+    num_params = count_parameters(model, trainable_only=True)
+    if is_main:
+        printer(f"Trainable parameters: {num_params:,}")
+
     # load frozen geometric decoder for FAPE loss and/or eval metrics (optional)
     # Skip decoder setup for MLM objective
     decoder = None
@@ -1189,6 +1195,8 @@ def run_training(cfg: DictConfig):
     # MLM-specific accumulators
     running_masked_acc_sum = 0.0
     running_masked_acc_count = 0
+    # FLOPs tracking (cumulative tokens for 6N approximation)
+    total_tokens = 0
 
     # Gumbel temperature schedule (only for codebook objective)
     def _anneal_tau(step: int) -> float:
@@ -1294,6 +1302,11 @@ def run_training(cfg: DictConfig):
 
             running_loss += float(loss.detach().item())
 
+            # Accumulate tokens for FLOPs tracking (non-padding tokens)
+            pad_id_for_count = int(cfg.model.encoder.pad_id)
+            batch_tokens = int((tokens != pad_id_for_count).sum().item())
+            total_tokens += batch_tokens
+
             # accumulate loss components
             cls_loss_tensor = outputs.get("classification_loss")
             if cls_loss_tensor is not None:
@@ -1336,10 +1349,16 @@ def run_training(cfg: DictConfig):
                 )
                 ppl = math.exp(avg_cls_loss) if avg_cls_loss is not None else None
 
+                # Compute cumulative FLOPs (6N approximation)
+                cumulative_flops = compute_flops_6n(num_params, total_tokens)
+
                 # build console log message
                 msg = f"step {current_step}/{max_steps}"
                 if current_epoch is not None:
                     msg += f" | epoch {current_epoch:.3f}"
+                # add FLOPs (scientific notation for console)
+                msg += f" | flops {format_flops_scientific(cumulative_flops)}"
+                # loss
                 msg += f" | loss {avg_total_loss:.4f}"
 
                 if is_mlm:
@@ -1349,7 +1368,7 @@ def run_training(cfg: DictConfig):
                         if running_masked_acc_count > 0
                         else acc
                     )
-                    msg += f" | mask_acc {avg_masked_acc:.4f}"
+                    msg += f" | acc {avg_masked_acc:.4f}"
                     if ppl is not None:
                         msg += f" | ppl {ppl:.2f}"
                     msg += f" | lr {lr:.2e}"
@@ -1377,7 +1396,9 @@ def run_training(cfg: DictConfig):
 
                 console.train(msg)
                 if log_file_handle is not None:
-                    print(msg, file=log_file_handle, flush=True)
+                    # Include full FLOPs value in file log
+                    file_msg = msg + f" (flops_actual={cumulative_flops})"
+                    print(file_msg, file=log_file_handle, flush=True)
 
                 # W&B logging
                 if wb is not None:
@@ -1419,6 +1440,9 @@ def run_training(cfg: DictConfig):
 
                     if current_epoch is not None:
                         payload["train/epoch"] = float(current_epoch)
+                    # Add cumulative FLOPs
+                    payload["train/flops"] = float(cumulative_flops)
+                    payload["train/tokens"] = float(total_tokens)
                     wb.log(payload, step=current_step)
 
                 # reset accumulators for the next log interval
@@ -1441,9 +1465,12 @@ def run_training(cfg: DictConfig):
                     for metrics in all_eval_metrics.values():
                         metrics["epoch"] = float(current_epoch)
 
-                # Log all eval metrics
+                # Compute cumulative training FLOPs for eval logging
+                eval_train_flops = compute_flops_6n(num_params, total_tokens)
+
+                # Log all eval metrics (including training FLOPs at this checkpoint)
                 metric_logger.log_eval_all(
-                    all_eval_metrics, current_step, current_epoch
+                    all_eval_metrics, current_step, current_epoch, eval_train_flops
                 )
 
             global_step += 1

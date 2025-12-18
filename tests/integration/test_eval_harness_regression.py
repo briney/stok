@@ -117,7 +117,8 @@ def test_eval_harness_produces_expected_metrics_mlm(tmp_path):
 
     # Check that expected MLM metrics are logged
     assert "eval/validation" in result.output
-    assert "mask_acc" in result.output
+    # MLM eval logs "acc" (masked accuracy) same as codebook eval
+    assert "acc" in result.output
     assert "ppl" in result.output
     assert "Training complete." in result.output
 

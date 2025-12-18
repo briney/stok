@@ -47,7 +47,7 @@ def test_cli_train_mlm_smoke_runs_end_to_end_cpu(tmp_path):
 
 
 def test_cli_train_mlm_logs_mask_accuracy(tmp_path):
-    """Test that MLM training logs mask_acc metric."""
+    """Test that MLM training logs accuracy metric."""
     runner = CliRunner()
     overrides = [
         "train.objective=mlm",
@@ -71,7 +71,8 @@ def test_cli_train_mlm_logs_mask_accuracy(tmp_path):
 
     result = runner.invoke(cli, ["train", *overrides])
     assert result.exit_code == 0, result.output
-    assert "mask_acc" in result.output
+    # MLM training logs "acc" (masked accuracy) same as codebook training
+    assert "acc" in result.output
 
 
 def test_cli_train_mlm_logs_perplexity(tmp_path):

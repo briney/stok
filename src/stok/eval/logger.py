@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import IO
 
+from stok.utils.flops import format_flops_scientific
+
 
 class MetricLogger:
     """Unified metric logging to console, W&B, and file.
@@ -91,6 +93,7 @@ class MetricLogger:
         metrics: dict[str, float],
         step: int,
         epoch: float | None,
+        train_flops: int | None = None,
     ) -> str:
         """Format an evaluation log message.
 
@@ -102,6 +105,7 @@ class MetricLogger:
             metrics: Dictionary of metric values.
             step: Current training step.
             epoch: Current epoch (or None).
+            train_flops: Cumulative training FLOPs (or None).
 
         Returns:
             Formatted log message string.
@@ -109,6 +113,8 @@ class MetricLogger:
         msg = f"eval/{eval_name} | step {step}"
         if epoch is not None:
             msg += f" | epoch {epoch:.3f}"
+        if train_flops is not None:
+            msg += f" | flops {format_flops_scientific(train_flops)}"
 
         # Define formatting for known metrics (order matters for readability)
         # Format: (key, display_name, format_string, suffix)
@@ -194,6 +200,7 @@ class MetricLogger:
         metrics: dict[str, float],
         step: int,
         epoch: float | None = None,
+        train_flops: int | None = None,
     ) -> None:
         """Log evaluation metrics.
 
@@ -202,18 +209,25 @@ class MetricLogger:
             metrics: Dictionary of metric values.
             step: Current training step.
             epoch: Current epoch (or None).
+            train_flops: Cumulative training FLOPs at this checkpoint (or None).
         """
         if not self.is_main:
             return
 
-        # Console output
-        msg = self._format_eval_message(eval_name, metrics, step, epoch)
+        # Console output (uses scientific notation for FLOPs)
+        msg = self._format_eval_message(eval_name, metrics, step, epoch, train_flops)
         if self.console is not None:
             self.console.eval(msg)
 
-        # File output
+        # File output (includes full FLOPs value)
         if self.log_file is not None:
-            print(msg, file=self.log_file, flush=True)
+            file_msg = self._format_eval_message(
+                eval_name, metrics, step, epoch, train_flops
+            )
+            if train_flops is not None:
+                # Append actual value for file logging
+                file_msg += f" (flops_actual={train_flops})"
+            print(file_msg, file=self.log_file, flush=True)
 
         # W&B output
         if self.wandb is not None:
@@ -222,6 +236,8 @@ class MetricLogger:
                 payload[f"eval/{eval_name}/{key}"] = float(value)
             if epoch is not None:
                 payload[f"eval/{eval_name}/epoch"] = float(epoch)
+            if train_flops is not None:
+                payload[f"eval/{eval_name}/train_flops"] = float(train_flops)
             self.wandb.log(payload, step=step)
 
     def log_eval_all(
@@ -229,6 +245,7 @@ class MetricLogger:
         all_metrics: dict[str, dict[str, float]],
         step: int,
         epoch: float | None = None,
+        train_flops: int | None = None,
     ) -> None:
         """Log metrics for all evaluation datasets.
 
@@ -236,6 +253,7 @@ class MetricLogger:
             all_metrics: Dictionary mapping dataset names to metric dicts.
             step: Current training step.
             epoch: Current epoch (or None).
+            train_flops: Cumulative training FLOPs at this checkpoint (or None).
         """
         for eval_name, metrics in all_metrics.items():
-            self.log_eval(eval_name, metrics, step, epoch)
+            self.log_eval(eval_name, metrics, step, epoch, train_flops)
