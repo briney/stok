@@ -202,21 +202,6 @@ class TestPerplexityMetric:
         expected_ppl = math.exp(1.5)
         assert abs(result["ppl"] - expected_ppl) < 0.01
 
-    def test_perplexity_includes_cls_loss(self):
-        """Test that cls_loss is also returned."""
-        metric = PerplexityMetric()
-        cfg = _make_cfg()
-
-        outputs = {"loss": torch.tensor(2.0), "classification_loss": torch.tensor(2.0)}
-        tokens = torch.zeros(1, 1)
-        labels = torch.zeros(1, 1)
-
-        metric.update(outputs, tokens, labels, None, cfg)
-        result = metric.compute()
-
-        assert "cls_loss" in result
-        assert result["cls_loss"] == 2.0
-
     def test_perplexity_handles_no_batches(self):
         """Test perplexity with no data returns inf."""
         metric = PerplexityMetric()

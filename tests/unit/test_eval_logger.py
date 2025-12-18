@@ -52,7 +52,7 @@ def test_format_eval_message_known_metrics():
     assert "step 100" in msg
     assert "epoch 1.500" in msg
     assert "loss 0.5000" in msg
-    assert "mask_acc 0.8500" in msg
+    assert "acc 0.8500" in msg  # mask_acc displays as "acc"
     assert "ppl 12.34" in msg
     assert "P@L 0.6500" in msg
 
@@ -134,7 +134,7 @@ def test_format_eval_message_all_computed_metrics_logged():
             display in msg
             for k, display, _, _ in [
                 ("loss", "loss", ".4f", ""),
-                ("mask_acc", "mask_acc", ".4f", ""),
+                ("mask_acc", "acc", ".4f", ""),  # mask_acc displays as "acc"
                 ("p_at_l", "P@L", ".4f", ""),
             ]
             if k == key
@@ -161,7 +161,7 @@ def test_log_eval_console_output():
     assert len(console.eval_messages) == 1
     msg = console.eval_messages[0]
     assert "loss" in msg
-    assert "mask_acc" in msg
+    assert "acc" in msg  # mask_acc displays as "acc"
     assert "custom_metric" in msg
 
 
@@ -237,12 +237,12 @@ def test_format_eval_message_metric_ordering():
 
     msg = logger._format_eval_message("test", metrics, step=1, epoch=None)
 
-    # Known metrics should appear in order: loss, mask_acc, ppl
+    # Known metrics should appear in order: loss, acc (from mask_acc), ppl
     loss_pos = msg.find("loss")
-    mask_acc_pos = msg.find("mask_acc")
+    acc_pos = msg.find("acc")  # mask_acc displays as "acc"
     ppl_pos = msg.find("ppl")
 
-    assert loss_pos < mask_acc_pos < ppl_pos, "Known metrics should be in preferred order"
+    assert loss_pos < acc_pos < ppl_pos, "Known metrics should be in preferred order"
 
     # Unknown metrics should appear after known ones, in sorted order
     alpha_pos = msg.find("alpha_metric")

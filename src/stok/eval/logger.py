@@ -64,7 +64,7 @@ class MetricLogger:
         # Objective-specific metrics
         if self.objective == "mlm":
             if "mask_acc" in metrics:
-                msg += f" | mask_acc {metrics['mask_acc']:.4f}"
+                msg += f" | acc {metrics['mask_acc']:.4f}"
             if "ppl" in metrics:
                 msg += f" | ppl {metrics['ppl']:.2f}"
         else:
@@ -75,7 +75,7 @@ class MetricLogger:
             if "ppl" in metrics:
                 msg += f" | ppl {metrics['ppl']:.2f}"
             if "fape_loss" in metrics:
-                msg += f" | fape {metrics['fape_loss']:.4f}"
+                msg += f" | FAPE {metrics['fape_loss']:.4f}"
             if "pred_nan_frac" in metrics:
                 msg += f" | pnan {metrics['pred_nan_frac']:.3f}"
 
@@ -115,13 +115,13 @@ class MetricLogger:
         known_metrics = [
             ("loss", "loss", ".4f", ""),
             # MLM metrics
-            ("mask_acc", "mask_acc", ".4f", ""),
+            ("mask_acc", "acc", ".4f", ""),
             ("ppl", "ppl", ".2f", ""),
             ("p_at_l", "P@L", ".4f", ""),
             # Codebook metrics
             ("acc", "acc", ".4f", ""),
             ("cls_loss", "cls", ".4f", ""),
-            ("fape_loss", "fape", ".4f", ""),
+            ("fape_loss", "FAPE", ".4f", ""),
             ("pred_nan_frac", "pnan", ".3f", ""),
             # Structure metrics
             ("lddt", "lDDT", ".3f", ""),

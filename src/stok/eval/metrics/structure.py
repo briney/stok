@@ -17,7 +17,7 @@ from stok.utils.metrics import lddt_ca, rmsd, tm_score
 class LDDTMetric(MetricBase):
     """Local Distance Difference Test (lDDT) metric.
 
-    Computes the lDDT-Cα score between predicted and ground truth structures.
+    Computes the lDDT-Ca score between predicted and ground truth structures.
     This is a superposition-free metric that measures local structural similarity.
     """
 
@@ -151,7 +151,7 @@ class TMScoreMetric(MetricBase):
 class RMSDMetric(MetricBase):
     """Root Mean Square Deviation (RMSD) metric.
 
-    Computes the RMSD in Ångströms between predicted and ground truth structures
+    Computes the RMSD in Angstroms between predicted and ground truth structures
     after optimal superposition (Kabsch alignment).
     """
 
@@ -361,4 +361,3 @@ class PredNaNFracMetric(MetricBase):
             t = tensors[0]
             self._nan_frac_sum = float(t[0].item())
             self._count = float(t[1].item())
-

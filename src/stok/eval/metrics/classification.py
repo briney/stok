@@ -189,7 +189,7 @@ class PerplexityMetric(MetricBase):
             ppl = math.exp(avg_loss) if avg_loss < 100 else float("inf")
         else:
             ppl = float("inf")
-        return {self.name: ppl, "cls_loss": self._loss_sum / max(1.0, self._batch_count)}
+        return {self.name: ppl}
 
     def reset(self) -> None:
         """Reset accumulated state."""
