@@ -136,22 +136,28 @@ def _get_dataset_has_coords(
         return default_has_coords
 
     eval_cfg = data_eval[eval_name]
-    if not isinstance(eval_cfg, (dict, DictConfig)):
+
+    # Handle string-valued configs (just a path) vs dict configs
+    if isinstance(eval_cfg, str):
+        # String config is just a path - use it directly for auto-detection
+        eval_path = eval_cfg
+    elif isinstance(eval_cfg, (dict, DictConfig)):
+        # Structure folder format always has coordinates
+        if eval_cfg.get("format") == "structure":
+            return True
+
+        # Check both 'load_coords' (standard) and 'has_coords' (explicit) keys
+        if "load_coords" in eval_cfg:
+            return bool(eval_cfg.get("load_coords"))
+        if "has_coords" in eval_cfg:
+            return bool(eval_cfg.get("has_coords"))
+
+        eval_path = eval_cfg.get("path")
+    else:
         return default_has_coords
-
-    # Structure folder format always has coordinates
-    if eval_cfg.get("format") == "structure":
-        return True
-
-    # Check both 'load_coords' (standard) and 'has_coords' (explicit) keys
-    if "load_coords" in eval_cfg:
-        return bool(eval_cfg.get("load_coords"))
-    if "has_coords" in eval_cfg:
-        return bool(eval_cfg.get("has_coords"))
 
     # Auto-detect structure folder by checking path for structure files
     # (covers the case where format is not explicitly set but PDB files are detected)
-    eval_path = eval_cfg.get("path")
     if eval_path:
         from pathlib import Path
 
