@@ -388,6 +388,83 @@ class TestEvaluatorAttentionPropagation:
             "Evaluator should detect that cameo dataset needs attention weights"
         )
 
+    def test_evaluator_p_at_l_num_layers_config(self, tmp_path):
+        """Test that num_layers config is correctly passed to P@L metric."""
+        from stok.eval.evaluator import Evaluator
+        from stok.models.stok import STokModel
+
+        cfg = OmegaConf.create(
+            {
+                "train": {
+                    "objective": "mlm",
+                    "eval": {
+                        "metrics": {
+                            "p_at_l": {
+                                "enabled": True,
+                                "num_layers": 3,  # Use 3 final layers
+                            }
+                        }
+                    },
+                    "decoding": {"eval_enabled": False},
+                },
+                "data": {
+                    "load_coords": False,
+                    "max_len": 128,
+                    "eval": {
+                        "cameo": {
+                            "path": str(tmp_path),
+                            "format": "structure",
+                        }
+                    },
+                },
+                "model": {
+                    "encoder": {
+                        "vocab_size": 32,
+                        "pad_id": 1,
+                        "d_model": 64,
+                        "n_heads": 4,
+                        "n_layers": 6,  # 6 layers to test num_layers=3
+                        "ffn_mult": 1.0,
+                        "dropout": 0.0,
+                        "attn_dropout": 0.0,
+                    },
+                    "classifier": {"ignore_index": -100},
+                    "codebook": {"preset": "lite"},
+                },
+            }
+        )
+
+        model = STokModel(
+            vocab_size=32,
+            pad_id=1,
+            d_model=64,
+            n_heads=4,
+            n_layers=6,
+            ffn_mult=1.0,
+            dropout=0.0,
+            attn_dropout=0.0,
+            head_type="mlm",
+        )
+
+        evaluator = Evaluator(
+            cfg=cfg,
+            model=model,
+            accelerator=None,
+            decoder=None,
+        )
+
+        # Check that metrics were built with correct num_layers
+        metrics = evaluator._get_metrics("cameo")
+        p_at_l = next(
+            (m for m in metrics if m.name == "p_at_l"),
+            None,
+        )
+
+        assert p_at_l is not None, "P@L metric should be built"
+        assert p_at_l.num_layers == 3, (
+            f"P@L num_layers should be 3, got {p_at_l.num_layers}"
+        )
+
 
 class TestEndToEndMLMWithCameoEval:
     """End-to-end integration tests using real CAMEO data."""

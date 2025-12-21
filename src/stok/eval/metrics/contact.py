@@ -41,13 +41,20 @@ def _extract_attention_contacts(
     outputs: dict,
     layer: int | str = "last",
     head_aggregation: str = "mean",
+    num_layers: int = 1,
 ) -> torch.Tensor | None:
     """Extract contact predictions from attention weights.
 
     Args:
         outputs: Model outputs containing attention weights.
         layer: Which layer to use ("last", "mean", or int index).
+            When set to "last" and num_layers > 1, the final num_layers
+            layers will be averaged. "mean" averages all layers.
+            An int index selects a specific layer (ignores num_layers).
         head_aggregation: How to aggregate heads ("mean" or "max").
+        num_layers: Number of final layers to average when layer="last".
+            Defaults to 1 (only use the last layer). Values > 1 will
+            average attention from the final num_layers layers.
 
     Returns:
         Contact probability matrix [B, L, L] or None if not available.
@@ -59,12 +66,20 @@ def _extract_attention_contacts(
 
     # attentions should be a tuple/list of [B, H, L, L] tensors, one per layer
     if isinstance(attentions, (list, tuple)):
-        if layer == "last":
-            attn = attentions[-1]
-        elif layer == "mean":
+        if layer == "mean":
+            # Average all layers
             attn = torch.stack(attentions, dim=0).mean(dim=0)
         elif isinstance(layer, int):
+            # Use specific layer by index
             attn = attentions[layer]
+        elif layer == "last":
+            # Use final num_layers layers
+            n = min(num_layers, len(attentions))
+            if n <= 1:
+                attn = attentions[-1]
+            else:
+                # Stack and average the final n layers
+                attn = torch.stack(attentions[-n:], dim=0).mean(dim=0)
         else:
             attn = attentions[-1]
     else:
@@ -108,6 +123,7 @@ class PrecisionAtLMetric(MetricBase):
         use_attention: bool = True,
         attention_layer: int | str = "last",
         head_aggregation: str = "mean",
+        num_layers: int = 1,
         **kwargs,
     ):
         """Initialize Precision@L metric.
@@ -118,6 +134,8 @@ class PrecisionAtLMetric(MetricBase):
             use_attention: Whether to use attention weights for contact prediction.
             attention_layer: Which attention layer to use.
             head_aggregation: How to aggregate attention heads.
+            num_layers: Number of final encoder layers to average attention from.
+                Only used when attention_layer="last". Defaults to 1 (last layer only).
             **kwargs: Additional arguments (ignored).
         """
         super().__init__(**kwargs)
@@ -126,6 +144,7 @@ class PrecisionAtLMetric(MetricBase):
         self.use_attention = use_attention
         self.attention_layer = attention_layer
         self.head_aggregation = head_aggregation
+        self.num_layers = num_layers
         self._correct_sum: float = 0.0
         self._total_sum: float = 0.0
 
@@ -151,6 +170,7 @@ class PrecisionAtLMetric(MetricBase):
                     outputs,
                     layer=self.attention_layer,
                     head_aggregation=self.head_aggregation,
+                    num_layers=self.num_layers,
                 )
             else:
                 pred_contacts = None

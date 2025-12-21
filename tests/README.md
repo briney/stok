@@ -147,6 +147,7 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
     - **Evaluator attention propagation** (`TestEvaluatorAttentionPropagation`):
       - Evaluator detects when p_at_l metric needs attention weights
       - `_needs_attentions()` returns True for datasets with p_at_l enabled
+      - `num_layers` config is correctly passed to P@L metric via evaluator
     - **End-to-end MLM with CAMEO eval** (`TestEndToEndMLMWithCameoEval`):
       - Full CLI training with CAMEO structure folder, verifies P@L appears in output
       - Structure folder auto-detection (no explicit `format=structure`)
@@ -298,6 +299,27 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
     - **Auto-detection**: Folders containing PDB/mmCIF files are detected as structure folders
     - Auto-detection does not trigger for parquet folders
   - Pass criteria: Correct metrics are registered and built based on objective, config, and per-dataset overrides.
+
+- Contact metrics (`unit/test_contact_metrics.py`)
+  - Purpose: Validate P@L (Precision@L) contact prediction metric and `num_layers` multi-layer attention averaging.
+  - Scope: Tests include:
+    - **`_extract_attention_contacts` function** (`TestExtractAttentionContacts`):
+      - Single layer default behavior (`num_layers=1` uses only last layer)
+      - Multi-layer averaging (final N layers stacked and averaged)
+      - Clamping when `num_layers` exceeds available layers
+      - Backward compatibility (`num_layers=1` equals `layer="last"`)
+      - `layer=int` ignores `num_layers` parameter
+      - `layer="mean"` ignores `num_layers` and uses all layers
+      - Returns `None` when attentions not in outputs
+      - Head aggregation (`max` vs `mean`) with multi-layer averaging
+    - **`PrecisionAtLMetric` with `num_layers`** (`TestPrecisionAtLMetricNumLayers`):
+      - Metric accepts `num_layers` parameter in constructor
+      - Default `num_layers` is 1
+      - `update()` method passes `num_layers` to extraction function
+    - **Config-based instantiation** (`TestPrecisionAtLMetricConfig`):
+      - `num_layers` correctly passed from config via `build_metrics`
+      - Default value used when `num_layers` not specified in config
+  - Pass criteria: All assertions pass; multi-layer averaging produces mathematically correct results; config flows correctly to metric.
 
 - Classification metrics (`unit/test_eval_classification_metrics.py`)
   - Purpose: Verify `AccuracyMetric`, `MaskedAccuracyMetric`, and `PerplexityMetric` implementations.
