@@ -41,7 +41,7 @@ def _extract_attention_contacts(
     outputs: dict,
     layer: int | str = "last",
     head_aggregation: str = "mean",
-    num_layers: int = 1,
+    num_layers: int | None = 1,
 ) -> torch.Tensor | None:
     """Extract contact predictions from attention weights.
 
@@ -55,10 +55,14 @@ def _extract_attention_contacts(
         num_layers: Number of final layers to average when layer="last".
             Defaults to 1 (only use the last layer). Values > 1 will
             average attention from the final num_layers layers.
+            If None, defaults to 1.
 
     Returns:
         Contact probability matrix [B, L, L] or None if not available.
     """
+    # Default to 1 if not specified
+    if num_layers is None:
+        num_layers = 1
     # Check if attention weights are available
     attentions = outputs.get("attentions")
     if attentions is None:
@@ -123,7 +127,7 @@ class PrecisionAtLMetric(MetricBase):
         use_attention: bool = True,
         attention_layer: int | str = "last",
         head_aggregation: str = "mean",
-        num_layers: int = 1,
+        num_layers: int | None = None,
         **kwargs,
     ):
         """Initialize Precision@L metric.
@@ -135,7 +139,9 @@ class PrecisionAtLMetric(MetricBase):
             attention_layer: Which attention layer to use.
             head_aggregation: How to aggregate attention heads.
             num_layers: Number of final encoder layers to average attention from.
-                Only used when attention_layer="last". Defaults to 1 (last layer only).
+                Only used when attention_layer="last". When None (default), the
+                metric registry resolves this to 10% of the total encoder layers
+                (rounded up). Can also be set to an explicit integer value.
             **kwargs: Additional arguments (ignored).
         """
         super().__init__(**kwargs)
@@ -144,7 +150,8 @@ class PrecisionAtLMetric(MetricBase):
         self.use_attention = use_attention
         self.attention_layer = attention_layer
         self.head_aggregation = head_aggregation
-        self.num_layers = num_layers
+        # Fallback to 1 if num_layers wasn't resolved by the registry
+        self.num_layers = num_layers if num_layers is not None else 1
         self._correct_sum: float = 0.0
         self._total_sum: float = 0.0
 

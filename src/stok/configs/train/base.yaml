@@ -126,6 +126,6 @@ eval:
       contact_threshold: 8.0
       min_seq_sep: 6
       use_attention: true
-      num_layers: 1  # number of final encoder layers to average attention from (1 = last layer only)
+      num_layers: null  # null = 10% of encoder layers (rounded up); or set explicit int
       # objectives: [mlm]
       # requires_coords: true

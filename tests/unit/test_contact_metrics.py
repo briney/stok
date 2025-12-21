@@ -319,7 +319,7 @@ class TestPrecisionAtLMetricConfig:
         assert p_at_l.num_layers == 4
 
     def test_num_layers_default_from_config(self):
-        """Test that num_layers defaults to 1 when not specified in config."""
+        """Test that num_layers defaults to 10% of encoder layers when not specified."""
         from stok.eval.registry import build_metrics
         
         cfg = OmegaConf.create({
@@ -328,13 +328,16 @@ class TestPrecisionAtLMetricConfig:
                     "metrics": {
                         "p_at_l": {
                             "enabled": True,
-                            # num_layers not specified
+                            # num_layers not specified -> defaults to 10% of n_layers
                         },
                     }
                 }
             },
             "data": {"load_coords": True},
-            "model": {"classifier": {"ignore_index": -100}},
+            "model": {
+                "encoder": {"n_layers": 24},  # 10% of 24 = 2.4 -> ceil -> 3
+                "classifier": {"ignore_index": -100},
+            },
         })
         
         metrics = build_metrics(cfg, objective="mlm", has_coords=True)
@@ -344,5 +347,117 @@ class TestPrecisionAtLMetricConfig:
         )
         
         assert p_at_l is not None
-        assert p_at_l.num_layers == 1
+        assert p_at_l.num_layers == 3  # ceil(24 * 0.1) = 3
+
+    def test_num_layers_default_8_layers(self):
+        """Test that 8-layer model gets num_layers=1."""
+        from stok.eval.registry import build_metrics
+        
+        cfg = OmegaConf.create({
+            "train": {
+                "eval": {
+                    "metrics": {
+                        "p_at_l": {"enabled": True},
+                    }
+                }
+            },
+            "data": {"load_coords": True},
+            "model": {
+                "encoder": {"n_layers": 8},  # 10% of 8 = 0.8 -> ceil -> 1
+                "classifier": {"ignore_index": -100},
+            },
+        })
+        
+        metrics = build_metrics(cfg, objective="mlm", has_coords=True)
+        p_at_l = next(
+            (m for m in metrics if type(m).__name__ == "PrecisionAtLMetric"),
+            None,
+        )
+        
+        assert p_at_l is not None
+        assert p_at_l.num_layers == 1  # ceil(8 * 0.1) = 1
+
+    def test_num_layers_default_36_layers(self):
+        """Test that 36-layer model gets num_layers=4."""
+        from stok.eval.registry import build_metrics
+        
+        cfg = OmegaConf.create({
+            "train": {
+                "eval": {
+                    "metrics": {
+                        "p_at_l": {"enabled": True},
+                    }
+                }
+            },
+            "data": {"load_coords": True},
+            "model": {
+                "encoder": {"n_layers": 36},  # 10% of 36 = 3.6 -> ceil -> 4
+                "classifier": {"ignore_index": -100},
+            },
+        })
+        
+        metrics = build_metrics(cfg, objective="mlm", has_coords=True)
+        p_at_l = next(
+            (m for m in metrics if type(m).__name__ == "PrecisionAtLMetric"),
+            None,
+        )
+        
+        assert p_at_l is not None
+        assert p_at_l.num_layers == 4  # ceil(36 * 0.1) = 4
+
+    def test_num_layers_default_missing_encoder_config(self):
+        """Test fallback to 12 layers when encoder config is missing."""
+        from stok.eval.registry import build_metrics
+        
+        cfg = OmegaConf.create({
+            "train": {
+                "eval": {
+                    "metrics": {
+                        "p_at_l": {"enabled": True},
+                    }
+                }
+            },
+            "data": {"load_coords": True},
+            "model": {"classifier": {"ignore_index": -100}},  # No encoder config
+        })
+        
+        metrics = build_metrics(cfg, objective="mlm", has_coords=True)
+        p_at_l = next(
+            (m for m in metrics if type(m).__name__ == "PrecisionAtLMetric"),
+            None,
+        )
+        
+        assert p_at_l is not None
+        assert p_at_l.num_layers == 2  # ceil(12 * 0.1) = 2 (fallback)
+
+    def test_num_layers_explicit_overrides_default(self):
+        """Test that explicit num_layers config overrides the dynamic default."""
+        from stok.eval.registry import build_metrics
+        
+        cfg = OmegaConf.create({
+            "train": {
+                "eval": {
+                    "metrics": {
+                        "p_at_l": {
+                            "enabled": True,
+                            "num_layers": 5,  # Explicit override
+                        },
+                    }
+                }
+            },
+            "data": {"load_coords": True},
+            "model": {
+                "encoder": {"n_layers": 36},  # Would be 4 if not overridden
+                "classifier": {"ignore_index": -100},
+            },
+        })
+        
+        metrics = build_metrics(cfg, objective="mlm", has_coords=True)
+        p_at_l = next(
+            (m for m in metrics if type(m).__name__ == "PrecisionAtLMetric"),
+            None,
+        )
+        
+        assert p_at_l is not None
+        assert p_at_l.num_layers == 5  # Explicit value, not calculated
 

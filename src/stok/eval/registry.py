@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING, Any
 
 import torch.nn as nn
@@ -233,6 +234,13 @@ def build_metrics(
             for k, v in metric_cfg.items()
             if k not in ("enabled", "objectives", "requires_decoder", "requires_coords")
         }
+
+        # Resolve dynamic num_layers for p_at_l metric (null -> 10% of encoder layers)
+        if name == "p_at_l" and init_kwargs.get("num_layers") is None:
+            model_cfg = cfg.get("model", {})
+            encoder_cfg = model_cfg.get("encoder", {}) if model_cfg else {}
+            n_encoder_layers = encoder_cfg.get("n_layers", 12) if encoder_cfg else 12
+            init_kwargs["num_layers"] = math.ceil(n_encoder_layers * 0.1)
 
         # Instantiate the metric
         try:
