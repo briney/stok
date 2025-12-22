@@ -174,6 +174,12 @@ class Evaluator:
     def _gather_metric_states(self, metrics: list[Metric]) -> None:
         """Aggregate metric states across distributed processes.
 
+        Supports two gathering modes:
+        1. Tensor-based gathering (default): For metrics with fixed-size state.
+           Uses accelerator.gather_for_metrics() which requires identical shapes.
+        2. Object-based gathering: For metrics with variable-length state.
+           Uses accelerator.gather_object() which handles arbitrary Python objects.
+
         Args:
             metrics: List of metrics to aggregate.
         """
@@ -183,6 +189,18 @@ class Evaluator:
         device = self.accelerator.device
 
         for metric in metrics:
+            # Check if metric uses object-based gathering (for variable-length data)
+            if hasattr(metric, "state_objects"):
+                objects = metric.state_objects()
+                if objects is not None:
+                    # Use gather_object for variable-length data like lists of dicts
+                    gathered = self.accelerator.gather_object(objects)
+                    # gathered is a list containing state_objects() from each process
+                    if hasattr(metric, "load_state_objects"):
+                        metric.load_state_objects(gathered)
+                    continue
+
+            # Fall back to tensor-based gathering for fixed-size state
             state_tensors = metric.state_tensors()
             if not state_tensors:
                 continue

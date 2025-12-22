@@ -764,17 +764,22 @@ class TestPrecisionAtLLogisticRegression:
         # With correlated features, should get reasonable precision
         assert result["p_at_l"] >= 0.0
 
-    def test_logreg_state_tensors_empty(self):
-        """Test state_tensors with no accumulated structures."""
+    def test_logreg_state_tensors_returns_empty(self):
+        """Test that state_tensors returns empty list for logreg mode (uses objects)."""
         metric = PrecisionAtLMetric(use_logistic_regression=True)
+        
+        # Add some structures
+        metric._logreg_structures = [
+            {"features": torch.randn(10, 8), "labels": torch.zeros(10), "seq_len": 32}
+        ]
         
         tensors = metric.state_tensors()
         
-        assert len(tensors) == 5
-        assert tensors[0][0].item() == 0  # n_structures
+        # Logreg mode uses object gathering, not tensor gathering
+        assert len(tensors) == 0
 
-    def test_logreg_state_tensors_with_data(self):
-        """Test state_tensors with accumulated structures."""
+    def test_logreg_state_objects_returns_structures(self):
+        """Test that state_objects returns the accumulated structures."""
         metric = PrecisionAtLMetric(use_logistic_regression=True)
         
         # Add structures
@@ -787,41 +792,66 @@ class TestPrecisionAtLLogisticRegression:
                 "seq_len": 32 + i,
             })
         
-        tensors = metric.state_tensors()
+        objects = metric.state_objects()
         
-        assert len(tensors) == 5
-        assert tensors[0][0].item() == 3  # n_structures
-        # Total pairs = 10 + 11 + 12 = 33
-        assert tensors[1].shape[0] == 33  # features
-        assert tensors[2].shape[0] == 33  # labels
+        assert objects is not None
+        assert len(objects) == 3
+        assert objects[0]["seq_len"] == 32
+        assert objects[1]["seq_len"] == 33
+        assert objects[2]["seq_len"] == 34
 
-    def test_logreg_load_state_tensors(self):
-        """Test load_state_tensors restores structures."""
+    def test_logreg_state_objects_none_for_standard_mode(self):
+        """Test that state_objects returns None for standard mode."""
+        metric = PrecisionAtLMetric(use_logistic_regression=False)
+        
+        objects = metric.state_objects()
+        
+        assert objects is None
+
+    def test_logreg_load_state_objects_flattens_gathered(self):
+        """Test load_state_objects correctly flattens gathered data."""
         metric = PrecisionAtLMetric(use_logistic_regression=True)
         
-        # Create state tensors manually
-        n_structures = 2
-        n_pairs_per_struct = [10, 15]
-        n_features = 8
-        
-        features1 = torch.randn(n_pairs_per_struct[0], n_features)
-        features2 = torch.randn(n_pairs_per_struct[1], n_features)
-        labels1 = torch.randint(0, 2, (n_pairs_per_struct[0],)).float()
-        labels2 = torch.randint(0, 2, (n_pairs_per_struct[1],)).float()
-        
-        tensors = [
-            torch.tensor([n_structures]),
-            torch.cat([features1, features2], dim=0),
-            torch.cat([labels1, labels2], dim=0),
-            torch.tensor([32, 48]),  # seq_lens
-            torch.tensor(n_pairs_per_struct),
+        # Simulate gathered data from 2 processes
+        process_0_data = [
+            {"features": torch.randn(10, 8), "labels": torch.zeros(10), "seq_len": 32},
+            {"features": torch.randn(15, 8), "labels": torch.ones(15), "seq_len": 48},
+        ]
+        process_1_data = [
+            {"features": torch.randn(12, 8), "labels": torch.zeros(12), "seq_len": 40},
         ]
         
-        metric.load_state_tensors(tensors)
+        gathered = [process_0_data, process_1_data]
         
-        assert len(metric._logreg_structures) == 2
+        metric.load_state_objects(gathered)
+        
+        # Should have flattened to 3 structures total
+        assert len(metric._logreg_structures) == 3
         assert metric._logreg_structures[0]["seq_len"] == 32
         assert metric._logreg_structures[1]["seq_len"] == 48
+        assert metric._logreg_structures[2]["seq_len"] == 40
+
+    def test_logreg_load_state_objects_handles_empty(self):
+        """Test load_state_objects handles empty process data."""
+        metric = PrecisionAtLMetric(use_logistic_regression=True)
+        
+        # Simulate gathered data where one process has no structures
+        process_0_data = [
+            {"features": torch.randn(10, 8), "labels": torch.zeros(10), "seq_len": 32},
+        ]
+        process_1_data = []  # Empty
+        process_2_data = [
+            {"features": torch.randn(12, 8), "labels": torch.zeros(12), "seq_len": 40},
+        ]
+        
+        gathered = [process_0_data, process_1_data, process_2_data]
+        
+        metric.load_state_objects(gathered)
+        
+        # Should have 2 structures (skipping empty process)
+        assert len(metric._logreg_structures) == 2
+        assert metric._logreg_structures[0]["seq_len"] == 32
+        assert metric._logreg_structures[1]["seq_len"] == 40
 
 
 class TestPrecisionAtLLogisticRegressionConfig:

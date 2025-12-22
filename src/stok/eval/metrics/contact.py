@@ -612,96 +612,51 @@ class PrecisionAtLMetric(MetricBase):
         """Return state as tensors for distributed aggregation.
 
         For standard mode, returns simple accumulators.
-        For logistic regression mode, returns packed structure data.
+        For logistic regression mode, returns empty list (uses object gathering).
         """
-        if not self.use_logistic_regression:
-            return [torch.tensor([self._correct_sum, self._total_sum])]
-
-        # For logistic regression mode, we need to gather structure data
-        # Pack all structure features and labels into tensors
-        if len(self._logreg_structures) == 0:
-            # Return empty marker tensors
-            return [
-                torch.tensor([0]),  # n_structures
-                torch.tensor([]),  # features (empty)
-                torch.tensor([]),  # labels (empty)
-                torch.tensor([]),  # seq_lens (empty)
-                torch.tensor([]),  # n_pairs per structure (empty)
-            ]
-
-        n_structures = len(self._logreg_structures)
-        all_features = []
-        all_labels = []
-        seq_lens = []
-        n_pairs_list = []
-
-        for struct in self._logreg_structures:
-            all_features.append(struct["features"])
-            all_labels.append(struct["labels"])
-            seq_lens.append(struct["seq_len"])
-            n_pairs_list.append(struct["features"].shape[0])
-
-        # Concatenate all features and labels
-        features_cat = torch.cat(all_features, dim=0)  # [total_pairs, n_features]
-        labels_cat = torch.cat(all_labels, dim=0)  # [total_pairs]
-
-        return [
-            torch.tensor([n_structures]),
-            features_cat,
-            labels_cat,
-            torch.tensor(seq_lens),
-            torch.tensor(n_pairs_list),
-        ]
+        if self.use_logistic_regression:
+            # Use object-based gathering for logreg mode
+            return []
+        return [torch.tensor([self._correct_sum, self._total_sum])]
 
     def load_state_tensors(self, tensors: list[torch.Tensor]) -> None:
         """Load state from gathered tensors.
 
         For standard mode, loads simple accumulators.
-        For logistic regression mode, unpacks gathered structure data.
+        For logistic regression mode, this is not used (object gathering instead).
         """
-        if not tensors:
-            return
-
-        if not self.use_logistic_regression:
+        if self.use_logistic_regression:
+            return  # Uses object gathering
+        if tensors:
             t = tensors[0]
             self._correct_sum = float(t[0].item())
             self._total_sum = float(t[1].item())
+
+    def state_objects(self) -> list[dict] | None:
+        """Return accumulated structures for object-based distributed gathering.
+
+        For logistic regression mode, returns the list of structure data dicts
+        to be gathered across processes using accelerator.gather_object().
+        For standard mode, returns None to use tensor-based gathering.
+
+        Returns:
+            List of structure dicts for logreg mode, None otherwise.
+        """
+        if not self.use_logistic_regression:
+            return None
+        return self._logreg_structures
+
+    def load_state_objects(self, gathered: list[list[dict]]) -> None:
+        """Load structures gathered from all processes.
+
+        Args:
+            gathered: List of lists, where each inner list contains
+                structure dicts from one process.
+        """
+        if not self.use_logistic_regression:
             return
-
-        # For logistic regression mode, unpack structure data
-        if len(tensors) < 5:
-            return
-
-        n_structures_tensor = tensors[0]
-        features_cat = tensors[1]
-        labels_cat = tensors[2]
-        seq_lens = tensors[3]
-        n_pairs_list = tensors[4]
-
-        # Handle empty case
-        if n_structures_tensor.numel() == 0 or n_structures_tensor[0].item() == 0:
-            self._logreg_structures = []
-            return
-
-        # Unpack structures
+        # Flatten gathered data from all processes into single list
         self._logreg_structures = []
-        offset = 0
-        n_structures = int(n_structures_tensor[0].item())
-
-        for i in range(min(n_structures, len(seq_lens))):
-            n_pairs = int(n_pairs_list[i].item())
-            if n_pairs == 0:
-                continue
-
-            features = features_cat[offset : offset + n_pairs]
-            labels = labels_cat[offset : offset + n_pairs]
-            seq_len = int(seq_lens[i].item())
-
-            self._logreg_structures.append(
-                {
-                    "features": features,
-                    "labels": labels,
-                    "seq_len": seq_len,
-                }
-            )
-            offset += n_pairs
+        for process_structures in gathered:
+            if process_structures:
+                self._logreg_structures.extend(process_structures)

@@ -1,7 +1,7 @@
 """Base protocol and abstract class for evaluation metrics."""
 
 from abc import ABC, abstractmethod
-from typing import ClassVar, Protocol, runtime_checkable
+from typing import Any, ClassVar, Protocol, runtime_checkable
 
 import torch
 from omegaconf import DictConfig
@@ -145,5 +145,36 @@ class MetricBase(ABC):
 
         Args:
             tensors: List of tensors as returned by state_tensors().
+        """
+        pass
+
+    def state_objects(self) -> list[Any] | None:
+        """Return state as Python objects for distributed gathering.
+
+        Used for metrics with variable-length state that cannot use
+        tensor-based gathering (e.g., lists of different sizes per process).
+        When this returns a non-None value, the evaluator will use
+        accelerator.gather_object() instead of tensor gathering.
+
+        Default implementation returns None, meaning tensor-based gathering
+        should be used. Override this for metrics with variable-length state.
+
+        Returns:
+            List of Python objects to gather, or None to use tensor gathering.
+        """
+        return None
+
+    def load_state_objects(self, gathered: list[Any]) -> None:
+        """Load state from gathered Python objects.
+
+        Called after gather_object collects data from all processes.
+        The gathered argument is a list containing state_objects() results
+        from each process.
+
+        Default implementation does nothing. Override this if the metric
+        uses object-based gathering.
+
+        Args:
+            gathered: List of objects gathered from all processes.
         """
         pass
