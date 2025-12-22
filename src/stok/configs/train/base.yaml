@@ -121,11 +121,19 @@ eval:
       enabled: false
 
     # Contact prediction (MLM only, requires coordinates)
+    # Supports two modes:
+    #   1. Standard mode: Uses mean attention weights (with APC) to predict contacts
+    #   2. Logistic regression mode: Trains LogReg on attention from all layers/heads (see Rao et al. 2020, doi: 10.1101/2020.12.15.422761)
     p_at_l:
       enabled: true
       contact_threshold: 8.0
       min_seq_sep: 6
       use_attention: true
       num_layers: null  # null = 10% of encoder layers (rounded up); or set explicit int
+      # logistic regression mode
+      use_logistic_regression: false
+      logreg_n_train: 20       # number of structures for training per iteration
+      logreg_lambda: 0.15      # L1 regularization strength (sklearn C = 1/lambda)
+      logreg_n_iterations: 5   # number of random train/test sampling iterations
       # objectives: [mlm]
       # requires_coords: true

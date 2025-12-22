@@ -25,6 +25,7 @@ dependencies = [
   "pandas",
   "pyarrow>=12",
   "biopython",
+  "scikit-learn",
   "transformers",
   "x-transformers",
   "typing-extensions; python_version < '3.11'",
