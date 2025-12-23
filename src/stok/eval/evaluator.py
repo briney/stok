@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
+from accelerate.utils import gather_object
 from omegaconf import DictConfig
 from torch.utils.data import DataLoader
 
@@ -194,7 +195,8 @@ class Evaluator:
                 objects = metric.state_objects()
                 if objects is not None:
                     # Use gather_object for variable-length data like lists of dicts
-                    gathered = self.accelerator.gather_object(objects)
+                    # gather_object is a standalone function from accelerate.utils
+                    gathered = gather_object(objects)
                     # gathered is a list containing state_objects() from each process
                     if hasattr(metric, "load_state_objects"):
                         metric.load_state_objects(gathered)
