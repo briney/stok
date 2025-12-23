@@ -352,11 +352,11 @@ class PrecisionAtLMetric(MetricBase):
             # Extract contact labels for valid pairs
             contact_labels = true_contacts[b, i_idx, j_idx].float()  # [n_pairs]
 
-            # Store on CPU to save GPU memory
+            # Store on CPU in float32 (required for numpy/sklearn compatibility)
             self._logreg_structures.append(
                 {
-                    "features": features.cpu(),
-                    "labels": contact_labels.cpu(),
+                    "features": features.float().cpu(),
+                    "labels": contact_labels.float().cpu(),
                     "seq_len": int(seq_len),
                 }
             )
@@ -504,8 +504,8 @@ class PrecisionAtLMetric(MetricBase):
                 train_features_list.append(struct["features"])
                 train_labels_list.append(struct["labels"])
 
-            train_features = torch.cat(train_features_list, dim=0).numpy()
-            train_labels = torch.cat(train_labels_list, dim=0).numpy()
+            train_features = torch.cat(train_features_list, dim=0).float().numpy()
+            train_labels = torch.cat(train_labels_list, dim=0).float().numpy()
 
             # Check for class imbalance - need both positive and negative examples
             if train_labels.sum() == 0 or train_labels.sum() == len(train_labels):
@@ -531,8 +531,8 @@ class PrecisionAtLMetric(MetricBase):
             # Evaluate on test structures
             for test_idx in test_indices:
                 struct = self._logreg_structures[test_idx]
-                test_features = struct["features"].numpy()
-                test_labels = struct["labels"].numpy()
+                test_features = struct["features"].float().numpy()
+                test_labels = struct["labels"].float().numpy()
                 seq_len = struct["seq_len"]
 
                 if len(test_features) == 0:
