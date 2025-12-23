@@ -646,17 +646,24 @@ class PrecisionAtLMetric(MetricBase):
             return None
         return self._logreg_structures
 
-    def load_state_objects(self, gathered: list[list[dict]]) -> None:
+    def load_state_objects(self, gathered: list) -> None:
         """Load structures gathered from all processes.
 
         Args:
-            gathered: List of lists, where each inner list contains
-                structure dicts from one process.
+            gathered: Flat list of structure dicts from all processes
+                (as returned by accelerate's gather_object).
         """
         if not self.use_logistic_regression:
             return
-        # Flatten gathered data from all processes into single list
+        # gather_object returns a flat list combining items from all processes
+        # Each item should be a dict with 'features', 'labels', 'seq_len'
         self._logreg_structures = []
-        for process_structures in gathered:
-            if process_structures:
-                self._logreg_structures.extend(process_structures)
+        for item in gathered:
+            if isinstance(item, dict):
+                # Item is a structure dict
+                self._logreg_structures.append(item)
+            elif isinstance(item, list):
+                # Handle legacy case where gathered might be list of lists
+                for struct in item:
+                    if isinstance(struct, dict):
+                        self._logreg_structures.append(struct)
