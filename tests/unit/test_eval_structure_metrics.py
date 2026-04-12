@@ -96,7 +96,7 @@ class TestTMScoreMetric:
     def test_tm_metric_initialization(self):
         """Test metric initializes with correct defaults."""
         metric = TMScoreMetric()
-        assert metric.name == "tm"
+        assert metric.name == "tm_score"
         assert metric.objectives == {"codebook"}
         assert metric.requires_decoder is True
         assert metric.requires_coords is True
@@ -114,7 +114,7 @@ class TestTMScoreMetric:
         metric.update(outputs, tokens, torch.zeros_like(tokens), coords, cfg)
         result = metric.compute()
 
-        assert abs(result["tm"] - 1.0) < 0.01
+        assert abs(result["tm_score"] - 1.0) < 0.01
 
 
 class TestRMSDMetric:
@@ -156,7 +156,7 @@ class TestFAPEMetric:
     def test_fape_metric_initialization(self):
         """Test metric initializes with correct defaults."""
         metric = FAPEMetric()
-        assert metric.name == "fape_loss"
+        assert metric.name == "fape"
         assert metric.objectives == {"codebook"}
         assert metric.requires_decoder is True
         assert metric.requires_coords is True
@@ -174,7 +174,7 @@ class TestFAPEMetric:
         metric.update(outputs, tokens, torch.zeros_like(tokens), coords, cfg)
         result = metric.compute()
 
-        assert result["fape_loss"] < 0.01
+        assert result["fape"] < 0.01
 
     def test_fape_metric_config_options(self):
         """Test FAPE metric accepts config options."""

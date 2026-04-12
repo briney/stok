@@ -25,6 +25,12 @@ def token_ce_loss(
     if invalid.any():
         labels_flat = labels_flat.clone()
         labels_flat[invalid] = ignore_index
+
+    # When no valid labels exist, return zero to avoid NaN loss
+    valid_count = (labels_flat != ignore_index).sum()
+    if valid_count == 0:
+        return torch.tensor(0.0, device=logits.device, dtype=logits.dtype, requires_grad=True)
+
     return F.cross_entropy(
         logits_flat,
         labels_flat,
@@ -68,12 +74,12 @@ def fape_loss(
     T_pred = frames_from_ncac(pred_coords)
     T_true = frames_from_ncac(true_coords)
 
-    # 2) Build masks (valid residues/atoms). Default: infer from GT finiteness
-    if residue_mask is None:
-        residue_valid_true = torch.isfinite(true_coords).all(dim=(-2, -1))  # [B, L]
-        residue_valid = residue_valid_true
+    # 2) Build masks (valid residues/atoms). Always intersect with finiteness.
+    residue_valid_true = torch.isfinite(true_coords).all(dim=(-2, -1))  # [B, L]
+    if residue_mask is not None:
+        residue_valid = residue_mask.to(torch.bool) & residue_valid_true
     else:
-        residue_valid = residue_mask.to(torch.bool)
+        residue_valid = residue_valid_true
 
     # Also require predicted residues to be finite
     residue_valid_pred = torch.isfinite(pred_coords).all(dim=(-2, -1))  # [B, L]
@@ -113,6 +119,12 @@ def fape_loss(
 
     # 5) Reductions: per-example mean over valid pairs/atoms, then batch mean
     per = torch.where(full_mask, per, torch.zeros_like(per))
-    denom = full_mask.sum(dim=(1, 2, 3)).clamp_min(1).to(per.dtype)
+    denom = full_mask.sum(dim=(1, 2, 3)).to(per.dtype)
+
+    # If entire batch is invalid, return 0.0
+    if (denom == 0).all():
+        return torch.tensor(0.0, device=per.device, dtype=per.dtype, requires_grad=True)
+
+    denom = denom.clamp_min(1)
     loss_b = per.sum(dim=(1, 2, 3)) / denom  # [B]
     return loss_b.mean()

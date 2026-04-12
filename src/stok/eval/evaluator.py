@@ -80,6 +80,37 @@ class Evaluator:
         # Cache for whether attention weights are needed per eval dataset
         self._needs_attentions_cache: dict[str, bool] = {}
 
+    def _get_dataset_has_labels(self, eval_name: str | None) -> bool:
+        """Determine if an eval dataset provides labels.
+
+        Checks for per-dataset 'has_labels' config. Structure-format
+        datasets default to no labels unless explicitly set.
+
+        Args:
+            eval_name: Name of the eval dataset.
+
+        Returns:
+            Whether the dataset provides labels.
+        """
+        if eval_name is None:
+            return True
+
+        data_eval = self.cfg.get("data", {}).get("eval", {})
+        if not data_eval or eval_name not in data_eval:
+            return True
+
+        eval_cfg = data_eval[eval_name]
+        if isinstance(eval_cfg, str):
+            return True
+        if isinstance(eval_cfg, (dict, DictConfig)):
+            # Explicit has_labels override
+            if "has_labels" in eval_cfg:
+                return bool(eval_cfg["has_labels"])
+            # Structure-format datasets have no labels by default
+            if eval_cfg.get("format") == "structure":
+                return False
+        return True
+
     def _get_metrics(self, eval_name: str | None = None) -> list[Metric]:
         """Get or build metrics for an eval dataset.
 
@@ -91,12 +122,14 @@ class Evaluator:
         """
         cache_key = eval_name or "__default__"
         if cache_key not in self._metrics_cache:
+            has_labels = self._get_dataset_has_labels(eval_name)
             metrics = build_metrics(
                 cfg=self.cfg,
                 objective=self.objective,
                 decoder=self.decoder,
                 has_coords=self.has_coords,
                 eval_name=eval_name,
+                has_labels=has_labels,
             )
             self._metrics_cache[cache_key] = metrics
 
@@ -305,8 +338,15 @@ class Evaluator:
                 for metric in metrics:
                     try:
                         metric.update(outputs, tokens, labels, coords, self.cfg)
-                    except Exception as e:
-                        warnings.warn(f"Metric '{metric.name}' update failed: {e}")
+                        if hasattr(metric, "_num_updated"):
+                            metric._num_updated += 1
+                    except (RuntimeError, ValueError) as e:
+                        if hasattr(metric, "_num_failed"):
+                            metric._num_failed += 1
+                        warnings.warn(
+                            f"Metric '{metric.name}' update failed "
+                            f"({type(e).__name__}): {e}"
+                        )
 
         # Aggregate across distributed processes
         self._gather_metric_states(metrics)
@@ -315,10 +355,22 @@ class Evaluator:
         results: dict[str, float] = {}
         for metric in metrics:
             try:
+                # If metric was never updated, report NaN
+                if hasattr(metric, "_num_updated") and metric._num_updated == 0:
+                    results[metric.name] = float("nan")
+                    num_failed = getattr(metric, "_num_failed", 0)
+                    warnings.warn(
+                        f"Metric '{metric.name}' had 0 successful updates "
+                        f"({num_failed} failures); reporting NaN"
+                    )
+                    continue
                 computed = metric.compute()
                 results.update(computed)
-            except Exception as e:
-                warnings.warn(f"Metric '{metric.name}' compute failed: {e}")
+            except (RuntimeError, ValueError) as e:
+                warnings.warn(
+                    f"Metric '{metric.name}' compute failed "
+                    f"({type(e).__name__}): {e}"
+                )
 
         self.model.train()
         return results

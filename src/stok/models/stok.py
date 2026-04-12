@@ -149,9 +149,9 @@ class STokModel(nn.Module):
                 padding positions. If None, inferred from pad_id. Defaults to None.
             labels: Target labels of shape [B, L]. Use ignore_index for
                 ignored positions. Defaults to None.
-            coords: Coordinates of shape [B, L, 3, 3] for N, CA, C atoms per residue.
-                If None, the structure-based FAPE loss is not computed. Defaults to None.
-            coords_loss_weight: Weight for the structure-based FAPE loss. Defaults to 0.1.
+            coords: Unused. Accepted for call-site compatibility.
+                FAPE loss is computed externally in the training loop.
+            coords_loss_weight: Unused. Accepted for call-site compatibility.
             ignore_index: Index to ignore in loss computation. Defaults to -100.
             output_attentions: If True, also returns attention weights from all
                 encoder layers. Defaults to False.

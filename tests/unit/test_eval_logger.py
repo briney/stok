@@ -71,7 +71,7 @@ def test_format_eval_message_structure_metrics():
         "loss": 0.3,
         "acc": 0.9,
         "lddt": 0.85,
-        "tm": 0.78,
+        "tm_score": 0.78,
         "rmsd": 2.5,
     }
 

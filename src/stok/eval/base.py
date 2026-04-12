@@ -102,7 +102,8 @@ class MetricBase(ABC):
         Args:
             **kwargs: Metric-specific configuration parameters.
         """
-        pass
+        self._num_updated: int = 0
+        self._num_failed: int = 0
 
     @abstractmethod
     def update(

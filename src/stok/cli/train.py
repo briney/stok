@@ -220,32 +220,6 @@ def _save_checkpoint(
     torch.save(payload, path.as_posix())
 
 
-def _try_load_latest_checkpoint(
-    ckpt_dir: Path,
-    *,
-    model: nn.Module,
-    optimizer: torch.optim.Optimizer,
-    scheduler: torch.optim.lr_scheduler._LRScheduler,
-    accelerator,
-) -> int:
-    """
-    Returns restored global_step if a checkpoint is loaded; otherwise 0.
-    """
-    latest = ckpt_dir / "latest.pt"
-    if not latest.exists():
-        return 0
-    # all processes load to keep state in sync under DDP
-    try:
-        ckpt = torch.load(latest.as_posix(), map_location="cpu")
-        _unwrap_model(model, accelerator).load_state_dict(ckpt["model"])
-        optimizer.load_state_dict(ckpt["optimizer"])
-        scheduler.load_state_dict(ckpt["scheduler"])
-        if "rng_state" in ckpt:
-            _restore_rng_state(ckpt["rng_state"])
-        return int(ckpt.get("global_step", 0))
-    except Exception:
-        # if anything goes wrong, start from scratch
-        return 0
 
 
 def _load_pretrained_encoder(
@@ -629,6 +603,9 @@ def _build_dataloaders(
     if len(train_configs) > 0:
         # Real dataset(s); tokenize in collate
         tokenizer = Tokenizer()
+        # Derive token IDs from tokenizer rather than hard-coding
+        _mask_id = tokenizer.mask_token_id
+        _pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else pad_id
 
         if is_mlm:
 
@@ -640,7 +617,8 @@ def _build_dataloaders(
                     mask_prob=mask_prob,
                     mask_token_prob=mask_token_prob,
                     random_token_prob=random_token_prob,
-                    pad_id=pad_id,
+                    pad_id=_pad_id,
+                    mask_id=_mask_id,
                     ignore_index=ignore_index,
                 )
 
@@ -725,6 +703,8 @@ def _build_dataloaders(
                 seq_len=min(max_len, 256) - 2,  # Account for CLS/EOS tokens
             )
             tokenizer = Tokenizer()
+            _mask_id = tokenizer.mask_token_id
+            _pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else pad_id
 
             def collate(batch):
                 return mlm_collate(
@@ -734,7 +714,8 @@ def _build_dataloaders(
                     mask_prob=mask_prob,
                     mask_token_prob=mask_token_prob,
                     random_token_prob=random_token_prob,
-                    pad_id=pad_id,
+                    pad_id=_pad_id,
+                    mask_id=_mask_id,
                     ignore_index=ignore_index,
                 )
 
@@ -753,6 +734,8 @@ def _build_dataloaders(
     # only meaningful for multi-process loading
     if tokenizer is None and len(eval_configs) > 0:
         tokenizer = Tokenizer()
+        _mask_id = tokenizer.mask_token_id
+        _pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else pad_id
 
         if is_mlm:
 
@@ -764,7 +747,8 @@ def _build_dataloaders(
                     mask_prob=mask_prob,
                     mask_token_prob=mask_token_prob,
                     random_token_prob=random_token_prob,
-                    pad_id=pad_id,
+                    pad_id=_pad_id,
+                    mask_id=_mask_id,
                     ignore_index=ignore_index,
                 )
 
@@ -1086,8 +1070,10 @@ def run_training(cfg: DictConfig):
                 "cfg.train.epochs is set but steps_per_epoch could not be derived "
                 "from the train dataloader."
             )
-        max_steps = int(cfg.train.epochs) * steps_per_epoch
+        # max_steps is in optimizer-step units
+        max_steps = int(cfg.train.epochs) * steps_per_epoch // grad_accum_steps
     else:
+        # num_steps means optimizer steps
         max_steps = int(cfg.train.get("num_steps", 10000))
 
     # build scheduler (WSD with decay selection)
@@ -1140,7 +1126,8 @@ def run_training(cfg: DictConfig):
 
     # train loop
     model.train()
-    global_step = 0
+    micro_step = 0
+    optimizer_step = 0
     running_loss = 0.0
     log_interval = int(cfg.train.get("log_steps", 50))
     eval_interval = int(cfg.train.get("eval", {}).get("steps", 1000))
@@ -1158,7 +1145,7 @@ def run_training(cfg: DictConfig):
         log_file_handle = (io_dirs["logs"] / "train.log").open("a", encoding="utf-8")
     console = ConsoleLogger(
         total_steps=max_steps,
-        initial_step=global_step,
+        initial_step=optimizer_step,
         is_main=is_main,
         enabled=console_enabled,
         file=sys.stdout,
@@ -1211,13 +1198,23 @@ def run_training(cfg: DictConfig):
         # linear
         return t0 + (t1 - t0) * (float(step) / float(T))
 
-    while global_step < max_steps:
+    def _do_optimizer_step():
+        """Clip gradients, step optimizer/scheduler, zero grads."""
+        if grad_clip is not None and grad_clip > 0:
+            if accelerator:
+                accelerator.clip_grad_norm_(model.parameters(), grad_clip)
+            else:
+                nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        optimizer.step()
+        scheduler.step()
+        optimizer.zero_grad(set_to_none=True)
+
+    while optimizer_step < max_steps:
         for batch in train_loader:
-            # step/epoch bookkeeping (global_step is zero-based)
-            current_step = global_step + 1
+            # epoch bookkeeping from micro_step
             current_epoch: Optional[float] = None
             if steps_per_epoch is not None:
-                current_epoch = float(current_step) / float(steps_per_epoch)
+                current_epoch = float(micro_step + 1) / float(steps_per_epoch)
 
             # batch can be (tokens, labels) or (tokens, labels, coords)
             if isinstance(batch, (list, tuple)) and len(batch) == 3:
@@ -1241,12 +1238,12 @@ def run_training(cfg: DictConfig):
                 not is_mlm
                 and decoder is not None
                 and want_fape
-                and (global_step >= int(cfg.train.fape.start_step))
+                and (optimizer_step >= int(cfg.train.fape.start_step))
             ):
                 if coords is not None:
                     pad_id = int(cfg.model.encoder.pad_id)
                     mask = tokens != pad_id
-                    tau = _anneal_tau(global_step)
+                    tau = _anneal_tau(optimizer_step)
                     soft_codes = logits_to_soft_codes_gumbel(
                         outputs["logits"],  # [B, L, C]
                         _unwrap_model(model, accelerator).classifier.E,  # [C, d_code]
@@ -1278,7 +1275,7 @@ def run_training(cfg: DictConfig):
                         # Only add finite FAPE to the optimization loss
                         if torch.isfinite(fape).item():
                             loss = loss + float(cfg.train.fape.weight) * fape
-                elif is_main and (global_step == 0):
+                elif is_main and (micro_step == 0):
                     printer(
                         "FAPE enabled but no coords in dataset; skipping FAPE term."
                     )
@@ -1290,15 +1287,11 @@ def run_training(cfg: DictConfig):
             else:
                 loss_to_backprop.backward()
 
-            if (global_step + 1) % grad_accum_steps == 0:
-                if grad_clip is not None and grad_clip > 0:
-                    if accelerator:
-                        accelerator.clip_grad_norm_(model.parameters(), grad_clip)
-                    else:
-                        nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-                optimizer.step()
-                scheduler.step()
-                optimizer.zero_grad(set_to_none=True)
+            micro_step += 1
+
+            if micro_step % grad_accum_steps == 0:
+                _do_optimizer_step()
+                optimizer_step += 1
 
             running_loss += float(loss.detach().item())
 
@@ -1334,14 +1327,19 @@ def run_training(cfg: DictConfig):
                         running_pred_nan_frac_sum += float(_pnan)
                         running_pred_nan_frac_count += 1
 
-            # logging
-            if current_step % log_interval == 0 and is_main:
+            # logging (gated on optimizer_step)
+            if (
+                optimizer_step > 0
+                and optimizer_step % log_interval == 0
+                and micro_step % grad_accum_steps == 0
+                and is_main
+            ):
                 with torch.no_grad():
                     acc = _compute_accuracy(outputs["logits"], labels, ignore_index)
                 lr = scheduler.get_last_lr()[0]
 
                 # compute averages over the current log interval
-                avg_total_loss = running_loss / max(1, log_interval)
+                avg_total_loss = running_loss / max(1, log_interval * grad_accum_steps)
                 avg_cls_loss = (
                     running_cls_loss / float(max(1, running_cls_count))
                     if running_cls_count > 0
@@ -1353,7 +1351,7 @@ def run_training(cfg: DictConfig):
                 cumulative_flops = compute_flops_6n(num_params, total_tokens)
 
                 # build console log message
-                msg = f"step {current_step}/{max_steps}"
+                msg = f"step {optimizer_step}/{max_steps}"
                 if current_epoch is not None:
                     msg += f" | epoch {current_epoch:.3f}"
                 # add FLOPs (scientific notation for console)
@@ -1405,6 +1403,8 @@ def run_training(cfg: DictConfig):
                     payload: dict[str, float] = {
                         "train/loss": float(avg_total_loss),
                         "lr": float(lr),
+                        "train/optimizer_step": float(optimizer_step),
+                        "train/micro_step": float(micro_step),
                     }
 
                     if is_mlm:
@@ -1443,7 +1443,7 @@ def run_training(cfg: DictConfig):
                     # Add cumulative FLOPs
                     payload["train/flops"] = float(cumulative_flops)
                     payload["train/tokens"] = float(total_tokens)
-                    wb.log(payload, step=current_step)
+                    wb.log(payload, step=optimizer_step)
 
                 # reset accumulators for the next log interval
                 running_loss = 0.0
@@ -1456,8 +1456,13 @@ def run_training(cfg: DictConfig):
                 running_masked_acc_sum = 0.0
                 running_masked_acc_count = 0
 
-            # eval across all configured eval loaders (using modular eval system)
-            if current_step % eval_interval == 0 and len(eval_loaders) > 0:
+            # eval across all configured eval loaders (gated on optimizer_step)
+            if (
+                optimizer_step > 0
+                and optimizer_step % eval_interval == 0
+                and micro_step % grad_accum_steps == 0
+                and len(eval_loaders) > 0
+            ):
                 all_eval_metrics = evaluator.evaluate_all(eval_loaders)
 
                 # Add epoch to metrics if available
@@ -1470,41 +1475,50 @@ def run_training(cfg: DictConfig):
 
                 # Log all eval metrics (including training FLOPs at this checkpoint)
                 metric_logger.log_eval_all(
-                    all_eval_metrics, current_step, current_epoch, eval_train_flops
+                    all_eval_metrics, optimizer_step, current_epoch, eval_train_flops
                 )
 
-            global_step += 1
-            console.step(1)
-            # checkpointing
-            ckpt_steps = cfg.train.get("checkpoint_steps")
-            if (
-                is_main
-                and ckpt_steps is not None
-                and int(ckpt_steps) > 0
-                and (global_step % int(ckpt_steps) == 0)
-            ):
-                step_path = io_dirs["checkpoints"] / f"step_{global_step:08d}.pt"
-                _save_checkpoint(
-                    step_path,
-                    model=model,
-                    optimizer=optimizer,
-                    scheduler=scheduler,
-                    global_step=global_step,
-                    cfg=cfg,
-                    accelerator=accelerator,
-                )
-                # update latest pointer
-                try:
-                    shutil.copyfile(
-                        step_path.as_posix(),
-                        (io_dirs["checkpoints"] / "latest.pt").as_posix(),
+            # Console progress and checkpointing only on optimizer steps
+            if micro_step % grad_accum_steps == 0:
+                console.step(1)
+                # checkpointing
+                ckpt_steps = cfg.train.get("checkpoint_steps")
+                if (
+                    is_main
+                    and ckpt_steps is not None
+                    and int(ckpt_steps) > 0
+                    and (optimizer_step % int(ckpt_steps) == 0)
+                ):
+                    step_path = (
+                        io_dirs["checkpoints"] / f"step_{optimizer_step:08d}.pt"
                     )
-                except Exception:
-                    pass
-                if accelerator:
-                    accelerator.wait_for_everyone()
-            if global_step >= max_steps:
+                    _save_checkpoint(
+                        step_path,
+                        model=model,
+                        optimizer=optimizer,
+                        scheduler=scheduler,
+                        global_step=optimizer_step,
+                        cfg=cfg,
+                        accelerator=accelerator,
+                    )
+                    # update latest pointer
+                    try:
+                        shutil.copyfile(
+                            step_path.as_posix(),
+                            (io_dirs["checkpoints"] / "latest.pt").as_posix(),
+                        )
+                    except Exception:
+                        pass
+                    if accelerator:
+                        accelerator.wait_for_everyone()
+            if optimizer_step >= max_steps:
                 break
+
+        # Flush pending gradients at end of epoch if accumulation window is incomplete
+        if micro_step % grad_accum_steps != 0 and optimizer_step < max_steps:
+            _do_optimizer_step()
+            optimizer_step += 1
+            console.step(1)
 
     if is_main:
         # final checkpoint
@@ -1514,7 +1528,7 @@ def run_training(cfg: DictConfig):
             model=model,
             optimizer=optimizer,
             scheduler=scheduler,
-            global_step=global_step,
+            global_step=optimizer_step,
             cfg=cfg,
             accelerator=accelerator,
         )

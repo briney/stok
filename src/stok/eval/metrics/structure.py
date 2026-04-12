@@ -88,7 +88,7 @@ class TMScoreMetric(MetricBase):
     This is a length-normalized structural similarity metric.
     """
 
-    name: ClassVar[str] = "tm"
+    name: ClassVar[str] = "tm_score"
     objectives: ClassVar[set[str] | None] = {"codebook"}
     requires_decoder: ClassVar[bool] = True
     requires_coords: ClassVar[bool] = True
@@ -232,7 +232,7 @@ class FAPEMetric(MetricBase):
     This is used in AlphaFold2 and measures structure quality in local frames.
     """
 
-    name: ClassVar[str] = "fape_loss"
+    name: ClassVar[str] = "fape"
     objectives: ClassVar[set[str] | None] = {"codebook"}
     requires_decoder: ClassVar[bool] = True
     requires_coords: ClassVar[bool] = True

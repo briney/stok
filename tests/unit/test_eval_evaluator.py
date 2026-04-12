@@ -245,6 +245,83 @@ class TestEvaluatorDistributed:
         assert metric_combined.compute()["acc"] == 0.5
 
 
+class TestEvaluatorFailureReporting:
+    """Tests for explicit failure reporting (Phase 0.4)."""
+
+    def test_metric_that_always_fails_reports_nan(self):
+        """A metric that raises on every update should report NaN, not 0.0."""
+        import warnings
+
+        from stok.eval.base import MetricBase
+
+        class AlwaysFailsMetric(MetricBase):
+            name = "always_fails"
+            objectives = None
+
+            def update(self, outputs, tokens, labels, coords, cfg):
+                raise RuntimeError("Intentional failure")
+
+            def compute(self):
+                return {self.name: 0.0}
+
+            def reset(self):
+                pass
+
+        cfg = _make_cfg("codebook")
+        model = MockModel()
+        eval_loader = _make_eval_loader()
+
+        evaluator = Evaluator(cfg, model, accelerator=None, decoder=None)
+        # Inject the failing metric
+        evaluator._metrics_cache["test"] = [AlwaysFailsMetric()]
+        evaluator._needs_attentions_cache["test"] = False
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            results = evaluator.evaluate(eval_loader, "test")
+
+        # Should report NaN, not 0.0
+        import math
+
+        assert "always_fails" in results
+        assert math.isnan(results["always_fails"])
+
+        # Should have logged warnings
+        warn_messages = [str(warning.message) for warning in w]
+        assert any("always_fails" in msg for msg in warn_messages)
+
+    def test_num_updated_counter_increments(self):
+        """MetricBase._num_updated should increment on successful updates."""
+        from stok.eval.base import MetricBase
+
+        class CountingMetric(MetricBase):
+            name = "counting"
+            objectives = None
+
+            def update(self, outputs, tokens, labels, coords, cfg):
+                pass  # succeeds
+
+            def compute(self):
+                return {self.name: 1.0}
+
+            def reset(self):
+                pass
+
+        cfg = _make_cfg("codebook")
+        model = MockModel()
+        eval_loader = _make_eval_loader(num_batches=3)
+
+        evaluator = Evaluator(cfg, model, accelerator=None, decoder=None)
+        metric = CountingMetric()
+        evaluator._metrics_cache["test"] = [metric]
+        evaluator._needs_attentions_cache["test"] = False
+
+        evaluator.evaluate(eval_loader, "test")
+
+        assert metric._num_updated == 3
+        assert metric._num_failed == 0
+
+
 class TestGatherMetricStatesReshaping:
     """Tests for the _gather_metric_states tensor reshaping logic.
 

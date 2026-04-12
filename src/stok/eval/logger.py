@@ -127,11 +127,11 @@ class MetricLogger:
             # Codebook metrics
             ("acc", "acc", ".4f", ""),
             ("cls_loss", "cls", ".4f", ""),
-            ("fape_loss", "FAPE", ".4f", ""),
+            ("fape", "FAPE", ".4f", ""),
             ("pred_nan_frac", "pnan", ".3f", ""),
             # Structure metrics
             ("lddt", "lDDT", ".3f", ""),
-            ("tm", "TM", ".3f", ""),
+            ("tm_score", "TM", ".3f", ""),
             ("rmsd", "RMSD", ".3f", "Å"),
         ]
 

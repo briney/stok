@@ -653,6 +653,57 @@ def test_build_metrics_auto_detect_mmcif_folder(tmp_path):
     assert "PrecisionAtLMetric" in metric_names
 
 
+def test_build_metrics_has_labels_false_excludes_classification():
+    """Test that has_labels=False filters out accuracy/perplexity metrics."""
+    cfg = OmegaConf.create(
+        {
+            "train": {
+                "eval": {
+                    "metrics": {
+                        "accuracy": {"enabled": True},
+                        "masked_accuracy": {"enabled": True},
+                        "perplexity": {"enabled": True},
+                    }
+                }
+            },
+            "data": {},
+            "model": {"classifier": {"ignore_index": -100}},
+        }
+    )
+
+    # With has_labels=False, classification and loss metrics are excluded
+    metrics = build_metrics(cfg, objective="codebook", has_labels=False)
+    metric_names = {type(m).__name__ for m in metrics}
+
+    assert "AccuracyMetric" not in metric_names
+    assert "PerplexityMetric" not in metric_names
+
+    # MLM objective too
+    mlm_metrics = build_metrics(cfg, objective="mlm", has_labels=False)
+    mlm_names = {type(m).__name__ for m in mlm_metrics}
+
+    assert "MaskedAccuracyMetric" not in mlm_names
+    assert "PerplexityMetric" not in mlm_names
+
+
+def test_build_metrics_has_labels_true_keeps_classification():
+    """Test that has_labels=True (default) keeps classification metrics."""
+    cfg = OmegaConf.create(
+        {
+            "train": {"eval": {"metrics": {}}},
+            "data": {},
+            "model": {"classifier": {"ignore_index": -100}},
+        }
+    )
+
+    # Default has_labels=True should keep accuracy
+    metrics = build_metrics(cfg, objective="codebook", has_labels=True)
+    metric_names = {type(m).__name__ for m in metrics}
+
+    assert "AccuracyMetric" in metric_names
+    assert "PerplexityMetric" in metric_names
+
+
 def test_build_metrics_no_auto_detect_for_parquet_folder(tmp_path):
     """Test that parquet folders are not auto-detected as structure folders."""
     # Create a temporary folder with parquet files (not structure files)

@@ -2,25 +2,6 @@ import torch
 from typing import Any
 
 
-def simple_pad_collate(
-    batch: list[tuple[torch.Tensor, torch.Tensor]], pad_id: int = 0
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Collate batch of token/label pairs.
-
-    Currently assumes all sequences are equal length and stacks them.
-    For variable-length sequences, this function would need to pad to max length.
-
-    Args:
-        batch: List of (tokens, labels) tuples where each tensor has shape [L].
-        pad_id: Padding token ID (currently unused).
-
-    Returns:
-        Tuple of (tokens, labels) with shapes [B, L] and [B, L].
-    """
-    tokens, labels = zip(*batch)
-    return torch.stack(tokens, dim=0), torch.stack(labels, dim=0)
-
-
 def mlm_collate(
     batch: list[dict[str, Any]],
     tokenizer,
@@ -61,8 +42,15 @@ def mlm_collate(
         (input_ids, labels, coords) if coordinates are present in batch items.
     """
     if special_token_ids is None:
-        # Default special tokens: <cls>=0, <pad>=1, <eos>=2, <unk>=3
-        special_token_ids = {0, 1, 2, 3}
+        special_token_ids = set(tokenizer.all_special_ids)
+
+    # Derive amino acid token IDs from tokenizer for random replacement
+    _standard_aa = "LAGVSERTIDPKQNFYMHWC"
+    aa_token_ids = [
+        tokenizer.convert_tokens_to_ids(aa)
+        for aa in _standard_aa
+        if tokenizer.convert_tokens_to_ids(aa) is not None
+    ]
 
     input_ids_list = []
     labels_list = []
@@ -94,9 +82,17 @@ def mlm_collate(
         # Store original tokens as labels for masked positions
         labels[mask_positions] = ids[mask_positions]
 
-        # Apply masking strategy to selected positions
+        # Guarantee at least one masked token per sequence
         mask_indices = mask_positions.nonzero(as_tuple=True)[0]
         num_masked = len(mask_indices)
+        if num_masked == 0 and maskable.any():
+            eligible = maskable.nonzero(as_tuple=True)[0]
+            force_idx = eligible[torch.randint(len(eligible), (1,))]
+            mask_positions[force_idx] = True
+            labels[force_idx] = ids[force_idx]
+            ids[force_idx] = mask_id
+            mask_indices = mask_positions.nonzero(as_tuple=True)[0]
+            num_masked = len(mask_indices)
 
         if num_masked > 0:
             rand = torch.rand(num_masked)
@@ -112,10 +108,11 @@ def mlm_collate(
             # Apply <mask> token
             ids[mask_indices[mask_token_mask]] = mask_id
 
-            # Apply random tokens (sample from amino acid range)
+            # Apply random tokens (sample from amino acid token IDs)
             num_random = random_token_mask.sum().item()
             if num_random > 0:
-                random_tokens = torch.randint(4, 24, (num_random,))  # AA tokens
+                aa_ids_t = torch.tensor(aa_token_ids)
+                random_tokens = aa_ids_t[torch.randint(len(aa_ids_t), (num_random,))]
                 ids[mask_indices[random_token_mask]] = random_tokens
 
         input_ids_list.append(ids)

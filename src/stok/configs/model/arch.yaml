@@ -11,7 +11,6 @@ encoder:
   norm: "layernorm"  # "layernorm" or "rmsnorm"
 
 classifier:
-  tie_to_codebook: true
   learnable_temperature: true
   use_cosine: false
   bias_from_code_norm: true
@@ -24,7 +23,6 @@ init:
 codebook:
   preset: "base"  # "base" or "lite"
   path: null
-  trainable: false
 
 decoder:
   enabled: false

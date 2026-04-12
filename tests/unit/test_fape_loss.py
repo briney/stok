@@ -106,3 +106,30 @@ def test_fape_nan_in_predictions_partial():
     # With perturbations on valid half, expect positive loss
     assert loss.item() > 0.0
 
+
+def test_fape_explicit_mask_with_nan_coords_returns_finite():
+    """When residue_mask says valid but coords are NaN, intersection should exclude them."""
+    B, L = 1, 6
+    true_coords = _stable_ncac_coords(B, L)
+    pred_coords = true_coords + 0.1 * torch.randn_like(true_coords)
+
+    # Mark all residues as valid, but make some GT coords NaN
+    residue_mask = torch.ones((B, L), dtype=torch.bool)
+    true_nan = true_coords.clone()
+    true_nan[:, 3:, :, :] = float("nan")
+
+    loss = fape_loss(pred_coords, true_nan, residue_mask=residue_mask)
+    assert torch.isfinite(loss), f"Expected finite loss, got {loss.item()}"
+
+
+def test_fape_all_nan_coords_with_explicit_mask_returns_zero():
+    """All-NaN coords + explicit all-valid mask should return 0.0."""
+    B, L = 2, 4
+    true_coords = torch.full((B, L, 3, 3), float("nan"))
+    pred_coords = torch.full((B, L, 3, 3), float("nan"))
+    residue_mask = torch.ones((B, L), dtype=torch.bool)
+
+    loss = fape_loss(pred_coords, true_coords, residue_mask=residue_mask)
+    assert torch.isfinite(loss), f"Expected finite loss, got {loss.item()}"
+    assert loss.item() == 0.0, f"Expected 0.0, got {loss.item()}"
+

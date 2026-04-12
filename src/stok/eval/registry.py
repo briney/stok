@@ -186,6 +186,7 @@ def build_metrics(
     decoder: nn.Module | None = None,
     has_coords: bool = False,
     eval_name: str | None = None,
+    has_labels: bool = True,
 ) -> list[Metric]:
     """Build a list of metric instances based on configuration.
 
@@ -195,6 +196,9 @@ def build_metrics(
         decoder: Optional decoder model (required for structure metrics).
         has_coords: Whether coordinate data is available (global default).
         eval_name: Optional eval dataset name for per-dataset metric overrides.
+        has_labels: Whether the eval dataset has labels. When False,
+            classification metrics (accuracy, masked_accuracy) and loss-based
+            metrics (perplexity) are excluded.
 
     Returns:
         List of instantiated Metric objects that are enabled and compatible
@@ -220,6 +224,10 @@ def build_metrics(
         # Check objective compatibility
         cls_objectives = getattr(cls, "objectives", None)
         if cls_objectives is not None and objective not in cls_objectives:
+            continue
+
+        # Filter out label-dependent metrics when dataset has no labels
+        if not has_labels and name in ("accuracy", "masked_accuracy", "perplexity"):
             continue
 
         # Check resource requirements (using per-dataset has_coords)
