@@ -17,6 +17,8 @@ class Encoder(nn.Module):
         attn_dropout: float,
         ffn_mult: float = 4.0,
         norm_type: str = "layernorm",
+        time_conditioning: str | None = None,
+        time_embed_dim: int | None = None,
     ):
         """Initialize encoder stack.
 
@@ -26,12 +28,15 @@ class Encoder(nn.Module):
             n_layers: Number of encoder layers.
             dropout: Dropout probability for residual connections.
             attn_dropout: Dropout probability for attention outputs.
-            rope_base: RoPE base frequency.
-            rope_dim: RoPE dimensionality (must be even). If None, uses head_dim.
             ffn_mult: Feedforward multiplier (hidden_dim = d_model * ffn_mult).
-            norm_type: Normalization type ("layernorm" currently supported).
+            norm_type: Normalization type ("layernorm" or "rmsnorm").
+            time_conditioning: Time conditioning mode. "adaln" replaces block
+                LayerNorms with AdaptiveLayerNorm. None uses standard norms.
+            time_embed_dim: Dimension of time embedding for adaLN. Defaults
+                to d_model if not specified.
         """
         super().__init__()
+        self._time_conditioning = time_conditioning
         self.rope = RotaryEmbedding()
         self.layers = nn.ModuleList(
             [
@@ -43,10 +48,14 @@ class Encoder(nn.Module):
                     rope=self.rope,
                     norm_type=norm_type,
                     ffn_mult=ffn_mult,
+                    time_conditioning=time_conditioning,
+                    time_embed_dim=time_embed_dim,
                 )
                 for _ in range(n_layers)
             ]
         )
+        # final_norm is always standard (not adaptive) -- after all transformer
+        # layers, time conditioning is no longer needed
         norm_type = norm_type.lower()
         if norm_type == "rmsnorm":
             Norm = RMSNorm
@@ -64,6 +73,7 @@ class Encoder(nn.Module):
         attn_mask: torch.Tensor | None = None,
         output_attentions: bool = False,
         output_hidden_states: bool = False,
+        t_embed: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
         """Forward pass through encoder stack.
 
@@ -77,6 +87,8 @@ class Encoder(nn.Module):
                 all layers. Defaults to False.
             output_hidden_states: If True, also returns hidden states from
                 all layers (including initial embeddings). Defaults to False.
+            t_embed: Time embedding of shape [B, time_embed_dim]. Required when
+                time_conditioning="adaln", ignored otherwise.
 
         Returns:
             Depends on output_attentions and output_hidden_states flags:
@@ -102,6 +114,7 @@ class Encoder(nn.Module):
                 key_padding_mask=key_padding_mask,
                 attn_mask=attn_mask,
                 output_attentions=output_attentions,
+                t_embed=t_embed,
             )
             if output_attentions:
                 h, attn_weights = layer_output
