@@ -30,4 +30,7 @@ decoder:
   path: null      # overrides preset when set
   freeze: true
 
+struct_track:
+  embedding_init_std: 0.02
+
 

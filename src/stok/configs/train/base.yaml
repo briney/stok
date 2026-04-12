@@ -41,7 +41,7 @@ console:
   enabled: true
 
 # training objective
-objective: "codebook"  # "codebook" (structure token prediction) or "mlm" (masked language modeling)
+objective: "codebook"  # "codebook" | "mlm" | "mdlm"
 
 # MLM-specific settings (only used when objective="mlm")
 mlm:
@@ -49,6 +49,34 @@ mlm:
   mask_token_prob: 0.8  # of selected tokens, prob of replacing with <mask>
   random_token_prob: 0.1  # of selected tokens, prob of replacing with random token
   tie_word_embeddings: true # whether to tie LM head weights to input embeddings
+
+# MDLM-specific settings (only used when objective="mdlm")
+mdlm:
+  tracks: "joint"  # "seq_only" for stage 1, "joint" for stage 2
+  noise_schedule_seq:
+    type: "cosine"
+    sigmoid_k: 6.0
+    log_linear_k: 3.0
+    eps: 1e-5
+  noise_schedule_struct:
+    type: "cosine"
+    sigmoid_k: 6.0
+    log_linear_k: 3.0
+    eps: 1e-5
+  lambda_seq: 1.0
+  lambda_struct: 1.0
+  time_conditioning: "adaln"
+  time_embed_dim: null  # defaults to d_model
+  time_combine: "sum"
+  antithetic_time_sampling: true
+  independent_track_times: true
+  tie_seq_embeddings: true
+  sampling:
+    num_steps: 100
+    temperature: 1.0
+    default_mode: "codesign"
+  position_weights:
+    enabled: false
 
 # pre-trained encoder checkpoint for initializing codebook training from MLM pre-training
 pretrained_encoder: null

@@ -1,5 +1,11 @@
-import torch
+from __future__ import annotations
+
 from typing import Any
+
+import torch
+
+from ..models.noise_schedule import NoiseSchedule
+from ..utils.sampling import apply_noise, sample_t_antithetic
 
 
 def mlm_collate(
@@ -129,3 +135,107 @@ def mlm_collate(
     if len(coords_list) > 0:
         return tokens, labels, torch.stack(coords_list)
     return tokens, labels
+
+
+def mdlm_collate(
+    batch: list[dict[str, Any]],
+    tokenizer,
+    noise_schedule_seq: NoiseSchedule,
+    noise_schedule_struct: NoiseSchedule | None = None,
+    *,
+    max_len: int,
+    seq_mask_id: int,
+    seq_pad_id: int,
+    struct_mask_id: int | None = None,
+    struct_pad_id: int | None = None,
+    ignore_index: int = -100,
+    antithetic_time_sampling: bool = True,
+    independent_track_times: bool = True,
+    tracks: str = "joint",
+) -> dict[str, torch.Tensor | None]:
+    """Collate batch for MDLM diffusion training.
+
+    Tokenizes sequences, samples diffusion times, applies forward noising,
+    and builds targets for the MDLM loss.
+
+    Args:
+        batch: List of dicts with ``"seq"`` key (and optionally ``"indices"``
+            for joint mode).
+        tokenizer: Tokenizer instance.
+        noise_schedule_seq: Noise schedule for the sequence track.
+        noise_schedule_struct: Noise schedule for structure track (joint only).
+        max_len: Maximum sequence length (including special tokens).
+        seq_mask_id: Mask token ID for sequences.
+        seq_pad_id: Padding token ID for sequences.
+        struct_mask_id: Mask token ID for structures (joint only).
+        struct_pad_id: Padding token ID for structures (joint only).
+        ignore_index: Label value for positions excluded from loss.
+        antithetic_time_sampling: Use antithetic time pairs for variance reduction.
+        independent_track_times: Sample independent times per track (joint only).
+        tracks: Operating mode, ``"seq_only"`` or ``"joint"``.
+
+    Returns:
+        Dict with keys ``seq_tokens``, ``t_seq``, ``seq_targets``, ``seq_mask``,
+        ``key_padding_mask``, and ``None`` placeholders for struct fields when
+        in seq_only mode.
+    """
+    special_token_ids = set(tokenizer.all_special_ids)
+
+    # --- Tokenize all sequences ---
+    all_ids: list[torch.Tensor] = []
+    for item in batch:
+        enc = tokenizer(
+            item["seq"],
+            add_special_tokens=True,
+            truncation=True,
+            max_length=max_len,
+            padding="max_length",
+            return_tensors="pt",
+        )
+        all_ids.append(enc["input_ids"][0])  # [L]
+
+    clean_tokens = torch.stack(all_ids)  # [B, L]
+    B, L = clean_tokens.shape
+
+    # Padding mask: True at pad positions
+    key_padding_mask = clean_tokens == seq_pad_id  # [B, L]
+
+    # Special token mask: True at positions that must not be masked
+    special_mask = torch.zeros(B, L, dtype=torch.bool)
+    for sid in special_token_ids:
+        special_mask |= clean_tokens == sid
+
+    # --- Sample diffusion times ---
+    device = clean_tokens.device
+    if antithetic_time_sampling:
+        t_seq = sample_t_antithetic(B, device)
+    else:
+        t_seq = torch.rand(B, device=device).clamp(min=1e-5, max=1.0 - 1e-5)
+
+    # --- Apply forward noising ---
+    noised_tokens, seq_mask = apply_noise(
+        tokens=clean_tokens,
+        t=t_seq,
+        mask_token_id=seq_mask_id,
+        noise_schedule=noise_schedule_seq,
+        padding_mask=key_padding_mask,
+        special_token_mask=special_mask,
+    )
+
+    # --- Build targets: clean tokens at masked positions, ignore elsewhere ---
+    seq_targets = torch.full_like(clean_tokens, ignore_index)
+    seq_targets[seq_mask] = clean_tokens[seq_mask]
+
+    result: dict[str, torch.Tensor | None] = {
+        "seq_tokens": noised_tokens,
+        "t_seq": t_seq,
+        "seq_targets": seq_targets,
+        "seq_mask": seq_mask,
+        "key_padding_mask": key_padding_mask,
+        # Struct fields (populated in Phase 3 for joint mode)
+        "struct_tokens": None,
+        "t_struct": None,
+        "struct_targets": None,
+        "struct_mask": None,
+    }
+    return result

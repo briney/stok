@@ -20,7 +20,7 @@ from torch.utils.data import (
     Sampler,
 )
 
-from stok.data.collate import mlm_collate
+from stok.data.collate import mdlm_collate, mlm_collate
 from stok.data.dataset import (
     DummyMLMDataset,
     DummySequenceDataset,
@@ -31,6 +31,8 @@ from stok.data.dataset import (
 )
 from stok.eval import Evaluator, MetricLogger
 from stok.models.decoder import load_pretrained_decoder
+from stok.models.mdlm import MDLMModel
+from stok.models.noise_schedule import NoiseSchedule
 from stok.models.stok import STokModel
 from stok.utils.codebook import load_codebook
 from stok.utils.console import ConsoleLogger
@@ -509,6 +511,10 @@ def _build_dataloaders(
     codebook_size: int | None,
     pad_id: int,
     is_mlm: bool = False,
+    is_mdlm: bool = False,
+    noise_schedule_seq: NoiseSchedule | None = None,
+    noise_schedule_struct: NoiseSchedule | None = None,
+    mdlm_tracks: str | None = None,
 ) -> tuple[DataLoader, dict[str, DataLoader]]:
     batch_size: int = cfg.data.batch_size
     max_len: int = cfg.data.max_len
@@ -607,7 +613,29 @@ def _build_dataloaders(
         _mask_id = tokenizer.mask_token_id
         _pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else pad_id
 
-        if is_mlm:
+        if is_mdlm:
+            _mdlm_cfg = cfg.train.get("mdlm", {})
+            _antithetic = bool(_mdlm_cfg.get("antithetic_time_sampling", True))
+            _independent = bool(_mdlm_cfg.get("independent_track_times", True))
+            _mdlm_tracks_local = mdlm_tracks or str(_mdlm_cfg.get("tracks", "joint"))
+
+            def collate(batch):
+                return mdlm_collate(
+                    batch,
+                    tokenizer,
+                    noise_schedule_seq=noise_schedule_seq,
+                    noise_schedule_struct=noise_schedule_struct,
+                    max_len=max_len,
+                    seq_mask_id=_mask_id,
+                    seq_pad_id=_pad_id,
+                    ignore_index=ignore_index,
+                    antithetic_time_sampling=_antithetic,
+                    independent_track_times=_independent,
+                    tracks=_mdlm_tracks_local,
+                )
+
+            collate_fn = collate
+        elif is_mlm:
 
             def collate(batch):
                 return mlm_collate(
@@ -636,12 +664,13 @@ def _build_dataloaders(
 
             collate_fn = collate
 
+        _seq_only_mode = is_mlm or (is_mdlm and mdlm_tracks == "seq_only")
         if len(train_configs) == 1:
             # Single dataset (backwards compatible)
             train_ds = _pick_dataset(
                 str(train_configs[0]["path"]),
-                bool(user_load_coords) if not is_mlm else False,
-                require_indices=not is_mlm,
+                bool(user_load_coords) if not _seq_only_mode else False,
+                require_indices=not _seq_only_mode,
             )
         else:
             # Multiple datasets with fractions
@@ -650,8 +679,8 @@ def _build_dataloaders(
                 t_load_coords = tcfg.get("load_coords", user_load_coords)
                 ds = _pick_dataset(
                     str(tcfg["path"]),
-                    bool(t_load_coords) if not is_mlm else False,
-                    require_indices=not is_mlm,
+                    bool(t_load_coords) if not _seq_only_mode else False,
+                    require_indices=not _seq_only_mode,
                 )
                 ds_pairs.append((ds, float(tcfg["fraction"])))
 
@@ -697,7 +726,7 @@ def _build_dataloaders(
                 train_sampler = sampler
     else:
         # fallback dummy data for quick smoke test
-        if is_mlm:
+        if is_mdlm or is_mlm:
             train_ds = DummyMLMDataset(
                 num_samples=512,
                 seq_len=min(max_len, 256) - 2,  # Account for CLS/EOS tokens
@@ -706,20 +735,44 @@ def _build_dataloaders(
             _mask_id = tokenizer.mask_token_id
             _pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else pad_id
 
-            def collate(batch):
-                return mlm_collate(
-                    batch,
-                    tokenizer,
-                    max_len=max_len,
-                    mask_prob=mask_prob,
-                    mask_token_prob=mask_token_prob,
-                    random_token_prob=random_token_prob,
-                    pad_id=_pad_id,
-                    mask_id=_mask_id,
-                    ignore_index=ignore_index,
-                )
+            if is_mdlm:
+                _mdlm_cfg = cfg.train.get("mdlm", {})
+                _antithetic = bool(_mdlm_cfg.get("antithetic_time_sampling", True))
+                _independent = bool(_mdlm_cfg.get("independent_track_times", True))
+                _mdlm_tracks_local = mdlm_tracks or str(_mdlm_cfg.get("tracks", "joint"))
 
-            collate_fn = collate
+                def collate(batch):
+                    return mdlm_collate(
+                        batch,
+                        tokenizer,
+                        noise_schedule_seq=noise_schedule_seq,
+                        noise_schedule_struct=noise_schedule_struct,
+                        max_len=max_len,
+                        seq_mask_id=_mask_id,
+                        seq_pad_id=_pad_id,
+                        ignore_index=ignore_index,
+                        antithetic_time_sampling=_antithetic,
+                        independent_track_times=_independent,
+                        tracks=_mdlm_tracks_local,
+                    )
+
+                collate_fn = collate
+            else:
+
+                def collate(batch):
+                    return mlm_collate(
+                        batch,
+                        tokenizer,
+                        max_len=max_len,
+                        mask_prob=mask_prob,
+                        mask_token_prob=mask_token_prob,
+                        random_token_prob=random_token_prob,
+                        pad_id=_pad_id,
+                        mask_id=_mask_id,
+                        ignore_index=ignore_index,
+                    )
+
+                collate_fn = collate
         else:
             train_ds = DummySequenceDataset(
                 num_samples=512,
@@ -886,11 +939,12 @@ def run_training(cfg: DictConfig):
 
     # Determine training objective
     objective = str(cfg.train.get("objective", "codebook")).lower()
-    if objective not in {"codebook", "mlm"}:
+    if objective not in {"codebook", "mlm", "mdlm"}:
         raise ValueError(
-            f"Unknown train.objective: {objective}. Expected 'codebook' or 'mlm'."
+            f"Unknown train.objective: {objective}. Expected 'codebook', 'mlm', or 'mdlm'."
         )
     is_mlm = objective == "mlm"
+    is_mdlm = objective == "mdlm"
 
     if is_main:
         printer(f"Training objective: {objective}")
@@ -923,47 +977,114 @@ def run_training(cfg: DictConfig):
     if accelerator:
         accelerator.wait_for_everyone()
 
-    # Load codebook only for codebook objective
+    # Load codebook only for codebook objective (not MLM, not MDLM seq_only)
     codebook = None
     codebook_size = None
-    if not is_mlm:
+    mdlm_cfg = cfg.train.get("mdlm", {})
+    mdlm_tracks = str(mdlm_cfg.get("tracks", "joint")) if is_mdlm else None
+    if not is_mlm and not is_mdlm:
+        codebook = load_codebook(
+            preset=cfg.model.codebook.get("preset"),
+            path=cfg.model.codebook.get("path"),
+        )
+        codebook_size = codebook.shape[0]
+    elif is_mdlm and mdlm_tracks == "joint":
         codebook = load_codebook(
             preset=cfg.model.codebook.get("preset"),
             path=cfg.model.codebook.get("path"),
         )
         codebook_size = codebook.shape[0]
 
-    # Build model with appropriate head type
-    model = STokModel(
-        vocab_size=cfg.model.encoder.vocab_size,
-        pad_id=cfg.model.encoder.pad_id,
-        d_model=cfg.model.encoder.d_model,
-        n_heads=cfg.model.encoder.n_heads,
-        n_layers=cfg.model.encoder.n_layers,
-        ffn_mult=cfg.model.encoder.ffn_mult,
-        dropout=cfg.model.encoder.dropout,
-        attn_dropout=cfg.model.encoder.attn_dropout,
-        codebook=codebook,  # None for MLM
-        classifier_kwargs=(
-            dict(
-                use_cosine=cfg.model.classifier.use_cosine,
-                learnable_temperature=cfg.model.classifier.learnable_temperature,
-                bias_from_code_norm=cfg.model.classifier.bias_from_code_norm,
-                projector_dim=cfg.model.classifier.projector_dim,
+    # Build noise schedules for MDLM
+    noise_schedule_seq = None
+    noise_schedule_struct = None
+    if is_mdlm:
+        ns_seq_cfg = mdlm_cfg.get("noise_schedule_seq", {})
+        noise_schedule_seq = NoiseSchedule(
+            schedule_type=str(ns_seq_cfg.get("type", "cosine")),
+            sigmoid_k=float(ns_seq_cfg.get("sigmoid_k", 6.0)),
+            log_linear_k=float(ns_seq_cfg.get("log_linear_k", 3.0)),
+            eps=float(ns_seq_cfg.get("eps", 1e-5)),
+        )
+        if mdlm_tracks == "joint":
+            ns_struct_cfg = mdlm_cfg.get("noise_schedule_struct", {})
+            noise_schedule_struct = NoiseSchedule(
+                schedule_type=str(ns_struct_cfg.get("type", "cosine")),
+                sigmoid_k=float(ns_struct_cfg.get("sigmoid_k", 6.0)),
+                log_linear_k=float(ns_struct_cfg.get("log_linear_k", 3.0)),
+                eps=float(ns_struct_cfg.get("eps", 1e-5)),
             )
-            if not is_mlm
-            else None
-        ),
-        norm_type=cfg.model.encoder.norm,
-        head_type=objective,
-        tie_word_embeddings=(
-            cfg.train.mlm.get("tie_word_embeddings", True) if is_mlm else True
-        ),
-    )
+
+    # Build model
+    # For MDLM, we need the tokenizer early for mask_token_id
+    _mdlm_tokenizer = Tokenizer() if is_mdlm else None
+    if is_mdlm:
+        model = MDLMModel(
+            tracks=mdlm_tracks,
+            seq_vocab_size=cfg.model.encoder.vocab_size,
+            seq_pad_id=cfg.model.encoder.pad_id,
+            seq_mask_id=_mdlm_tokenizer.mask_token_id,
+            codebook=codebook if mdlm_tracks == "joint" else None,
+            d_model=cfg.model.encoder.d_model,
+            n_heads=cfg.model.encoder.n_heads,
+            n_layers=cfg.model.encoder.n_layers,
+            ffn_mult=cfg.model.encoder.ffn_mult,
+            dropout=cfg.model.encoder.dropout,
+            attn_dropout=cfg.model.encoder.attn_dropout,
+            norm_type=cfg.model.encoder.norm,
+            noise_schedule_seq=noise_schedule_seq,
+            noise_schedule_struct=noise_schedule_struct,
+            lambda_seq=float(mdlm_cfg.get("lambda_seq", 1.0)),
+            lambda_struct=float(mdlm_cfg.get("lambda_struct", 1.0)),
+            classifier_kwargs=(
+                dict(
+                    use_cosine=cfg.model.classifier.use_cosine,
+                    learnable_temperature=cfg.model.classifier.learnable_temperature,
+                    bias_from_code_norm=cfg.model.classifier.bias_from_code_norm,
+                    projector_dim=cfg.model.classifier.projector_dim,
+                )
+                if mdlm_tracks == "joint"
+                else None
+            ),
+            tie_seq_embeddings=bool(mdlm_cfg.get("tie_seq_embeddings", True)),
+            time_conditioning=str(mdlm_cfg.get("time_conditioning", "adaln")),
+            time_embed_dim=(
+                int(mdlm_cfg.time_embed_dim) if mdlm_cfg.get("time_embed_dim") else None
+            ),
+            time_combine=str(mdlm_cfg.get("time_combine", "sum")),
+        )
+    else:
+        model = STokModel(
+            vocab_size=cfg.model.encoder.vocab_size,
+            pad_id=cfg.model.encoder.pad_id,
+            d_model=cfg.model.encoder.d_model,
+            n_heads=cfg.model.encoder.n_heads,
+            n_layers=cfg.model.encoder.n_layers,
+            ffn_mult=cfg.model.encoder.ffn_mult,
+            dropout=cfg.model.encoder.dropout,
+            attn_dropout=cfg.model.encoder.attn_dropout,
+            codebook=codebook,  # None for MLM
+            classifier_kwargs=(
+                dict(
+                    use_cosine=cfg.model.classifier.use_cosine,
+                    learnable_temperature=cfg.model.classifier.learnable_temperature,
+                    bias_from_code_norm=cfg.model.classifier.bias_from_code_norm,
+                    projector_dim=cfg.model.classifier.projector_dim,
+                )
+                if not is_mlm
+                else None
+            ),
+            norm_type=cfg.model.encoder.norm,
+            head_type=objective,
+            tie_word_embeddings=(
+                cfg.train.mlm.get("tie_word_embeddings", True) if is_mlm else True
+            ),
+        )
 
     # Load pre-trained encoder if specified (typically for codebook training after MLM)
+    # Skip for MDLM (handled by weight_loading.py in Phase 3)
     pretrained_encoder_path = cfg.train.get("pretrained_encoder")
-    if pretrained_encoder_path is not None and is_main:
+    if pretrained_encoder_path is not None and not is_mdlm and is_main:
         _load_pretrained_encoder(
             model,
             str(pretrained_encoder_path),
@@ -977,13 +1098,13 @@ def run_training(cfg: DictConfig):
         printer(f"Trainable parameters: {num_params:,}")
 
     # load frozen geometric decoder for FAPE loss and/or eval metrics (optional)
-    # Skip decoder setup for MLM objective
+    # Skip decoder setup for MLM and MDLM objectives
     decoder = None
     want_fape = False
     want_eval_decode = False
     log_pred_nan_frac = False
 
-    if not is_mlm:
+    if not is_mlm and not is_mdlm:
         want_fape = bool(getattr(cfg.train, "fape", {}).get("enabled", False))
         # default to False; eval-time decoding is opt-in via config/override
         want_eval_decode = bool(
@@ -1042,6 +1163,10 @@ def run_training(cfg: DictConfig):
         codebook_size=codebook_size,
         pad_id=cfg.model.encoder.pad_id,
         is_mlm=is_mlm,
+        is_mdlm=is_mdlm,
+        noise_schedule_seq=noise_schedule_seq,
+        noise_schedule_struct=noise_schedule_struct,
+        mdlm_tracks=mdlm_tracks,
     )
 
     # optimizer
@@ -1216,26 +1341,52 @@ def run_training(cfg: DictConfig):
             if steps_per_epoch is not None:
                 current_epoch = float(micro_step + 1) / float(steps_per_epoch)
 
-            # batch can be (tokens, labels) or (tokens, labels, coords)
-            if isinstance(batch, (list, tuple)) and len(batch) == 3:
-                tokens, labels, coords = batch
-            else:
-                tokens, labels = batch  # type: ignore[misc]
+            # Unpack batch depending on objective
+            if is_mdlm:
+                # MDLM collate returns a dict
+                if accelerator is None:
+                    _dev = _get_model_device(model, accelerator)
+                    batch = {
+                        k: v.to(_dev) if isinstance(v, torch.Tensor) else v
+                        for k, v in batch.items()
+                    }
+                outputs = model(
+                    seq_tokens=batch["seq_tokens"],
+                    t_seq=batch["t_seq"],
+                    seq_targets=batch["seq_targets"],
+                    seq_mask=batch["seq_mask"],
+                    key_padding_mask=batch["key_padding_mask"],
+                    struct_tokens=batch.get("struct_tokens"),
+                    t_struct=batch.get("t_struct"),
+                    struct_targets=batch.get("struct_targets"),
+                    struct_mask=batch.get("struct_mask"),
+                )
+                loss: torch.Tensor = outputs["loss"]
+                tokens = batch["seq_tokens"]
+                labels = batch["seq_targets"]
                 coords = None
-            if accelerator is None:
-                _dev = _get_model_device(model, accelerator)
-                tokens = tokens.to(_dev)
-                labels = labels.to(_dev)
-                if coords is not None:
-                    coords = coords.to(_dev)
+            else:
+                # batch can be (tokens, labels) or (tokens, labels, coords)
+                if isinstance(batch, (list, tuple)) and len(batch) == 3:
+                    tokens, labels, coords = batch
+                else:
+                    tokens, labels = batch  # type: ignore[misc]
+                    coords = None
+                if accelerator is None:
+                    _dev = _get_model_device(model, accelerator)
+                    tokens = tokens.to(_dev)
+                    labels = labels.to(_dev)
+                    if coords is not None:
+                        coords = coords.to(_dev)
 
-            # base model forward (token classification only)
-            outputs = model(tokens=tokens, labels=labels, ignore_index=ignore_index)
-            loss: torch.Tensor = outputs["loss"]
+                # base model forward (token classification only)
+                outputs = model(tokens=tokens, labels=labels, ignore_index=ignore_index)
+                loss = outputs["loss"]
 
             # optional FAPE loss using frozen decoder (codebook objective only)
             if (
                 not is_mlm
+                and not is_mdlm
                 and decoder is not None
                 and want_fape
                 and (optimizer_step >= int(cfg.train.fape.start_step))
@@ -1301,10 +1452,23 @@ def run_training(cfg: DictConfig):
             total_tokens += batch_tokens
 
             # accumulate loss components
-            cls_loss_tensor = outputs.get("classification_loss")
-            if cls_loss_tensor is not None:
-                running_cls_loss += float(cls_loss_tensor.detach().item())
-                running_cls_count += 1
+            if is_mdlm:
+                _loss_seq = outputs.get("loss_seq")
+                if _loss_seq is not None:
+                    running_cls_loss += float(_loss_seq.detach().item())
+                    running_cls_count += 1
+                # MDLM masked accuracy (at masked positions)
+                with torch.no_grad():
+                    masked_acc = _compute_accuracy(
+                        outputs["seq_logits"], labels, ignore_index
+                    )
+                    running_masked_acc_sum += masked_acc
+                    running_masked_acc_count += 1
+            else:
+                cls_loss_tensor = outputs.get("classification_loss")
+                if cls_loss_tensor is not None:
+                    running_cls_loss += float(cls_loss_tensor.detach().item())
+                    running_cls_count += 1
 
             # For MLM, compute masked token accuracy
             if is_mlm:
@@ -1316,7 +1480,7 @@ def run_training(cfg: DictConfig):
                     running_masked_acc_count += 1
 
             # Codebook-specific accumulations
-            if not is_mlm:
+            if not is_mlm and not is_mdlm:
                 fape_loss_tensor = outputs.get("structure_loss")
                 if fape_loss_tensor is not None:
                     running_fape_loss += float(fape_loss_tensor.detach().item())
@@ -1335,7 +1499,8 @@ def run_training(cfg: DictConfig):
                 and is_main
             ):
                 with torch.no_grad():
-                    acc = _compute_accuracy(outputs["logits"], labels, ignore_index)
+                    _logits_key = "seq_logits" if is_mdlm else "logits"
+                    acc = _compute_accuracy(outputs[_logits_key], labels, ignore_index)
                 lr = scheduler.get_last_lr()[0]
 
                 # compute averages over the current log interval
@@ -1359,7 +1524,22 @@ def run_training(cfg: DictConfig):
                 # loss
                 msg += f" | loss {avg_total_loss:.4f}"
 
-                if is_mlm:
+                if is_mdlm:
+                    # MDLM-specific logging
+                    avg_masked_acc = (
+                        running_masked_acc_sum / float(max(1, running_masked_acc_count))
+                        if running_masked_acc_count > 0
+                        else acc
+                    )
+                    msg += f" | mask_acc {avg_masked_acc:.4f}"
+                    if avg_cls_loss is not None:
+                        msg += f" | loss_seq {avg_cls_loss:.4f}"
+                    msg += f" | lr {lr:.2e}"
+                    # Log mean t and mask rate
+                    _t_mean = float(batch["t_seq"].mean().item())
+                    _mask_rate = float(batch["seq_mask"].float().mean().item())
+                    msg += f" | t_mean {_t_mean:.3f} | mask_rate {_mask_rate:.3f}"
+                elif is_mlm:
                     # MLM-specific logging
                     avg_masked_acc = (
                         running_masked_acc_sum / float(max(1, running_masked_acc_count))
@@ -1407,7 +1587,21 @@ def run_training(cfg: DictConfig):
                         "train/micro_step": float(micro_step),
                     }
 
-                    if is_mlm:
+                    if is_mdlm:
+                        avg_masked_acc = (
+                            running_masked_acc_sum
+                            / float(max(1, running_masked_acc_count))
+                            if running_masked_acc_count > 0
+                            else acc
+                        )
+                        payload["train/mask_acc"] = float(avg_masked_acc)
+                        if avg_cls_loss is not None:
+                            payload["train/loss_seq"] = float(avg_cls_loss)
+                        payload["train/t_seq_mean"] = float(batch["t_seq"].mean().item())
+                        payload["train/mask_rate_seq"] = float(
+                            batch["seq_mask"].float().mean().item()
+                        )
+                    elif is_mlm:
                         avg_masked_acc = (
                             running_masked_acc_sum
                             / float(max(1, running_masked_acc_count))

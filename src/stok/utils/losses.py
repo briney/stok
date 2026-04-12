@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
 from .geometry import frames_from_ncac
@@ -128,3 +131,72 @@ def fape_loss(
     denom = denom.clamp_min(1)
     loss_b = per.sum(dim=(1, 2, 3)) / denom  # [B]
     return loss_b.mean()
+
+
+class MDLMLoss(nn.Module):
+    """Rao-Blackwellized MDLM loss for a single track.
+
+    Computes weighted cross-entropy at masked positions, where the weight
+    depends on the noise schedule derivative at the sampled diffusion time.
+
+    Args:
+        noise_schedule: Noise schedule providing loss_weight(t).
+        ignore_index: Label index to ignore (padding / unmasked positions).
+    """
+
+    def __init__(self, noise_schedule, ignore_index: int = -100):
+        super().__init__()
+        self.noise_schedule = noise_schedule
+        self.ignore_index = ignore_index
+
+    def forward(
+        self,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+        mask: torch.Tensor,
+        t: torch.Tensor,
+        padding_mask: torch.Tensor,
+        position_weights: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Compute MDLM loss.
+
+        Args:
+            logits: Model predictions, shape [B, L, V].
+            targets: Ground-truth token IDs, shape [B, L].
+            mask: Boolean mask, True at masked (noised) positions, shape [B, L].
+            t: Diffusion times per sample, shape [B].
+            padding_mask: Boolean mask, True at padding positions, shape [B, L].
+            position_weights: Per-position loss weights (unused, future extension).
+
+        Returns:
+            Scalar loss tensor (mean over valid masked non-padding positions).
+        """
+        # If no positions are masked, return zero loss
+        valid = mask & ~padding_mask  # [B, L]
+        num_valid = valid.sum()
+        if num_valid == 0:
+            return torch.tensor(
+                0.0, device=logits.device, dtype=logits.dtype, requires_grad=True
+            )
+
+        # Loss weight from noise schedule: w(t) = |alpha'(t)| / (1 - alpha(t))
+        # Shape: [B] -> [B, 1] for broadcasting
+        w = self.noise_schedule.loss_weight(t).unsqueeze(-1)  # [B, 1]
+
+        # Per-position CE loss (no reduction)
+        V = logits.size(-1)
+        per_pos_loss = F.cross_entropy(
+            logits.reshape(-1, V),
+            targets.reshape(-1),
+            ignore_index=self.ignore_index,
+            reduction="none",
+        ).reshape_as(targets)  # [B, L]
+
+        # Zero out loss at padding and unmasked positions
+        per_pos_loss = per_pos_loss * valid.float()
+
+        # Apply time-dependent weight (broadcast [B, 1] over [B, L])
+        weighted = per_pos_loss * w
+
+        # Mean over valid positions
+        return weighted.sum() / num_valid.float().clamp(min=1.0)
