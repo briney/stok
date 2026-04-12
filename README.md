@@ -66,10 +66,11 @@ Note: Decoder hyperparameters are not configured in YAML; they are defined in co
 
 ## training
 
-STōk supports two training objectives controlled by `train.objective`:
+STōk supports three training objectives controlled by `train.objective`:
 
 - `codebook` (default): Predict structure tokens from a frozen VQ codebook
 - `mlm`: Masked language modeling pre-training on amino acid sequences
+- `mdlm`: Masked Diffusion Language Modeling for joint sequence + structure generation
 
 ### codebook training (default)
 
@@ -177,6 +178,161 @@ stok train \
 ```
 
 This loads the embedding and encoder weights from the MLM checkpoint while randomly initializing the codebook classifier head.
+
+### MDLM training
+
+MDLM (Masked Diffusion Language Modeling) uses a continuous-time diffusion process to jointly model protein sequences and structures. Training proceeds in two stages:
+
+1. **Stage 1 (seq_only):** Pre-train on large unlabeled sequence datasets
+2. **Stage 2 (joint):** Fine-tune on paired sequence + structure data
+
+**Stage 1: sequence-only pretraining:**
+
+```bash
+stok train \
+  train.objective=mdlm \
+  train.mdlm.tracks=seq_only \
+  data.train=/abs/path/to/sequences.parquet
+```
+
+**Stage 2: joint training (initialized from stage 1):**
+
+```bash
+stok train \
+  train.objective=mdlm \
+  train.mdlm.tracks=joint \
+  train.pretrained_encoder=/abs/path/to/stage1_checkpoint.pt \
+  data.train=/abs/path/to/paired_data.parquet
+```
+
+**MDLM configuration options:**
+
+```yaml
+train:
+  objective: mdlm
+  mdlm:
+    tracks: "joint"              # "seq_only" for stage 1, "joint" for stage 2
+    noise_schedule_seq:
+      type: "cosine"             # "linear", "cosine", "sqrt", "sigmoid", "log_linear"
+    noise_schedule_struct:
+      type: "cosine"
+    lambda_seq: 1.0              # Loss weight for sequence track
+    lambda_struct: 1.0           # Loss weight for structure track
+    time_conditioning: "adaln"   # "adaln" or null
+    time_combine: "sum"          # "sum" or "concat_project"
+    antithetic_time_sampling: true
+    independent_track_times: true
+```
+
+CLI example with custom noise schedule:
+
+```bash
+stok train \
+  train.objective=mdlm \
+  train.mdlm.tracks=seq_only \
+  train.mdlm.noise_schedule_seq.type=sqrt \
+  train.mdlm.time_conditioning=adaln \
+  data.train=/abs/path/to/sequences.parquet
+```
+
+**MDLM dataset format:**
+
+For seq_only training, datasets only need `pid` and `protein_sequence` columns. For joint training, datasets also need an `indices` column with per-residue structure token indices:
+
+```csv
+pid,protein_sequence,indices
+protein_1,MVLSPADKTNV,"[4, 12, 7, 3, 8, 15, 2, 9, 11, 6, 1]"
+```
+
+### MDLM generation
+
+The `stok generate` command generates protein sequences (and structures) from a trained MDLM model using iterative unmasking:
+
+```bash
+stok generate \
+  --checkpoint /path/to/model.pt \
+  --mode codesign \
+  --length 100 \
+  --num-samples 10 \
+  --num-steps 100 \
+  --temperature 0.8 \
+  --output generated.parquet
+```
+
+**Generation modes:**
+
+| Mode | Description | Required flags |
+|------|-------------|---------------|
+| `codesign` | Generate both sequence and structure | (default) |
+| `forward` | Condition on sequence, generate structure | `--condition-seq-file` |
+| `inverse` | Condition on structure, generate sequence | `--condition-struct-file` |
+| `scaffold` | Partial conditioning on either/both tracks | `--condition-seq-file` and/or `--condition-struct-file` |
+
+**Forward mode** (structure prediction from sequence):
+
+```bash
+stok generate \
+  --checkpoint model.pt \
+  --mode forward \
+  --condition-seq-file sequences.fasta \
+  --output predictions.parquet
+```
+
+**Inverse mode** (sequence design from structure):
+
+```bash
+stok generate \
+  --checkpoint model.pt \
+  --mode inverse \
+  --condition-struct-file structure_tokens.txt \
+  --output designed_sequences.parquet
+```
+
+**Scaffold mode** (partial conditioning):
+
+```bash
+stok generate \
+  --checkpoint model.pt \
+  --mode scaffold \
+  --condition-seq-file partial_seqs.fasta \
+  --condition-struct-file partial_structs.txt \
+  --output scaffolded.parquet
+```
+
+**Conditioning file formats:**
+
+- Sequence file: FASTA format or plain text (one sequence per line)
+- Structure file: plain text, one sample per line, space-separated integer token indices
+
+**Output format:**
+
+The output Parquet file contains columns:
+- `pid`: Generated sample identifier
+- `sequence`: Decoded amino acid sequence
+- `seq_tokens`: Raw sequence token IDs
+- `struct_tokens`: Structure token IDs (joint mode only)
+- `coordinates`: Decoded 3D coordinates (if `--decode-structure` is used)
+
+To also decode structure tokens to 3D coordinates:
+
+```bash
+stok generate \
+  --checkpoint model.pt \
+  --decode-structure \
+  --decoder-preset base \
+  --output with_coords.parquet
+```
+
+Model architecture overrides can be passed as Hydra overrides after the flags:
+
+```bash
+stok generate \
+  --checkpoint model.pt \
+  --num-samples 5 \
+  model.encoder.d_model=512 \
+  model.encoder.n_layers=12 \
+  train.mdlm.tracks=joint
+```
 
 ### large, sharded Parquet datasets (iterable)
 
@@ -573,6 +729,10 @@ STōk provides a modular evaluation metrics system that automatically selects ap
 | FAPE | `fape_loss` | codebook | decoder, coords | Frame-Aligned Point Error |
 | Pred NaN Frac | `pred_nan_frac` | codebook | decoder | Fraction of NaN predictions |
 | Precision@L | `p_at_l` | mlm | coords | Contact prediction precision |
+| MDLM Seq Accuracy | `mdlm_seq_acc` | mdlm | - | Sequence accuracy at masked positions |
+| MDLM Struct Accuracy | `mdlm_struct_acc` | mdlm | - | Structure accuracy at masked positions |
+| MDLM Seq Perplexity | `mdlm_seq_ppl` | mdlm | - | Sequence perplexity at masked positions |
+| MDLM Struct Perplexity | `mdlm_struct_ppl` | mdlm | - | Structure perplexity at masked positions |
 
 ### configuring metrics
 
