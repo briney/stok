@@ -200,12 +200,22 @@ class TestMDLMModelEdgeCases:
         )
         assert out["loss"] is not None
 
-    def test_joint_mode_raises(self):
+    def test_joint_mode_requires_codebook(self):
         ns = NoiseSchedule(schedule_type="cosine")
-        with pytest.raises(NotImplementedError, match="Joint mode"):
+        with pytest.raises(ValueError, match="codebook is required"):
             MDLMModel(
                 tracks="joint",
                 noise_schedule_seq=ns,
+            )
+
+    def test_joint_mode_requires_struct_schedule(self):
+        ns = NoiseSchedule(schedule_type="cosine")
+        codebook = torch.randn(16, 8)
+        with pytest.raises(ValueError, match="noise_schedule_struct is required"):
+            MDLMModel(
+                tracks="joint",
+                noise_schedule_seq=ns,
+                codebook=codebook,
             )
 
     def test_invalid_tracks_raises(self):

@@ -6,6 +6,12 @@ from stok.eval.metrics.classification import (
     PerplexityMetric,
 )
 from stok.eval.metrics.contact import PrecisionAtLMetric
+from stok.eval.metrics.mdlm import (
+    MDLMSeqAccuracy,
+    MDLMSeqPerplexity,
+    MDLMStructAccuracy,
+    MDLMStructPerplexity,
+)
 from stok.eval.metrics.structure import (
     FAPEMetric,
     LDDTMetric,
@@ -19,6 +25,11 @@ __all__ = [
     "AccuracyMetric",
     "MaskedAccuracyMetric",
     "PerplexityMetric",
+    # MDLM metrics
+    "MDLMSeqAccuracy",
+    "MDLMStructAccuracy",
+    "MDLMSeqPerplexity",
+    "MDLMStructPerplexity",
     # Structure metrics
     "LDDTMetric",
     "TMScoreMetric",

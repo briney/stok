@@ -1304,9 +1304,11 @@ def run_training(cfg: DictConfig):
     running_fape_count = 0
     running_pred_nan_frac_sum = 0.0
     running_pred_nan_frac_count = 0
-    # MLM-specific accumulators
+    # MLM/MDLM-specific accumulators
     running_masked_acc_sum = 0.0
     running_masked_acc_count = 0
+    running_struct_loss = 0.0
+    running_struct_count = 0
     # FLOPs tracking (cumulative tokens for 6N approximation)
     total_tokens = 0
 
@@ -1457,6 +1459,10 @@ def run_training(cfg: DictConfig):
                 if _loss_seq is not None:
                     running_cls_loss += float(_loss_seq.detach().item())
                     running_cls_count += 1
+                _loss_struct = outputs.get("loss_struct")
+                if _loss_struct is not None:
+                    running_struct_loss += float(_loss_struct.detach().item())
+                    running_struct_count += 1
                 # MDLM masked accuracy (at masked positions)
                 with torch.no_grad():
                     masked_acc = _compute_accuracy(
@@ -1534,11 +1540,27 @@ def run_training(cfg: DictConfig):
                     msg += f" | mask_acc {avg_masked_acc:.4f}"
                     if avg_cls_loss is not None:
                         msg += f" | loss_seq {avg_cls_loss:.4f}"
+                    avg_struct_loss = (
+                        running_struct_loss / float(max(1, running_struct_count))
+                        if running_struct_count > 0
+                        else None
+                    )
+                    if avg_struct_loss is not None:
+                        msg += f" | loss_struct {avg_struct_loss:.4f}"
                     msg += f" | lr {lr:.2e}"
                     # Log mean t and mask rate
                     _t_mean = float(batch["t_seq"].mean().item())
                     _mask_rate = float(batch["seq_mask"].float().mean().item())
                     msg += f" | t_mean {_t_mean:.3f} | mask_rate {_mask_rate:.3f}"
+                    # Log struct track stats if present
+                    if batch.get("t_struct") is not None:
+                        _t_struct_mean = float(batch["t_struct"].mean().item())
+                        msg += f" | t_struct {_t_struct_mean:.3f}"
+                    if batch.get("struct_mask") is not None:
+                        _struct_mask_rate = float(
+                            batch["struct_mask"].float().mean().item()
+                        )
+                        msg += f" | struct_mask {_struct_mask_rate:.3f}"
                 elif is_mlm:
                     # MLM-specific logging
                     avg_masked_acc = (
@@ -1597,10 +1619,25 @@ def run_training(cfg: DictConfig):
                         payload["train/mask_acc"] = float(avg_masked_acc)
                         if avg_cls_loss is not None:
                             payload["train/loss_seq"] = float(avg_cls_loss)
+                        _avg_struct_loss = (
+                            running_struct_loss / float(max(1, running_struct_count))
+                            if running_struct_count > 0
+                            else None
+                        )
+                        if _avg_struct_loss is not None:
+                            payload["train/loss_struct"] = float(_avg_struct_loss)
                         payload["train/t_seq_mean"] = float(batch["t_seq"].mean().item())
                         payload["train/mask_rate_seq"] = float(
                             batch["seq_mask"].float().mean().item()
                         )
+                        if batch.get("t_struct") is not None:
+                            payload["train/t_struct_mean"] = float(
+                                batch["t_struct"].mean().item()
+                            )
+                        if batch.get("struct_mask") is not None:
+                            payload["train/mask_rate_struct"] = float(
+                                batch["struct_mask"].float().mean().item()
+                            )
                     elif is_mlm:
                         avg_masked_acc = (
                             running_masked_acc_sum
@@ -1649,6 +1686,8 @@ def run_training(cfg: DictConfig):
                 running_pred_nan_frac_count = 0
                 running_masked_acc_sum = 0.0
                 running_masked_acc_count = 0
+                running_struct_loss = 0.0
+                running_struct_count = 0
 
             # eval across all configured eval loaders (gated on optimizer_step)
             if (

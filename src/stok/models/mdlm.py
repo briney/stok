@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import torch
 import torch.nn as nn
 
@@ -11,6 +13,8 @@ from .head import CodebookClassifier
 from .noise_schedule import NoiseSchedule
 from .stok import LMHead
 from .time_embed import SinusoidalTimeEmbedding
+
+logger = logging.getLogger(__name__)
 
 
 def apply_subs(
@@ -41,19 +45,20 @@ def apply_subs(
     """
     finfo = torch.finfo(logits.dtype)
     logits = logits.clone()
+    V = logits.size(-1)
 
     # At masked positions: suppress the mask token logit
-    # logits[mask, mask_token_id] = -inf
-    mask_expanded = mask.unsqueeze(-1)  # [B, L, 1]
-    mask_token_suppression = torch.zeros_like(logits)
-    mask_token_suppression[:, :, mask_token_id] = finfo.min
-    logits = logits + mask_expanded.float() * mask_token_suppression
+    # Only apply if mask_token_id is within the vocab range (struct track's
+    # mask token may be outside the codebook classifier's output range)
+    if mask_token_id < V:
+        mask_expanded = mask.unsqueeze(-1)  # [B, L, 1]
+        mask_token_suppression = torch.zeros_like(logits)
+        mask_token_suppression[:, :, mask_token_id] = finfo.min
+        logits = logits + mask_expanded.float() * mask_token_suppression
 
     # At unmasked positions: force prediction to be the input token
     unmasked = ~mask  # [B, L]
     if unmasked.any():
-        # Create one-hot for input tokens at unmasked positions
-        V = logits.size(-1)
         # Set all logits at unmasked positions to -large
         logits[unmasked] = finfo.min
         # Set logit for the correct token to +large
@@ -65,6 +70,18 @@ def apply_subs(
     return logits
 
 
+def _combine_losses(
+    loss_seq: torch.Tensor | None,
+    loss_struct: torch.Tensor | None,
+) -> torch.Tensor | None:
+    """Combine sequence and structure losses, handling None values."""
+    if loss_seq is not None and loss_struct is not None:
+        return loss_seq + loss_struct
+    if loss_seq is not None:
+        return loss_seq
+    return loss_struct
+
+
 class MDLMModel(nn.Module):
     """Masked Diffusion Language Model for protein sequence (and structure).
 
@@ -72,7 +89,7 @@ class MDLMModel(nn.Module):
     - ``tracks="seq_only"``: Single-track sequence diffusion for stage 1
       pretraining.
     - ``tracks="joint"``: Two-track joint sequence + structure diffusion
-      (implemented in Phase 3).
+      for stage 2 training.
 
     Args:
         tracks: Operating mode, "seq_only" or "joint".
@@ -127,16 +144,17 @@ class MDLMModel(nn.Module):
             raise ValueError(f"Unknown tracks mode: {tracks!r}")
         if noise_schedule_seq is None:
             raise ValueError("noise_schedule_seq is required")
-        if tracks == "joint":
-            raise NotImplementedError(
-                "Joint mode is not yet implemented (Phase 3). Use tracks='seq_only'."
-            )
+        if tracks == "joint" and codebook is None:
+            raise ValueError("codebook is required for joint mode")
+        if tracks == "joint" and noise_schedule_struct is None:
+            raise ValueError("noise_schedule_struct is required for joint mode")
 
         self.tracks = tracks
         self.seq_pad_id = seq_pad_id
         self.seq_mask_id = seq_mask_id
         self.lambda_seq = lambda_seq
         self.lambda_struct = lambda_struct
+        self.time_combine = time_combine
 
         _time_embed_dim = time_embed_dim or d_model
 
@@ -169,6 +187,47 @@ class MDLMModel(nn.Module):
 
         # -- Loss --
         self.loss_fn_seq = MDLMLoss(noise_schedule_seq)
+
+        # -- Joint mode components --
+        if tracks == "joint":
+            codebook_size = codebook.shape[0]  # type: ignore[union-attr]
+            # struct_mask_id = codebook_size, struct_pad_id = codebook_size + 1
+            self.struct_mask_id = codebook_size
+            self.struct_pad_id = codebook_size + 1
+            struct_vocab_size = codebook_size + 2  # codes + mask + pad
+
+            # Structure embedding
+            self.embed_struct = nn.Embedding(
+                struct_vocab_size, d_model, padding_idx=self.struct_pad_id
+            )
+            embedding_init_std = (classifier_kwargs or {}).get(
+                "embedding_init_std", 0.02
+            )
+            nn.init.normal_(self.embed_struct.weight, mean=0.0, std=embedding_init_std)
+            # Zero out padding embedding
+            with torch.no_grad():
+                self.embed_struct.weight[self.struct_pad_id].zero_()
+
+            # Track embeddings: 0 = seq, 1 = struct
+            self.track_embed = nn.Embedding(2, d_model)
+            nn.init.normal_(self.track_embed.weight, mean=0.0, std=0.02)
+
+            # Structure head (CodebookClassifier)
+            _cls_kwargs = dict(classifier_kwargs or {})
+            _cls_kwargs.pop("embedding_init_std", None)
+            self.head_struct = CodebookClassifier(
+                d_in=d_model, codebook=codebook, **_cls_kwargs  # type: ignore[arg-type]
+            )
+
+            # Structure loss
+            self.loss_fn_struct = MDLMLoss(noise_schedule_struct)  # type: ignore[arg-type]
+
+            # Time combine projection (if concat_project mode)
+            if time_combine == "concat_project":
+                self.time_combine_proj = nn.Linear(2 * _time_embed_dim, _time_embed_dim)
+        else:
+            self.struct_mask_id = -1
+            self.struct_pad_id = -1
 
     def forward(
         self,
@@ -211,20 +270,34 @@ class MDLMModel(nn.Module):
         # 1. Embed sequence tokens
         h = self.embed_seq(seq_tokens)  # [B, L, d_model]
 
-        # 2. Time embedding
-        t_embed = self.time_embed(t_seq)  # [B, d_model]
+        # 2. Add structure embedding and track embeddings (joint mode)
+        if self.tracks == "joint" and struct_tokens is not None:
+            h_struct = self.embed_struct(struct_tokens)  # [B, L, d_model]
+            h = h + h_struct
+            # Add track embeddings: index 0 for seq, index 1 for struct
+            h = h + self.track_embed.weight[0] + self.track_embed.weight[1]
 
-        # 3. Encode with time conditioning
+        # 3. Time embedding
+        t_embed = self.time_embed(t_seq)  # [B, d_model]
+        if self.tracks == "joint" and t_struct is not None:
+            t_embed_struct = self.time_embed(t_struct)  # [B, d_model]
+            if self.time_combine == "concat_project":
+                t_embed = self.time_combine_proj(
+                    torch.cat([t_embed, t_embed_struct], dim=-1)
+                )
+            else:
+                # Default: sum
+                t_embed = t_embed + t_embed_struct
+
+        # 4. Encode with time conditioning
         h = self.encoder(h, key_padding_mask=key_padding_mask, t_embed=t_embed)
 
-        # 4. Sequence head
-        seq_logits = self.head_seq(h)  # [B, L, V]
-
-        # 5. SUBS constraint
+        # 5. Sequence head + SUBS
+        seq_logits = self.head_seq(h)  # [B, L, V_seq]
         if seq_mask is not None:
             seq_logits = apply_subs(seq_logits, seq_tokens, seq_mask, self.seq_mask_id)
 
-        # 6. Loss
+        # 6. Sequence loss
         loss_seq: torch.Tensor | None = None
         if seq_targets is not None and seq_mask is not None:
             loss_seq = self.loss_fn_seq(
@@ -232,8 +305,32 @@ class MDLMModel(nn.Module):
             )
             loss_seq = self.lambda_seq * loss_seq
 
+        # 7. Structure head + SUBS + loss (joint mode)
+        loss_struct: torch.Tensor | None = None
+        struct_logits: torch.Tensor | None = None
+        if self.tracks == "joint":
+            struct_logits = self.head_struct(h)  # [B, L, C]
+            if struct_mask is not None and struct_tokens is not None:
+                struct_logits = apply_subs(
+                    struct_logits, struct_tokens, struct_mask, self.struct_mask_id
+                )
+            if (
+                struct_targets is not None
+                and struct_mask is not None
+                and t_struct is not None
+            ):
+                loss_struct = self.loss_fn_struct(
+                    struct_logits, struct_targets, struct_mask, t_struct, key_padding_mask
+                )
+                loss_struct = self.lambda_struct * loss_struct
+
+        # 8. Combined loss
+        loss = _combine_losses(loss_seq, loss_struct)
+
         return {
-            "loss": loss_seq,
+            "loss": loss,
             "loss_seq": loss_seq,
             "seq_logits": seq_logits,
+            "loss_struct": loss_struct,
+            "struct_logits": struct_logits,
         }

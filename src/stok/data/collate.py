@@ -232,10 +232,77 @@ def mdlm_collate(
         "seq_targets": seq_targets,
         "seq_mask": seq_mask,
         "key_padding_mask": key_padding_mask,
-        # Struct fields (populated in Phase 3 for joint mode)
         "struct_tokens": None,
         "t_struct": None,
         "struct_targets": None,
         "struct_mask": None,
     }
+
+    # --- Joint mode: noise structure track ---
+    if tracks == "joint":
+        if struct_mask_id is None or struct_pad_id is None:
+            raise ValueError(
+                "struct_mask_id and struct_pad_id are required for joint mode"
+            )
+
+        # Parse structure indices from batch items
+        struct_indices_list: list[torch.Tensor] = []
+        for item in batch:
+            indices = item.get("indices")
+            if indices is None:
+                raise ValueError(
+                    "Joint mode requires 'indices' key in each batch item"
+                )
+            if not isinstance(indices, torch.Tensor):
+                indices = torch.tensor(indices, dtype=torch.long)
+            struct_indices_list.append(indices)
+
+        # Build struct tokens aligned to sequence positions.
+        # Sequence layout: [CLS, aa1, aa2, ..., aaN, EOS, PAD, PAD, ...]
+        # Struct layout:   [PAD, s1,  s2,  ..., sN,  PAD, PAD, PAD, ...]
+        # Special token positions (CLS, EOS, PAD) get struct_pad_id.
+        clean_struct = torch.full((B, L), struct_pad_id, dtype=torch.long)
+        for i, indices in enumerate(struct_indices_list):
+            # Find non-padding, non-special positions in the sequence
+            # These are positions 1..N (between CLS at 0 and EOS)
+            seq_ids = clean_tokens[i]  # [L]
+            # Find the content region: after first special, before next special
+            content_positions = ~special_mask[i] & ~key_padding_mask[i]  # [L]
+            content_idx = content_positions.nonzero(as_tuple=True)[0]
+            n_content = len(content_idx)
+            n_struct = min(len(indices), n_content)
+            if n_struct > 0:
+                clean_struct[i, content_idx[:n_struct]] = indices[:n_struct]
+
+        # Sample struct diffusion times
+        if independent_track_times:
+            if antithetic_time_sampling:
+                t_struct = sample_t_antithetic(B, device)
+            else:
+                t_struct = torch.rand(B, device=device).clamp(min=1e-5, max=1.0 - 1e-5)
+        else:
+            t_struct = t_seq.clone()
+
+        # Build struct special mask: positions where struct is pad
+        struct_special_mask = clean_struct == struct_pad_id  # [B, L]
+
+        # Apply noise to struct tokens
+        noised_struct, struct_mask = apply_noise(
+            tokens=clean_struct,
+            t=t_struct,
+            mask_token_id=struct_mask_id,
+            noise_schedule=noise_schedule_struct,
+            padding_mask=key_padding_mask,
+            special_token_mask=struct_special_mask,
+        )
+
+        # Build struct targets: clean tokens at masked positions, ignore elsewhere
+        struct_targets = torch.full_like(clean_struct, ignore_index)
+        struct_targets[struct_mask] = clean_struct[struct_mask]
+
+        result["struct_tokens"] = noised_struct
+        result["t_struct"] = t_struct
+        result["struct_targets"] = struct_targets
+        result["struct_mask"] = struct_mask
+
     return result
