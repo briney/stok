@@ -500,6 +500,13 @@ def generate_cmd(
     help="Output directory (will be created; receives manifest.parquet)",
 )
 @click.option(
+    "--format",
+    "format_",
+    type=click.Choice(["pdb", "cif"]),
+    default="pdb",
+    help="Structure file format for per-sample outputs",
+)
+@click.option(
     "--config",
     "base_config",
     type=click.Path(exists=True),
@@ -531,6 +538,7 @@ def design_cmd(
     condition_struct_file: Optional[str],
     decoder_preset: Optional[str],
     output_dir: str,
+    format_: str,
     base_config: Optional[str],
     model_config: Optional[str],
     train_config: Optional[str],
@@ -542,8 +550,8 @@ def design_cmd(
     fresh sequences (and structure tokens, for joint models).
 
     On a joint model, add ``--decoder-preset base`` to also produce 3D
-    coordinates. Per-sample structure files arrive in Phase 3; for now a
-    ``manifest.parquet`` lands in ``--output-dir``.
+    coordinates. When a decoder runs, per-sample PDB (or mmCIF) files are
+    written alongside ``manifest.parquet`` in ``--output-dir``.
     """
     import torch
 
@@ -587,6 +595,7 @@ def design_cmd(
             )
         decoder = load_decoder(preset=decoder_preset, device=dev)
 
+    out_dir = Path(output_dir)
     try:
         result = design(
             model,
@@ -600,12 +609,13 @@ def design_cmd(
             decoder=decoder,
             codebook=loaded.codebook if decoder is not None else None,
             tokenizer=loaded.tokenizer,
+            output_dir=out_dir if decoder is not None else None,
+            format=format_,
             device=dev,
         )
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    out_dir = Path(output_dir)
     _write_manifest(result, out_dir / "manifest.parquet")
     click.echo(
         f"Saved {len(result.sample_ids)} samples to {out_dir}/manifest.parquet"
@@ -655,6 +665,13 @@ def design_cmd(
     help="Output directory (will be created; receives manifest.parquet)",
 )
 @click.option(
+    "--format",
+    "format_",
+    type=click.Choice(["pdb", "cif"]),
+    default="pdb",
+    help="Structure file format for per-sample outputs",
+)
+@click.option(
     "--config",
     "base_config",
     type=click.Path(exists=True),
@@ -684,6 +701,7 @@ def fold_cmd(
     device: Optional[str],
     decoder_preset: str,
     output_dir: str,
+    format_: str,
     base_config: Optional[str],
     model_config: Optional[str],
     train_config: Optional[str],
@@ -691,7 +709,8 @@ def fold_cmd(
     """Fold input sequences into 3D structures.
 
     Requires a joint-track MDLM checkpoint. Runs
-    sequence → structure tokens → decoded coordinates.
+    sequence → structure tokens → decoded coordinates, then writes
+    per-sample PDB/mmCIF files alongside ``manifest.parquet``.
     """
     from stok.api import MDLMModelConfig, fold, load_decoder, load_model
 
@@ -710,6 +729,7 @@ def fold_cmd(
             "seq_only generation or load a joint checkpoint."
         )
     sequences = _load_input_seqs(Path(input_seq_file))
+    out_dir = Path(output_dir)
 
     try:
         decoder = load_decoder(preset=decoder_preset, device=dev)
@@ -722,12 +742,13 @@ def fold_cmd(
             length=length,
             num_steps=num_steps,
             temperature=temperature,
+            output_dir=out_dir,
+            format=format_,
             device=dev,
         )
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    out_dir = Path(output_dir)
     _write_manifest(result, out_dir / "manifest.parquet")
     click.echo(
         f"Folded {len(result.sample_ids)} sequences to {out_dir}/manifest.parquet"
@@ -901,6 +922,13 @@ def tokenize_cmd(
     default="untokenized/",
     help="Output directory (will be created; receives manifest.parquet)",
 )
+@click.option(
+    "--format",
+    "format_",
+    type=click.Choice(["pdb", "cif"]),
+    default="pdb",
+    help="Structure file format for per-sample outputs",
+)
 @click.option("--device", default=None, help="Torch device (default: cuda-if-available)")
 @click.option(
     "--config",
@@ -928,6 +956,7 @@ def untokenize_cmd(
     input_tokens_file: str,
     decoder_preset: str,
     output_dir: str,
+    format_: str,
     device: Optional[str],
     base_config: Optional[str],
     model_config: Optional[str],
@@ -937,7 +966,8 @@ def untokenize_cmd(
 
     Reads a Parquet file written by ``stok tokenize`` (or with the same
     schema) and emits coordinates via the geometric decoder. The checkpoint
-    is only consulted to recover the codebook tensor.
+    is only consulted to recover the codebook tensor. Per-sample PDB/mmCIF
+    files are written alongside ``manifest.parquet`` in ``--output-dir``.
     """
     from stok.api import MDLMModelConfig, load_decoder, load_model, untokenize
 
@@ -957,6 +987,7 @@ def untokenize_cmd(
 
     struct_tokens, sequences = _read_tokens_parquet(Path(input_tokens_file))
     struct_tokens = struct_tokens.to(dev)
+    out_dir = Path(output_dir)
 
     try:
         decoder = load_decoder(preset=decoder_preset, device=dev)
@@ -965,12 +996,13 @@ def untokenize_cmd(
             loaded.codebook,
             struct_tokens=struct_tokens,
             sequences=sequences,
+            output_dir=out_dir,
+            format=format_,
             device=dev,
         )
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    out_dir = Path(output_dir)
     _write_manifest(result, out_dir / "manifest.parquet")
     click.echo(
         f"Decoded {len(result.sample_ids)} samples to {out_dir}/manifest.parquet"

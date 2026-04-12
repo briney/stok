@@ -1,11 +1,13 @@
-"""Integration tests for `stok design` (Phase 2)."""
+"""Integration tests for `stok design` (Phase 2 + Phase 3)."""
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 from click.testing import CliRunner
 
 from stok.cli.cli import cli
+from stok.utils.structure_parser import parse_structure
 
 from .conftest import joint_hydra_overrides, seq_only_hydra_overrides
 
@@ -65,6 +67,88 @@ class TestDesignJoint:
         assert "struct_tokens" in df.columns
         # Without --decoder-preset we should NOT have a structure file path.
         assert df["structure_file"].isna().all()
+
+    def test_codesign_with_decoder_writes_pdb_files(
+        self, tmp_path, joint_checkpoint, patch_load_decoder
+    ):
+        """Phase 3: joint + --decoder-preset should produce per-sample PDBs.
+
+        Uses a fully-specified condition_seq_file so every residue in the
+        output maps to a recognized amino acid (``parse_structure`` cannot
+        read ``UNK`` residues — a pre-existing parser limitation).
+        """
+        ckpt_path, codebook_path = joint_checkpoint
+        seq_file = tmp_path / "seqs.fasta"
+        seq_file.write_text(">s1\nACDEFGHIKL\n>s2\nMNPQRSTVWY\n>s3\nGGGGGGGGGG\n")
+
+        out_dir = tmp_path / "design_out"
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "design",
+                "--checkpoint", str(ckpt_path),
+                "--length", "10",
+                "--num-steps", "3",
+                "--device", "cpu",
+                "--decoder-preset", "base",
+                "--condition-seq-file", str(seq_file),
+                "--output-dir", str(out_dir),
+                *joint_hydra_overrides(codebook_path),
+            ],
+        )
+        assert result.exit_code == 0, f"CLI failed:\n{result.output}"
+
+        df = pd.read_parquet(out_dir / "manifest.parquet")
+        assert len(df) == 3
+        # Each row now points at a real per-sample file.
+        assert df["structure_file"].notna().all()
+        for path_str in df["structure_file"]:
+            p = out_dir / path_str.split("/")[-1]
+            assert p.exists()
+            assert p.suffix == ".pdb"
+            parsed = parse_structure(p)
+            assert parsed.coords.shape == (10, 3, 3)
+            assert np.isfinite(parsed.coords).all()
+
+        # sample_0001 ... sample_0003 naming convention.
+        assert list(df["sample_id"]) == ["sample_0001", "sample_0002", "sample_0003"]
+
+    def test_codesign_with_decoder_writes_cif_files(
+        self, tmp_path, joint_checkpoint, patch_load_decoder
+    ):
+        """Phase 3: --format cif writes per-sample mmCIF instead of PDB."""
+        ckpt_path, codebook_path = joint_checkpoint
+        seq_file = tmp_path / "seqs.fasta"
+        seq_file.write_text(">s1\nACDEFGHIKL\n>s2\nMNPQRSTVWY\n")
+
+        out_dir = tmp_path / "design_out"
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "design",
+                "--checkpoint", str(ckpt_path),
+                "--length", "10",
+                "--num-steps", "3",
+                "--device", "cpu",
+                "--decoder-preset", "base",
+                "--format", "cif",
+                "--condition-seq-file", str(seq_file),
+                "--output-dir", str(out_dir),
+                *joint_hydra_overrides(codebook_path),
+            ],
+        )
+        assert result.exit_code == 0, f"CLI failed:\n{result.output}"
+
+        df = pd.read_parquet(out_dir / "manifest.parquet")
+        assert len(df) == 2
+        for path_str in df["structure_file"]:
+            p = out_dir / path_str.split("/")[-1]
+            assert p.exists()
+            assert p.suffix == ".cif"
+            parsed = parse_structure(p)
+            assert parsed.coords.shape == (10, 3, 3)
 
 
 class TestDesignScaffolding:

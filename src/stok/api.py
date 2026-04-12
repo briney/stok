@@ -415,8 +415,10 @@ def _write_structure(
 ) -> None:
     """Write a single structure file. Format is inferred from ``path.suffix``.
 
-    Supported suffixes: ``.pdb`` / ``.ent`` (via :func:`stok.utils.pdb.build_pdb`).
-    ``.cif`` / ``.mmcif`` are reserved for a Phase 3 mmCIF writer.
+    Supported suffixes:
+
+    - ``.pdb`` / ``.ent`` → :func:`stok.utils.pdb.build_pdb`
+    - ``.cif`` / ``.mmcif`` → :func:`stok.utils.mmcif.build_mmcif`
     """
     suffix = path.suffix.lower()
     if suffix in (".pdb", ".ent"):
@@ -424,9 +426,9 @@ def _write_structure(
 
         build_pdb(coordinates=coords, output_file=str(path), sequence=sequence)
     elif suffix in (".cif", ".mmcif"):
-        raise NotImplementedError(
-            "mmCIF writer is not yet available; use a .pdb extension."
-        )
+        from stok.utils.mmcif import build_mmcif
+
+        build_mmcif(coordinates=coords, output_file=str(path), sequence=sequence)
     else:
         raise ValueError(
             f"Unknown structure format: {suffix!r}. "
@@ -508,7 +510,7 @@ def design(
         tokenizer: Optional tokenizer for decoding. Defaults to a fresh
             :class:`Tokenizer` (the built-in vocab).
         output_dir: If provided, per-sample PDB files are written here.
-        format: Structure file format. Phase 1 supports ``"pdb"`` only.
+        format: Structure file format (``"pdb"`` or ``"cif"``).
         return_coordinates: Whether to populate ``result.coordinates`` when a
             decoder is provided.
         device: Device to run generation on.
@@ -722,7 +724,7 @@ def untokenize(
         sequences: Optional matching amino-acid sequences for PDB residue
             names. When ``None``, all residues are written as ``UNK``.
         output_dir: If provided, per-sample structure files are written here.
-        format: Structure file format. Phase 1 supports ``"pdb"`` only.
+        format: Structure file format (``"pdb"`` or ``"cif"``).
         return_coordinates: Whether to populate ``result.coordinates``.
         device: Device to run decoding on.
     """
