@@ -10,117 +10,113 @@ pip install stok
 
 ## Quick start
 
-Generate 10 proteins of length 100 residues:
+Design 10 proteins of length 100 residues and write per-sample PDB files:
 
 ```bash
-stok generate \
-  --checkpoint /path/to/model.pt \
+stok design \
+  --checkpoint /path/to/joint_model.pt \
   --length 100 \
   --num-samples 10 \
-  --output proteins.parquet
+  --decoder-preset base \
+  --output-dir proteins/
 ```
 
 ## Generation
 
-The `stok generate` command produces protein sequences and structures from a trained MDLM model via iterative unmasking. Four generation modes cover the main protein design tasks:
+Protein generation is split across five focused subcommands. Each takes a
+trained MDLM checkpoint and writes a `manifest.parquet` (plus per-sample PDB
+or mmCIF files when structures are decoded) into an output directory — or, in
+the case of `tokenize`, a single Parquet file.
 
-| Mode | Description | Conditioning |
-|------|-------------|-------------|
-| `codesign` | Generate sequence and structure jointly | None (unconditional) |
-| `forward` | Predict structure from a known sequence | Sequence |
-| `inverse` | Design a sequence for a known structure | Structure tokens |
-| `scaffold` | Fill in missing regions of a partial design | Partial sequence and/or structure |
+| Subcommand | Purpose | Input | Output |
+|------------|---------|-------|--------|
+| `design`     | Design new sequences (and optional structures), with optional conditioning | (optional) FASTA / struct token files | `--output-dir` with `manifest.parquet` + per-sample PDB/mmCIF when decoding |
+| `fold`       | Fold input sequences into 3D structures (joint model only) | FASTA file via `--input-seq-file` | `--output-dir` with `manifest.parquet` + per-sample PDB/mmCIF |
+| `unfold`     | Infer sequences from 3D structures (**stubbed** — requires coords→tokens encoder) | PDB/mmCIF file | exits non-zero with a pointer to `untokenize` |
+| `tokenize`   | Sequences → predicted structure tokens (joint model, no decoder) | FASTA file | single Parquet via `--output` |
+| `untokenize` | Structure tokens → decoded 3D coordinates | Parquet from `tokenize` | `--output-dir` with `manifest.parquet` + per-sample PDB/mmCIF |
 
-### Codesign (default)
+All commands share `--checkpoint`, `--length`, `--num-steps`, `--temperature`,
+`--device`, and the Hydra-style `--config` / `--model-config` / `--train-config`
+flags. Extra positional arguments are forwarded to Hydra, so
+`stok design --checkpoint model.pt model.encoder.d_model=512` still works.
 
-Unconditional generation of both sequence and structure:
+### Design
+
+Unconditional generation of sequences (and structures on joint models):
 
 ```bash
-stok generate \
-  --checkpoint model.pt \
-  --mode codesign \
+stok design \
+  --checkpoint joint_model.pt \
   --length 150 \
   --num-samples 50 \
   --num-steps 200 \
   --temperature 0.8 \
-  --output designed.parquet
+  --decoder-preset base \
+  --output-dir designed/
 ```
 
-### Forward folding
-
-Predict structure tokens for known sequences. Provide sequences as FASTA or plain text (one per line):
-
-```bash
-stok generate \
-  --checkpoint model.pt \
-  --mode forward \
-  --condition-seq-file sequences.fasta \
-  --num-steps 100 \
-  --output predictions.parquet
-```
-
-### Inverse folding
-
-Design sequences that fold into a target structure. Provide structure tokens as space-separated integers (one sample per line):
+`design` supersedes the old `codesign` and `scaffold` modes. Add
+`--condition-seq-file` and/or `--condition-struct-file` for partial conditioning:
 
 ```bash
-stok generate \
-  --checkpoint model.pt \
-  --mode inverse \
-  --condition-struct-file structure_tokens.txt \
-  --num-steps 100 \
-  --output designed_seqs.parquet
-```
-
-### Scaffold
-
-Partial conditioning on either or both tracks — masked positions are generated, fixed positions are preserved:
-
-```bash
-stok generate \
-  --checkpoint model.pt \
-  --mode scaffold \
+stok design \
+  --checkpoint joint_model.pt \
   --condition-seq-file partial_seqs.fasta \
   --condition-struct-file partial_structs.txt \
-  --output scaffolded.parquet
-```
-
-### Decoding to 3D coordinates
-
-By default, structure output is discrete codebook tokens. To also decode tokens into backbone coordinates (N, CA, C), add `--decode-structure`:
-
-```bash
-stok generate \
-  --checkpoint model.pt \
-  --decode-structure \
   --decoder-preset base \
-  --output with_coords.parquet
+  --output-dir scaffolded/
 ```
 
-### Generation options
+On a seq-only model, omit `--decoder-preset`. On a joint model, omit it to
+skip the decoder and emit only `manifest.parquet` (no PDB files).
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--checkpoint` | *(required)* | Path to trained model `.pt` file |
-| `--mode` | `codesign` | Generation mode: `codesign`, `forward`, `inverse`, `scaffold` |
-| `--length` | `100` | Sequence length (residues) |
-| `--num-samples` | `10` | Number of proteins to generate |
-| `--num-steps` | `100` | Diffusion unmasking steps (more = higher quality) |
-| `--temperature` | `1.0` | Sampling temperature (lower = more conservative) |
-| `--output` | `generated.parquet` | Output file path |
-| `--condition-seq-file` | — | FASTA or plain text sequences for conditioning |
-| `--condition-struct-file` | — | Space-separated structure token indices for conditioning |
-| `--decode-structure` | off | Decode structure tokens to 3D backbone coordinates |
-| `--decoder-preset` | `base` | Decoder variant: `base` or `lite` |
+### Fold
 
-Hydra config overrides can be appended for model architecture or diffusion settings:
+Predict 3D structure from known sequences. Requires a joint-track checkpoint;
+internally equivalent to `tokenize` + `untokenize`:
 
 ```bash
-stok generate \
-  --checkpoint model.pt \
-  --num-samples 5 \
-  model.encoder.d_model=512 \
-  model.encoder.n_layers=12
+stok fold \
+  --checkpoint joint_model.pt \
+  --input-seq-file sequences.fasta \
+  --decoder-preset base \
+  --output-dir folded/
+```
+
+### Unfold
+
+Sequence design for a known structure. This command is **currently stubbed**
+pending integration of a pretrained coordinates→tokens encoder. It exits
+non-zero with a message pointing at `untokenize` as the workaround when
+structure tokens are already available.
+
+### Tokenize
+
+Sequences → predicted structure tokens, without running the decoder. Joint
+model only. Produces a single Parquet file that can be consumed by
+`untokenize`:
+
+```bash
+stok tokenize \
+  --checkpoint joint_model.pt \
+  --input-seq-file sequences.fasta \
+  --output tokens.parquet
+```
+
+### Untokenize
+
+Structure tokens → 3D coordinates. Reads a Parquet file from `tokenize` (or
+any Parquet with the same schema) and writes per-sample PDB/mmCIF files using
+the geometric decoder. The checkpoint is consulted only to recover the
+codebook tensor:
+
+```bash
+stok untokenize \
+  --checkpoint joint_model.pt \
+  --input-tokens-file tokens.parquet \
+  --decoder-preset base \
+  --output-dir untokenized/
 ```
 
 ### Conditioning file formats
@@ -141,24 +137,63 @@ MVLSPADKTNVKAAWGKVGAHAGEYGAEALERMF
 MNIFEMLRIDKGLQVVAVKAPGFGDNRKNQLKDF
 ```
 
-**Structure files** (space-separated integer token indices, one sample per line):
+**Structure token files** (space-separated integer indices, one sample per line):
 
 ```
 100 101 102 103 104 105 106 107 108 109
 200 201 202 203 204 205 206 207 208 209
 ```
 
-### Output format
+### Output layout
 
-Output is a Parquet file with the following columns:
+Commands that produce per-sample structures (`design` with a decoder, `fold`,
+`untokenize`) write to `--output-dir`:
+
+```
+out/
+  sample_0001.pdb
+  sample_0002.pdb
+  ...
+  manifest.parquet
+```
+
+Per-sample filenames use zero-padded `sample_XXXX` IDs (widened automatically
+past 9999 samples). Use `--format cif` to write mmCIF files instead of PDB.
+
+`manifest.parquet` columns:
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `pid` | str | Sample identifier (e.g., `generated_0000`) |
+| `sample_id` | str | Zero-padded sample identifier (e.g., `sample_0001`) |
 | `sequence` | str | Amino acid sequence |
 | `seq_tokens` | list[int] | Sequence token IDs |
-| `struct_tokens` | list[int] | Structure codebook indices (joint/forward/scaffold modes) |
-| `coordinates` | list | Backbone N/CA/C coordinates, shape `[L, 3, 3]` (only with `--decode-structure`) |
+| `struct_tokens` | list[int] | Structure codebook indices (joint model only) |
+| `length` | int | Sequence length |
+| `structure_file` | str \| null | Path to the per-sample PDB/mmCIF file when written |
+
+`tokenize` writes a single Parquet with the same schema (no per-sample
+structure files) to `--output`.
+
+### Python API
+
+The CLI is a thin wrapper over `stok.api`, which is importable directly:
+
+```python
+from stok.api import MDLMModelConfig, fold, load_decoder, load_model
+
+cfg = MDLMModelConfig(tracks="joint")
+loaded = load_model("joint_model.pt", config=cfg)
+decoder = load_decoder("base")
+result = fold(
+    loaded.model,
+    sequences=["ACDEFGHIK"],
+    decoder=decoder,
+    codebook=loaded.codebook,
+    tokenizer=loaded.tokenizer,
+    output_dir="folded/",
+)
+assert result.coordinates.shape == (1, 9, 3, 3)
+```
 
 ## Training
 

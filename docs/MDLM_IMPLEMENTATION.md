@@ -905,28 +905,33 @@ Each metric:
 
 **Modified file:** `src/stok/cli/cli.py`
 
-**Add a `generate` subcommand:**
+> **Note:** the original Phase 4.1 plan added a single `generate` subcommand.
+> That command was later split into five focused subcommands (`design`,
+> `fold`, `unfold`, `tokenize`, `untokenize`) — see
+> `docs/CLI_REFACTOR_WORKPLAN.md`. The example below reflects the current
+> subcommand layout.
+
+**Add the inference subcommands:**
 
 ```bash
-stok generate \
+stok design \
   --checkpoint /path/to/joint_model.pt \
-  --mode codesign \
   --length 100 \
   --num-samples 10 \
   --num-steps 100 \
   --temperature 0.8 \
-  --output generated.parquet \
-  --decoder-preset base
+  --decoder-preset base \
+  --output-dir generated/
 ```
 
 Implementation:
-1. Load model from checkpoint.
+1. Load model from checkpoint via `stok.api.load_model`.
 2. Call `sample()` with specified parameters.
-3. If mode involves structure: decode struct tokens to coordinates using `GeometricDecoder`.
-4. Save results to Parquet: columns `pid`, `sequence`, `struct_tokens`, `coordinates` (optional).
+3. If the run decodes structure: use `GeometricDecoder` to convert struct tokens to coordinates.
+4. Write per-sample PDB/mmCIF files plus `manifest.parquet` (columns: `sample_id`, `sequence`, `seq_tokens`, `struct_tokens`, `length`, `structure_file`).
 
-**Tests:** `tests/integration/test_generate_cli.py`
-- Run `stok generate` with a tiny trained model. Assert output file exists with correct columns.
+**Tests:** `tests/integration/test_cli_design.py`, `test_cli_fold.py`, `test_cli_unfold.py`, `test_cli_tokenize.py`, `test_cli_untokenize.py`
+- Exercise each subcommand with a tiny trained model. Assert the output directory contains the expected `manifest.parquet` and per-sample structure files.
 
 ### 4.2 Full integration test suite
 

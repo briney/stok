@@ -388,15 +388,10 @@ def _decode_struct_tokens(
 ) -> torch.Tensor:
     """Decode structure tokens to ``[B, L, 3, 3]`` backbone coordinates.
 
-    This is the chokepoint that fixes two long-standing bugs in the old
-    ``run_generation`` decode path:
-
-    1. It looks up codes via :func:`indices_to_codes` with the codebook
-       returned by :func:`load_model` (old code referenced the non-existent
-       ``model.head_struct.codebook`` attribute).
-    2. It calls :func:`decode_coords`, which passes the required ``mask``
-       argument to :meth:`GeometricDecoder.forward` (old code called the
-       decoder with a single positional argument).
+    Looks up codes via :func:`indices_to_codes` against the codebook
+    returned by :func:`load_model`, then calls :func:`decode_coords` so
+    that the required ``mask`` argument is passed to
+    :meth:`GeometricDecoder.forward`.
     """
     codebook = codebook.to(device)
     B, L = struct_tokens.shape
