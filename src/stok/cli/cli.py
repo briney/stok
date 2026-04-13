@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from importlib.resources import as_file, files
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import click
 from hydra import compose, initialize_config_dir
@@ -19,10 +19,10 @@ if TYPE_CHECKING:
 def _merge_custom_configs(
     cfg,
     *,
-    base_config: Optional[str] = None,
-    model_config: Optional[str] = None,
-    train_config: Optional[str] = None,
-    data_config: Optional[str] = None,
+    base_config: str | None = None,
+    model_config: str | None = None,
+    train_config: str | None = None,
+    data_config: str | None = None,
 ):
     """Merge custom config files into the base config.
 
@@ -47,9 +47,9 @@ def _merge_custom_configs(
 def _compose_hydra_cfg(
     ctx: click.Context,
     *,
-    base_config: Optional[str] = None,
-    model_config: Optional[str] = None,
-    train_config: Optional[str] = None,
+    base_config: str | None = None,
+    model_config: str | None = None,
+    train_config: str | None = None,
 ):
     """Compose the default Hydra config with CLI + file overrides applied."""
     overrides = list(ctx.args)
@@ -64,7 +64,7 @@ def _compose_hydra_cfg(
     )
 
 
-def _resolve_device(device: Optional[str]) -> "torch.device":
+def _resolve_device(device: str | None) -> torch.device:
     """Pick a torch device, falling back to CUDA-if-available."""
     import torch
 
@@ -78,8 +78,8 @@ def _load_conditioning_seqs(
     tokenizer,
     length: int,
     pad_id: int,
-    device: "torch.device",
-) -> "torch.Tensor":
+    device: torch.device,
+) -> torch.Tensor:
     """Parse a FASTA/text file into a ``[N, length]`` token tensor."""
     import torch
 
@@ -101,8 +101,8 @@ def _load_conditioning_struct_tokens(
     path: Path,
     length: int,
     pad_id: int,
-    device: "torch.device",
-) -> "torch.Tensor":
+    device: torch.device,
+) -> torch.Tensor:
     """Parse a text file of space-separated integer indices into a tensor."""
     import torch
 
@@ -133,7 +133,7 @@ def _load_input_seqs(path: Path) -> list[str]:
 
 def _read_tokens_parquet(
     path: Path,
-) -> tuple["torch.Tensor", Optional[list[str]]]:
+) -> tuple[torch.Tensor, list[str] | None]:
     """Read struct tokens (and optional sequences) from a `tokenize` parquet."""
     import numpy as np
     import pandas as pd
@@ -146,13 +146,13 @@ def _read_tokens_parquet(
         )
     rows = np.asarray([np.asarray(r, dtype=np.int64) for r in df["struct_tokens"]])
     struct_tokens = torch.from_numpy(rows).long()
-    sequences: Optional[list[str]] = None
+    sequences: list[str] | None = None
     if "sequence" in df.columns:
         sequences = [str(s) for s in df["sequence"].tolist()]
     return struct_tokens, sequences
 
 
-def _write_manifest(result: "GenerationResult", output_path: Path) -> None:
+def _write_manifest(result: GenerationResult, output_path: Path) -> None:
     """Serialize a :class:`GenerationResult` to the new manifest schema.
 
     Columns: ``sample_id``, ``sequence``, ``seq_tokens``, ``struct_tokens``
@@ -221,10 +221,10 @@ def cli():
 @click.pass_context
 def smoke_test(
     ctx: click.Context,
-    base_config: Optional[str],
-    model_config: Optional[str],
-    train_config: Optional[str],
-    data_config: Optional[str],
+    base_config: str | None,
+    model_config: str | None,
+    train_config: str | None,
+    data_config: str | None,
 ):
     """Run the STok smoke test.
 
@@ -283,10 +283,10 @@ def smoke_test(
 @click.pass_context
 def train_cmd(
     ctx: click.Context,
-    base_config: Optional[str],
-    model_config: Optional[str],
-    train_config: Optional[str],
-    data_config: Optional[str],
+    base_config: str | None,
+    model_config: str | None,
+    train_config: str | None,
+    data_config: str | None,
 ):
     """Run encoder training.
 
@@ -390,15 +390,15 @@ def design_cmd(
     num_samples: int,
     num_steps: int,
     temperature: float,
-    device: Optional[str],
-    condition_seq_file: Optional[str],
-    condition_struct_file: Optional[str],
-    decoder_preset: Optional[str],
+    device: str | None,
+    condition_seq_file: str | None,
+    condition_struct_file: str | None,
+    decoder_preset: str | None,
     output_dir: str,
     format_: str,
-    base_config: Optional[str],
-    model_config: Optional[str],
-    train_config: Optional[str],
+    base_config: str | None,
+    model_config: str | None,
+    train_config: str | None,
 ):
     """Design new protein sequences (and optionally structures).
 
@@ -552,16 +552,16 @@ def fold_cmd(
     ctx: click.Context,
     checkpoint: str,
     input_seq_file: str,
-    length: Optional[int],
+    length: int | None,
     num_steps: int,
     temperature: float,
-    device: Optional[str],
+    device: str | None,
     decoder_preset: str,
     output_dir: str,
     format_: str,
-    base_config: Optional[str],
-    model_config: Optional[str],
-    train_config: Optional[str],
+    base_config: str | None,
+    model_config: str | None,
+    train_config: str | None,
 ):
     """Fold input sequences into 3D structures.
 
@@ -613,6 +613,91 @@ def fold_cmd(
 
 
 @cli.command(
+    name="encode",
+    context_settings=dict(ignore_unknown_options=True, allow_extra_args=True),
+)
+@click.option(
+    "--input",
+    "-i",
+    "inputs",
+    type=click.Path(exists=True, path_type=Path),
+    multiple=True,
+    required=True,
+    help=(
+        "PDB/mmCIF file(s) or a directory to recursively scan. "
+        "Pass -i multiple times to encode many structures."
+    ),
+)
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(path_type=Path),
+    default=Path("encoded.parquet"),
+    help="Output Parquet manifest path.",
+)
+@click.option(
+    "--preset",
+    type=click.Choice(["base", "lite"]),
+    default="base",
+    help="StructureEncoder preset to load.",
+)
+@click.option(
+    "--weights",
+    type=click.Path(exists=True, path_type=Path),
+    default=None,
+    help="Optional explicit encoder weights path (overrides download).",
+)
+@click.option(
+    "--batch-size",
+    type=int,
+    default=8,
+    help="Mini-batch size when encoding.",
+)
+@click.option(
+    "--device",
+    default=None,
+    help="Torch device (default: cuda-if-available).",
+)
+def encode_cmd(
+    inputs: tuple[Path, ...],
+    output: Path,
+    preset: str,
+    weights: Path | None,
+    batch_size: int,
+    device: str | None,
+):
+    """Encode PDB/mmCIF structure(s) into VQ structure token indices.
+
+    Uses a pretrained :class:`~stok.models.structure_encoder.StructureEncoder`
+    (GCP-VQVAE-parity) to map backbone coordinates to discrete structure
+    tokens. Writes a Parquet file whose schema is consumable by
+    ``stok untokenize`` for a round-trip.
+    """
+    from stok.api import encode, load_encoder
+
+    dev = _resolve_device(device)
+    try:
+        encoder = load_encoder(
+            preset=preset,
+            path=weights,
+            device=dev,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    result = encode(
+        list(inputs),
+        encoder=encoder,
+        batch_size=batch_size,
+        device=dev,
+        output_path=output,
+    )
+    click.echo(
+        f"Encoded {len(result.sample_ids)} structures to {output}"
+    )
+
+
+@cli.command(
     name="unfold",
     context_settings=dict(ignore_unknown_options=True, allow_extra_args=True),
 )
@@ -636,8 +721,9 @@ def unfold_cmd(
 ):
     """Infer sequences from 3D structures. **Not yet implemented.**
 
-    Blocked on integrating a pretrained coordinates → tokens encoder.
-    Use ``stok untokenize`` if you already have structure tokens.
+    Blocked on integrating an inverse-folding head. Use ``stok encode`` to
+    turn a structure into VQ tokens, or ``stok untokenize`` if you already
+    have structure tokens and want coordinates back.
     """
     from stok.api import unfold
 
@@ -708,13 +794,13 @@ def tokenize_cmd(
     checkpoint: str,
     input_seq_file: str,
     output: str,
-    length: Optional[int],
+    length: int | None,
     num_steps: int,
     temperature: float,
-    device: Optional[str],
-    base_config: Optional[str],
-    model_config: Optional[str],
-    train_config: Optional[str],
+    device: str | None,
+    base_config: str | None,
+    model_config: str | None,
+    train_config: str | None,
 ):
     """Tokenize input sequences into predicted structure tokens.
 
@@ -814,10 +900,10 @@ def untokenize_cmd(
     decoder_preset: str,
     output_dir: str,
     format_: str,
-    device: Optional[str],
-    base_config: Optional[str],
-    model_config: Optional[str],
-    train_config: Optional[str],
+    device: str | None,
+    base_config: str | None,
+    model_config: str | None,
+    train_config: str | None,
 ):
     """Decode structure tokens into 3D coordinates.
 

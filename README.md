@@ -23,23 +23,30 @@ stok design \
 
 ## Generation
 
-Protein generation is split across five focused subcommands. Each takes a
-trained MDLM checkpoint and writes a `manifest.parquet` (plus per-sample PDB
-or mmCIF files when structures are decoded) into an output directory — or, in
-the case of `tokenize`, a single Parquet file.
+Protein generation is split across six focused subcommands. `design`, `fold`,
+`unfold`, `tokenize`, and `untokenize` run against a trained MDLM checkpoint
+and write a `manifest.parquet` (plus per-sample PDB / mmCIF files when
+structures are decoded) into an output directory — or, for `tokenize`, a
+single Parquet file. `encode` is independent of the MDLM model: it runs the
+standalone GCP-VQVAE-parity structure encoder on PDB / mmCIF files and emits a
+Parquet of VQ token indices that can be fed back into `untokenize`.
 
 | Subcommand | Purpose | Input | Output |
 |------------|---------|-------|--------|
 | `design`     | Design new sequences (and optional structures), with optional conditioning | (optional) FASTA / struct token files | `--output-dir` with `manifest.parquet` + per-sample PDB/mmCIF when decoding |
 | `fold`       | Fold input sequences into 3D structures (joint model only) | FASTA file via `--input-seq-file` | `--output-dir` with `manifest.parquet` + per-sample PDB/mmCIF |
-| `unfold`     | Infer sequences from 3D structures (**stubbed** — requires coords→tokens encoder) | PDB/mmCIF file | exits non-zero with a pointer to `untokenize` |
-| `tokenize`   | Sequences → predicted structure tokens (joint model, no decoder) | FASTA file | single Parquet via `--output` |
-| `untokenize` | Structure tokens → decoded 3D coordinates | Parquet from `tokenize` | `--output-dir` with `manifest.parquet` + per-sample PDB/mmCIF |
+| `unfold`     | Infer sequences from 3D structures (**stubbed** — requires an inverse-folding head) | PDB/mmCIF file | exits non-zero with a pointer to `encode` / `untokenize` |
+| `encode`     | Cα coordinates → VQ structure token indices via the GCP-VQVAE-parity `StructureEncoder` | One or more PDB/mmCIF files or a directory | single Parquet via `--output` |
+| `tokenize`   | Sequences → predicted structure tokens (joint MDLM model, no decoder) | FASTA file | single Parquet via `--output` |
+| `untokenize` | Structure tokens → decoded 3D coordinates | Parquet from `encode` or `tokenize` | `--output-dir` with `manifest.parquet` + per-sample PDB/mmCIF |
 
-All commands share `--checkpoint`, `--length`, `--num-steps`, `--temperature`,
-`--device`, and the Hydra-style `--config` / `--model-config` / `--train-config`
-flags. Extra positional arguments are forwarded to Hydra, so
+MDLM-backed commands (`design`, `fold`, `tokenize`, `untokenize`, `unfold`)
+share `--checkpoint`, `--length`, `--num-steps`, `--temperature`, `--device`,
+and the Hydra-style `--config` / `--model-config` / `--train-config` flags.
+Extra positional arguments are forwarded to Hydra, so
 `stok design --checkpoint model.pt model.encoder.d_model=512` still works.
+`encode` is intentionally simpler: it takes `--preset {base,lite}` (or an
+explicit `--weights` path) plus the structure inputs, with no Hydra coupling.
 
 ### Design
 
@@ -86,10 +93,41 @@ stok fold \
 
 ### Unfold
 
-Sequence design for a known structure. This command is **currently stubbed**
-pending integration of a pretrained coordinates→tokens encoder. It exits
-non-zero with a message pointing at `untokenize` as the workaround when
-structure tokens are already available.
+Amino acid sequence inference from a known 3D structure (inverse folding).
+This command is **currently stubbed** pending integration of an inverse-folding
+head; it exits non-zero with a pointer to `encode` / `untokenize` as a
+round-trip workaround when you only need the structure tokens or coordinates
+back, not a predicted sequence.
+
+### Encode
+
+PDB / mmCIF backbone coordinates → VQ structure token indices, via a
+forward-pass-identical port of the GCP-VQVAE encoder (GCPNet → transformer →
+vector quantizer). Runs without an MDLM checkpoint and pulls pretrained
+weights from `huggingface.co/brineylab/STok` on first use:
+
+```bash
+stok encode \
+  --preset base \
+  --input protein_a.pdb \
+  --input protein_b.cif \
+  --output encoded.parquet
+```
+
+`-i` / `--input` can be repeated and accepts either files or directories
+(scanned recursively for `.pdb`, `.ent`, `.cif`, `.mmcif`). Use
+`--preset lite` for the smaller variant, `--weights /path/to/encoder.pt` to
+override the default download, and `--batch-size` / `--device` to control
+throughput. The resulting Parquet has the same `struct_tokens` column that
+`stok tokenize` emits, so it feeds `stok untokenize` directly for an
+`encode → untokenize` round-trip (coords in, coords out through the discrete
+token bottleneck).
+
+Under the hood `encode` uses `stok.models.structure_encoder.StructureEncoder`,
+whose architecture, config, and state-dict layout mirror
+[GCP-VQVAE](https://github.com/mahdip72/vq_encoder_decoder) exactly so that
+upstream `Mahdip72/gcp-vqvae-{large,lite}` checkpoints can be converted via
+`scripts/convert_gcp_vqvae_weights.py` and loaded with `strict=True`.
 
 ### Tokenize
 
@@ -106,10 +144,10 @@ stok tokenize \
 
 ### Untokenize
 
-Structure tokens → 3D coordinates. Reads a Parquet file from `tokenize` (or
-any Parquet with the same schema) and writes per-sample PDB/mmCIF files using
-the geometric decoder. The checkpoint is consulted only to recover the
-codebook tensor:
+Structure tokens → 3D coordinates. Reads a Parquet file from `encode` or
+`tokenize` (or any Parquet with the same `struct_tokens` schema) and writes
+per-sample PDB/mmCIF files using the geometric decoder. The checkpoint is
+consulted only to recover the codebook tensor:
 
 ```bash
 stok untokenize \
@@ -172,7 +210,9 @@ past 9999 samples). Use `--format cif` to write mmCIF files instead of PDB.
 | `structure_file` | str \| null | Path to the per-sample PDB/mmCIF file when written |
 
 `tokenize` writes a single Parquet with the same schema (no per-sample
-structure files) to `--output`.
+structure files) to `--output`. `encode` writes the same
+`sample_id`/`sequence`/`struct_tokens`/`length` columns — a strict subset of
+the manifest schema, which is why it composes directly with `untokenize`.
 
 ### Python API
 
@@ -193,6 +233,22 @@ result = fold(
     output_dir="folded/",
 )
 assert result.coordinates.shape == (1, 9, 3, 3)
+```
+
+For the coordinates → tokens path, `load_encoder` and `encode` are the
+standalone entry points (no MDLM checkpoint required):
+
+```python
+from stok.api import encode, load_encoder
+
+encoder = load_encoder(preset="base")  # downloads weights on first use
+result = encode(
+    ["protein_a.pdb", "protein_b.cif"],
+    encoder=encoder,
+    batch_size=8,
+    output_path="encoded.parquet",
+)
+print(result.sample_ids, [len(t) for t in result.struct_tokens])
 ```
 
 ## Training
@@ -248,17 +304,21 @@ stok smoke-test model.encoder.d_model=512 model.encoder.n_heads=8 model.encoder.
 
 ## Codebook presets
 
-The model uses a frozen VQ codebook for discrete structure tokens. Two built-in presets are available:
+STōk uses a frozen VQ codebook for discrete structure tokens, shared between
+the MDLM model (as a classifier target), the `GeometricDecoder`, and the
+`StructureEncoder` that powers `stok encode`. Two built-in presets are
+available and all three components load the matching variant:
 
-| Preset | Source | Codebook size |
-|--------|--------|---------------|
-| `base` (default) | [GCP-VQVAE Large](https://github.com/mahdip72/vq_encoder_decoder?tab=readme-ov-file#pretrained-models) | 4096 |
-| `lite` | [GCP-VQVAE Lite](https://github.com/mahdip72/vq_encoder_decoder?tab=readme-ov-file#pretrained-models) | 4096 |
+| Preset | Source | Codebook size | Code dim |
+|--------|--------|---------------|----------|
+| `base` (default) | [GCP-VQVAE Large](https://github.com/mahdip72/vq_encoder_decoder?tab=readme-ov-file#pretrained-models) | 4096 | 256 |
+| `lite` | [GCP-VQVAE Lite](https://github.com/mahdip72/vq_encoder_decoder?tab=readme-ov-file#pretrained-models) | 4096 | 128 |
 
 Switch presets:
 
 ```bash
 stok smoke-test model.codebook.preset=lite
+stok encode --preset lite --input protein.pdb --output tokens.parquet
 ```
 
 Use a custom codebook (`.pt` file, shape `[C, d_code]`):

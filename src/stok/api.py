@@ -38,6 +38,7 @@ from stok.utils.tokenizer import Tokenizer
 
 if TYPE_CHECKING:
     from stok.models.decoder import GeometricDecoder
+    from stok.models.structure_encoder import StructureEncoder
 
 logger = logging.getLogger(__name__)
 
@@ -46,13 +47,16 @@ __all__ = [
     "NoiseScheduleConfig",
     "LoadedModel",
     "GenerationResult",
+    "EncodeResult",
     "load_model",
     "load_decoder",
+    "load_encoder",
     "design",
     "fold",
     "unfold",
     "tokenize",
     "untokenize",
+    "encode",
 ]
 
 
@@ -112,7 +116,7 @@ class MDLMModelConfig:
     time_combine: str = "sum"
 
     @classmethod
-    def from_omegaconf(cls, cfg) -> "MDLMModelConfig":
+    def from_omegaconf(cls, cfg) -> MDLMModelConfig:
         """Convert a composed Hydra ``DictConfig`` into a typed config.
 
         Reads the same fields that the previous monolithic generation path
@@ -185,6 +189,23 @@ class LoadedModel(NamedTuple):
     model: MDLMModel
     tokenizer: Tokenizer
     codebook: torch.Tensor | None
+
+
+class EncodeResult(NamedTuple):
+    """Structured result of :func:`encode`.
+
+    Attributes:
+        sample_ids: One identifier per input structure (filename stem
+            when a file path was provided).
+        sequences: One-letter amino-acid sequences as parsed from the
+            structure, trimmed to the encoder's ``max_length``.
+        struct_tokens: Per-sample lists of VQ code indices, already
+            trimmed to each sample's true residue count.
+    """
+
+    sample_ids: list[str]
+    sequences: list[str]
+    struct_tokens: list[list[int]]
 
 
 @dataclass
@@ -294,7 +315,7 @@ def load_decoder(
     *,
     path: Path | str | None = None,
     device: torch.device | str = "cpu",
-) -> "GeometricDecoder":
+) -> GeometricDecoder:
     """Load a pretrained :class:`GeometricDecoder`.
 
     Thin wrapper around :func:`stok.models.decoder.load_pretrained_decoder`
@@ -311,6 +332,36 @@ def load_decoder(
     from stok.models.decoder import load_pretrained_decoder
 
     return load_pretrained_decoder(
+        preset=preset,
+        path=str(path) if path is not None else None,
+        device=device,
+        freeze=True,
+    )
+
+
+def load_encoder(
+    preset: Literal["base", "lite"] = "base",
+    *,
+    path: Path | str | None = None,
+    device: torch.device | str = "cpu",
+) -> StructureEncoder:
+    """Load a pretrained :class:`StructureEncoder` for coordinates → tokens.
+
+    Thin wrapper around
+    :func:`stok.models.structure_encoder.load_pretrained_encoder` with the
+    frozen (eval + no-grad) defaults that make sense for inference.
+
+    Args:
+        preset: Architecture preset name (``"base"`` or ``"lite"``).
+        path: Optional explicit weights path. Overrides download caching.
+        device: Device to move the encoder onto.
+
+    Returns:
+        A frozen :class:`StructureEncoder`.
+    """
+    from stok.models.structure_encoder import load_pretrained_encoder
+
+    return load_pretrained_encoder(
         preset=preset,
         path=str(path) if path is not None else None,
         device=device,
@@ -381,7 +432,7 @@ def _tokenize_to_tensor(
 
 
 def _decode_struct_tokens(
-    decoder: "GeometricDecoder",
+    decoder: GeometricDecoder,
     codebook: torch.Tensor,
     struct_tokens: torch.Tensor,
     device: torch.device,
@@ -471,7 +522,7 @@ def design(
     condition_seq_mask: torch.Tensor | None = None,
     condition_struct: torch.Tensor | None = None,
     condition_struct_mask: torch.Tensor | None = None,
-    decoder: "GeometricDecoder | None" = None,
+    decoder: GeometricDecoder | None = None,
     codebook: torch.Tensor | None = None,
     tokenizer: Tokenizer | None = None,
     output_dir: Path | str | None = None,
@@ -600,7 +651,7 @@ def fold(
     model: MDLMModel,
     *,
     sequences: list[str],
-    decoder: "GeometricDecoder",
+    decoder: GeometricDecoder,
     codebook: torch.Tensor,
     tokenizer: Tokenizer,
     length: int | None = None,
@@ -700,7 +751,7 @@ def tokenize(
 
 
 def untokenize(
-    decoder: "GeometricDecoder",
+    decoder: GeometricDecoder,
     codebook: torch.Tensor,
     *,
     struct_tokens: torch.Tensor,
@@ -776,3 +827,104 @@ def unfold(*args, **kwargs) -> GenerationResult:
         "not yet integrated. Use `untokenize` if you already have structure "
         "tokens, or wait for encoder support."
     )
+
+
+def encode(
+    structures: list[Path | str] | Path | str,
+    *,
+    encoder: StructureEncoder,
+    batch_size: int = 8,
+    device: torch.device | str = "cpu",
+    output_path: Path | str | None = None,
+) -> EncodeResult:
+    """PDB/mmCIF file(s) → VQ structure token indices.
+
+    Runs a pretrained :class:`~stok.models.structure_encoder.StructureEncoder`
+    over one or more structures and returns per-sample token indices trimmed
+    to each input's true sequence length. The encoder's
+    ``max_length`` determines the maximum supported protein length; longer
+    proteins are silently truncated (matching upstream inference behavior).
+
+    Args:
+        structures: A single file path, a directory (recursively scanned for
+            ``.pdb`` / ``.ent`` / ``.cif`` / ``.mmcif``), or a list of paths.
+        encoder: A pretrained :class:`StructureEncoder` (typically built via
+            :func:`load_encoder`).
+        batch_size: Mini-batch size for encoding. Larger batches give better
+            throughput at the cost of memory.
+        device: Device to run the encoder on. The encoder is moved here
+            before encoding.
+        output_path: Optional Parquet file to write results to. The schema
+            is ``(sample_id, sequence, struct_tokens, length)`` — compatible
+            with :func:`untokenize` downstream.
+
+    Returns:
+        An :class:`EncodeResult` with one row per input structure.
+    """
+    from stok.utils.structure_loader import load_structures
+
+    device = torch.device(device) if isinstance(device, str) else device
+    encoder = encoder.to(device).eval()
+
+    if isinstance(structures, (str, Path)):
+        structures_list: list[Path | str] = [structures]
+    else:
+        structures_list = list(structures)
+
+    sample_ids: list[str] = []
+    sequences: list[str] = []
+    struct_tokens_out: list[list[int]] = []
+
+    max_length = encoder.max_length
+
+    for start in range(0, len(structures_list), batch_size):
+        batch_paths = structures_list[start : start + batch_size]
+        loaded = load_structures(batch_paths, max_length=max_length, device=device)
+
+        with torch.inference_mode():
+            out = encoder(loaded.graph, loaded.mask, loaded.nan_mask)
+
+        indices_cpu = out["indices"].detach().cpu()
+        valid_cpu = out["valid"].detach().cpu()
+
+        for i, (pid, seq) in enumerate(zip(loaded.pids, loaded.sequences)):
+            length = int(valid_cpu[i].sum().item())
+            tokens = indices_cpu[i, :length].tolist()
+            sample_ids.append(pid)
+            sequences.append(seq)
+            struct_tokens_out.append(tokens)
+
+    result = EncodeResult(
+        sample_ids=sample_ids,
+        sequences=sequences,
+        struct_tokens=struct_tokens_out,
+    )
+
+    if output_path is not None:
+        _write_encode_manifest(result, Path(output_path))
+
+    return result
+
+
+def _write_encode_manifest(result: EncodeResult, output_path: Path) -> None:
+    """Serialize an :class:`EncodeResult` to the shared manifest schema.
+
+    Columns: ``sample_id``, ``sequence``, ``struct_tokens``, ``length``.
+    The Parquet schema overlaps with :func:`_write_manifest` enough that
+    :func:`untokenize` can ingest the output directly.
+    """
+    import pandas as pd
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    records = [
+        {
+            "sample_id": sid,
+            "sequence": seq,
+            "struct_tokens": tokens,
+            "length": len(tokens),
+        }
+        for sid, seq, tokens in zip(
+            result.sample_ids, result.sequences, result.struct_tokens
+        )
+    ]
+    pd.DataFrame(records).to_parquet(output_path, index=False)
