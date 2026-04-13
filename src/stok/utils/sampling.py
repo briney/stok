@@ -224,6 +224,10 @@ def sample(
     # Initialize sequence tokens
     if condition_seq is not None:
         seq_tokens = condition_seq.clone().to(device)
+        # Derive padding from the initial condition before any mask-id
+        # overwrites, so right-padded variable-length batches (e.g., from
+        # stok.api.fold) are routed correctly through the encoder.
+        key_padding_mask = seq_tokens == seq_pad_id
         if seq_mask_positions is None:
             # Condition is fully provided — nothing to generate for seq
             seq_gen_mask = torch.zeros(B, L, dtype=torch.bool, device=device)
@@ -234,6 +238,10 @@ def sample(
         # Fully masked — generate everything
         seq_tokens = torch.full((B, L), seq_mask_id, dtype=torch.long, device=device)
         seq_gen_mask = torch.ones(B, L, dtype=torch.bool, device=device)
+        key_padding_mask = torch.zeros(B, L, dtype=torch.bool, device=device)
+
+    # Padding positions must never be regenerated
+    seq_gen_mask = seq_gen_mask & ~key_padding_mask
 
     # Initialize structure tokens (joint mode only)
     struct_tokens = None
@@ -252,9 +260,7 @@ def sample(
                 (B, L), struct_mask_id, dtype=torch.long, device=device
             )
             struct_gen_mask = torch.ones(B, L, dtype=torch.bool, device=device)
-
-    # Padding mask: none during generation (no padding in generated sequences)
-    key_padding_mask = torch.zeros(B, L, dtype=torch.bool, device=device)
+        struct_gen_mask = struct_gen_mask & ~key_padding_mask
 
     # Time steps: iterate from t=1 (fully masked) to t=0 (fully unmasked)
     time_steps = torch.linspace(1.0, 0.0, num_steps + 1, device=device)

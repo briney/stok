@@ -189,3 +189,80 @@ class TestJointSampling:
             temperature=0.5,
         )
         assert (result["seq_tokens"] != joint_model.seq_mask_id).all()
+
+
+class TestVariableLengthPadding:
+    """Regression: right-padded variable-length batches (fold-style) must
+    derive ``key_padding_mask`` from ``condition_seq`` so padding positions
+    are neither regenerated nor polluted into the encoder attention.
+    """
+
+    def _padded_condition(self, pad_id: int):
+        # B=2, L=6; second sample has 2 trailing pad positions
+        B, L = 2, 6
+        condition_seq = torch.randint(4, 24, (B, L))
+        condition_seq[1, 4:] = pad_id
+        return condition_seq, B, L
+
+    def test_padded_seq_positions_preserved(self, joint_model):
+        pad_id = joint_model.seq_pad_id
+        condition_seq, B, L = self._padded_condition(pad_id)
+        struct_mask_pos = torch.ones(B, L, dtype=torch.bool)
+
+        result = sample(
+            joint_model, length=L, num_samples=B, num_steps=5,
+            condition_seq=condition_seq,
+            struct_mask_positions=struct_mask_pos,
+        )
+
+        # Padded seq positions must remain as pad_id
+        assert (result["seq_tokens"][1, 4:] == pad_id).all()
+        # Real seq positions must equal the condition (seq not regenerated)
+        assert torch.equal(result["seq_tokens"][0, :], condition_seq[0, :])
+        assert torch.equal(result["seq_tokens"][1, :4], condition_seq[1, :4])
+
+    def test_struct_not_generated_at_padding(self, joint_model):
+        pad_id = joint_model.seq_pad_id
+        struct_mask_id = joint_model.struct_mask_id
+        condition_seq, B, L = self._padded_condition(pad_id)
+        struct_mask_pos = torch.ones(B, L, dtype=torch.bool)
+
+        result = sample(
+            joint_model, length=L, num_samples=B, num_steps=10,
+            condition_seq=condition_seq,
+            struct_mask_positions=struct_mask_pos,
+        )
+
+        # Real positions: struct tokens must have been generated
+        assert (result["struct_tokens"][0, :] != struct_mask_id).all()
+        assert (result["struct_tokens"][1, :4] != struct_mask_id).all()
+        # Padded positions: struct tokens must still be the mask token
+        assert (result["struct_tokens"][1, 4:] == struct_mask_id).all()
+
+    def test_key_padding_mask_reaches_model(self, joint_model):
+        pad_id = joint_model.seq_pad_id
+        condition_seq, B, L = self._padded_condition(pad_id)
+        struct_mask_pos = torch.ones(B, L, dtype=torch.bool)
+
+        captured: list[torch.Tensor] = []
+
+        def hook(_module, _args, kwargs):
+            kpm = kwargs.get("key_padding_mask")
+            if kpm is not None:
+                captured.append(kpm.detach().clone())
+
+        handle = joint_model.register_forward_pre_hook(hook, with_kwargs=True)
+        try:
+            sample(
+                joint_model, length=L, num_samples=B, num_steps=3,
+                condition_seq=condition_seq,
+                struct_mask_positions=struct_mask_pos,
+            )
+        finally:
+            handle.remove()
+
+        assert len(captured) >= 3
+        expected = torch.zeros(B, L, dtype=torch.bool)
+        expected[1, 4:] = True
+        for kpm in captured:
+            assert torch.equal(kpm.cpu(), expected)
