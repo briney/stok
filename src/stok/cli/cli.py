@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+# torch's manylinux wheel pre-loads the system libstdc++.so.6, which on some
+# images lacks GLIBCXX_3.4.32 required by pyarrow's libarrow. First-mapped
+# wins, so pyarrow must bind libstdc++ from $CONDA_PREFIX/lib first.
+import pyarrow  # noqa: F401
+
 from importlib.resources import as_file, files
 from pathlib import Path
 from typing import TYPE_CHECKING
