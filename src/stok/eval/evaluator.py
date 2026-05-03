@@ -301,28 +301,45 @@ class Evaluator:
 
         with torch.no_grad():
             for batch in eval_loader:
-                # Unpack batch
-                if isinstance(batch, (list, tuple)) and len(batch) == 3:
-                    tokens, labels, coords = batch
-                else:
-                    tokens, labels = batch
+                # Unpack batch: mdlm collate returns a dict; other objectives
+                # return a (tokens, labels) or (tokens, labels, coords) tuple.
+                if isinstance(batch, dict):
+                    if self.accelerator is None:
+                        device = _get_model_device(self.model, self.accelerator)
+                        for k, v in batch.items():
+                            if torch.is_tensor(v):
+                                batch[k] = v.to(device)
+                    tokens = batch["seq_tokens"]
+                    labels = batch["seq_targets"]
                     coords = None
 
-                # Move to device if not using accelerator
-                if self.accelerator is None:
-                    device = _get_model_device(self.model, self.accelerator)
-                    tokens = tokens.to(device)
-                    labels = labels.to(device)
-                    if coords is not None:
-                        coords = coords.to(device)
+                    outputs = self.model(**batch)
 
-                # Forward pass (request attention weights if needed for metrics like p_at_l)
-                outputs = self.model(
-                    tokens=tokens,
-                    labels=labels,
-                    ignore_index=ignore_index,
-                    output_attentions=needs_attentions,
-                )
+                    # Inject targets so existing mdlm metrics can read them
+                    # via outputs.get("seq_targets") / outputs.get("struct_targets").
+                    outputs["seq_targets"] = batch["seq_targets"]
+                    if batch.get("struct_targets") is not None:
+                        outputs["struct_targets"] = batch["struct_targets"]
+                else:
+                    if isinstance(batch, (list, tuple)) and len(batch) == 3:
+                        tokens, labels, coords = batch
+                    else:
+                        tokens, labels = batch
+                        coords = None
+
+                    if self.accelerator is None:
+                        device = _get_model_device(self.model, self.accelerator)
+                        tokens = tokens.to(device)
+                        labels = labels.to(device)
+                        if coords is not None:
+                            coords = coords.to(device)
+
+                    outputs = self.model(
+                        tokens=tokens,
+                        labels=labels,
+                        ignore_index=ignore_index,
+                        output_attentions=needs_attentions,
+                    )
 
                 # Decode predictions for structure metrics
                 if (
