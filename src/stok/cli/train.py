@@ -619,6 +619,18 @@ def _build_dataloaders(
             _independent = bool(_mdlm_cfg.get("independent_track_times", True))
             _mdlm_tracks_local = mdlm_tracks or str(_mdlm_cfg.get("tracks", "joint"))
 
+            # Convention: must match stok.models.mdlm.MDLMModel.__init__.
+            _struct_mask_id: int | None = None
+            _struct_pad_id: int | None = None
+            if _mdlm_tracks_local == "joint":
+                if codebook_size is None:
+                    raise ValueError(
+                        "MDLM joint mode requires a codebook to derive "
+                        "struct_mask_id / struct_pad_id; codebook_size is None."
+                    )
+                _struct_mask_id = codebook_size
+                _struct_pad_id = codebook_size + 1
+
             def collate(batch):
                 return mdlm_collate(
                     batch,
@@ -628,6 +640,8 @@ def _build_dataloaders(
                     max_len=max_len,
                     seq_mask_id=_mask_id,
                     seq_pad_id=_pad_id,
+                    struct_mask_id=_struct_mask_id,
+                    struct_pad_id=_struct_pad_id,
                     ignore_index=ignore_index,
                     antithetic_time_sampling=_antithetic,
                     independent_track_times=_independent,
