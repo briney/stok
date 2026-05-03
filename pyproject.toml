@@ -19,7 +19,7 @@ dependencies = [
   "click>=8.1",
   "wandb",
   "accelerate",
-  "tqdm>=4.66",
+  "rich>=13.7",
   "tokenizers",
   "numpy",
   "pandas",
