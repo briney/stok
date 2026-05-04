@@ -1562,17 +1562,23 @@ def run_training(cfg: DictConfig):
                     if avg_struct_loss is not None:
                         msg += f" | loss_struct {avg_struct_loss:.4f}"
                     msg += f" | lr {lr:.2e}"
-                    # Log mean t and mask rate
+                    # Log mean t and mask rate (over eligible positions only,
+                    # so the rate reflects the noise schedule rather than how
+                    # heavily the batch is padded).
                     _t_mean = float(batch["t_seq"].mean().item())
-                    _mask_rate = float(batch["seq_mask"].float().mean().item())
+                    _seq_elig = batch["seq_eligible_mask"]
+                    _seq_denom = float(_seq_elig.sum().clamp(min=1).item())
+                    _mask_rate = float(batch["seq_mask"].sum().item()) / _seq_denom
                     msg += f" | t_mean {_t_mean:.3f} | mask_rate {_mask_rate:.3f}"
                     # Log struct track stats if present
                     if batch.get("t_struct") is not None:
                         _t_struct_mean = float(batch["t_struct"].mean().item())
                         msg += f" | t_struct {_t_struct_mean:.3f}"
                     if batch.get("struct_mask") is not None:
-                        _struct_mask_rate = float(
-                            batch["struct_mask"].float().mean().item()
+                        _struct_elig = batch["struct_eligible_mask"]
+                        _struct_denom = float(_struct_elig.sum().clamp(min=1).item())
+                        _struct_mask_rate = (
+                            float(batch["struct_mask"].sum().item()) / _struct_denom
                         )
                         msg += f" | struct_mask {_struct_mask_rate:.3f}"
                 elif is_mlm:
@@ -1641,16 +1647,20 @@ def run_training(cfg: DictConfig):
                         if _avg_struct_loss is not None:
                             payload["train/loss_struct"] = float(_avg_struct_loss)
                         payload["train/t_seq_mean"] = float(batch["t_seq"].mean().item())
-                        payload["train/mask_rate_seq"] = float(
-                            batch["seq_mask"].float().mean().item()
+                        _seq_elig = batch["seq_eligible_mask"]
+                        _seq_denom = float(_seq_elig.sum().clamp(min=1).item())
+                        payload["train/mask_rate_seq"] = (
+                            float(batch["seq_mask"].sum().item()) / _seq_denom
                         )
                         if batch.get("t_struct") is not None:
                             payload["train/t_struct_mean"] = float(
                                 batch["t_struct"].mean().item()
                             )
                         if batch.get("struct_mask") is not None:
-                            payload["train/mask_rate_struct"] = float(
-                                batch["struct_mask"].float().mean().item()
+                            _struct_elig = batch["struct_eligible_mask"]
+                            _struct_denom = float(_struct_elig.sum().clamp(min=1).item())
+                            payload["train/mask_rate_struct"] = (
+                                float(batch["struct_mask"].sum().item()) / _struct_denom
                             )
                     elif is_mlm:
                         avg_masked_acc = (

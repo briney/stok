@@ -38,8 +38,9 @@ class TestMDLMCollateShapes:
         )
         expected_keys = {
             "seq_tokens", "t_seq", "seq_targets", "seq_mask",
-            "key_padding_mask", "struct_tokens", "t_struct",
-            "struct_targets", "struct_mask",
+            "seq_eligible_mask", "key_padding_mask", "struct_tokens",
+            "t_struct", "struct_targets", "struct_mask",
+            "struct_eligible_mask",
         }
         assert set(result.keys()) == expected_keys
 

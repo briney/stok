@@ -176,8 +176,9 @@ def mdlm_collate(
 
     Returns:
         Dict with keys ``seq_tokens``, ``t_seq``, ``seq_targets``, ``seq_mask``,
-        ``key_padding_mask``, and ``None`` placeholders for struct fields when
-        in seq_only mode.
+        ``seq_eligible_mask``, ``key_padding_mask``, and ``None`` placeholders
+        for struct fields (including ``struct_eligible_mask``) when in seq_only
+        mode.
     """
     special_token_ids = set(tokenizer.all_special_ids)
 
@@ -226,16 +227,23 @@ def mdlm_collate(
     seq_targets = torch.full_like(clean_tokens, ignore_index)
     seq_targets[seq_mask] = clean_tokens[seq_mask]
 
+    # Positions eligible for masking (non-pad, non-special). Used as the
+    # denominator when reporting mask rate so the metric reflects the schedule
+    # rather than how heavily the batch is padded.
+    seq_eligible_mask = ~key_padding_mask & ~special_mask  # [B, L]
+
     result: dict[str, torch.Tensor | None] = {
         "seq_tokens": noised_tokens,
         "t_seq": t_seq,
         "seq_targets": seq_targets,
         "seq_mask": seq_mask,
+        "seq_eligible_mask": seq_eligible_mask,
         "key_padding_mask": key_padding_mask,
         "struct_tokens": None,
         "t_struct": None,
         "struct_targets": None,
         "struct_mask": None,
+        "struct_eligible_mask": None,
     }
 
     # --- Joint mode: noise structure track ---
@@ -304,5 +312,6 @@ def mdlm_collate(
         result["t_struct"] = t_struct
         result["struct_targets"] = struct_targets
         result["struct_mask"] = struct_mask
+        result["struct_eligible_mask"] = ~key_padding_mask & ~struct_special_mask
 
     return result
