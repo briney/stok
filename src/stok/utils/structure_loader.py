@@ -21,16 +21,37 @@ encoder's forward pass takes as key-padding inputs.
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import NamedTuple
 
 import torch
-from graphein.protein.resi_atoms import PROTEIN_ATOMS, STANDARD_AMINO_ACIDS
+import torch.nn.functional as F
+from graphein.protein.resi_atoms import (
+    PROTEIN_ATOMS,
+    STANDARD_AMINO_ACID_MAPPING_1_TO_3,
+    STANDARD_AMINO_ACIDS,
+)
 from torch_geometric.data import Batch, Data
 
-from stok.utils.structure_parser import StructureData, parse_structure
+from stok.utils.featurizer import ProteinFeaturiser
+from stok.utils.gcp_vqvae_preprocessing import (
+    GCPVQVAEStructureSample,
+    parse_gcp_vqvae_samples,
+    prepare_gcp_vqvae_sample,
+)
+from stok.utils.structure_parser import StructureData
 
-__all__ = ["LoadedStructures", "load_structures", "structures_to_batch"]
+__all__ = [
+    "LoadedStructures",
+    "NoAcceptedStructuresError",
+    "load_structures",
+    "structures_to_batch",
+]
+
+
+class NoAcceptedStructuresError(ValueError):
+    """Raised when upstream-compatible filtering accepts no input samples."""
 
 
 class LoadedStructures(NamedTuple):
@@ -83,13 +104,137 @@ def load_structures(
     if not resolved:
         raise ValueError(f"No structure files found at: {paths}")
 
-    parsed = [parse_structure(p) for p in resolved]
-    return structures_to_batch(
-        parsed,
+    samples = [
+        sample
+        for file_index, path in enumerate(resolved)
+        for sample in parse_gcp_vqvae_samples(
+            path,
+            file_index=file_index,
+            max_length=max_length,
+        )
+    ]
+    if not samples:
+        raise NoAcceptedStructuresError(f"No accepted structures found at: {paths}")
+
+    return _gcp_vqvae_samples_to_batch(
+        samples,
         max_length=max_length,
         k=k,
         fill_value=fill_value,
         device=device,
+    )
+
+
+def _gcp_vqvae_samples_to_batch(
+    samples: list[GCPVQVAEStructureSample],
+    *,
+    max_length: int,
+    k: int,
+    fill_value: float,
+    device: torch.device | str | None,
+) -> LoadedStructures:
+    """Prepare and featurize accepted GCP-VQVAE samples on CPU."""
+    prepared_samples = [
+        prepare_gcp_vqvae_sample(sample, max_length=max_length) for sample in samples
+    ]
+
+    data_list: list[Data] = []
+    masks: list[torch.Tensor] = []
+    nan_masks: list[torch.Tensor] = []
+    for sample in prepared_samples:
+        length = len(sample.sequence)
+        x_bb = sample.coords[:, :3]
+        node_scalar_features = _upstream_dihedrals(sample.coords)
+        node_vector_features = torch.cat(
+            [
+                _upstream_orientations(sample.coords[:, 1]),
+                _upstream_sidechains(sample.coords).unsqueeze(-2),
+            ],
+            dim=-2,
+        )
+        node_scalar_features, node_vector_features = map(
+            torch.nan_to_num,
+            (node_scalar_features, node_vector_features),
+        )
+        data_list.append(
+            Data(
+                x=x_bb[:, 1],
+                x_bb=x_bb,
+                seq=torch.tensor(
+                    [_upstream_sequence_index(residue) for residue in sample.sequence],
+                    dtype=torch.long,
+                ),
+                name=sample.pid,
+                h=node_scalar_features,
+                chi=node_vector_features,
+                mask=torch.isfinite(sample.coords.sum(dim=(1, 2))),
+            )
+        )
+
+        mask = torch.zeros(max_length, dtype=torch.bool)
+        mask[:length] = True
+        masks.append(mask)
+
+        nan_mask = torch.zeros(max_length, dtype=torch.bool)
+        nan_mask[:length] = sample.nan_mask
+        nan_masks.append(nan_mask)
+
+    batch: Batch = Batch.from_data_list(data_list)
+    batch.edge_index = _knn_graph(
+        batch.x_bb[:, 1].contiguous(),
+        k=k,
+        batch_index=batch.batch,
+    )
+    batch.edge_type = torch.zeros(batch.edge_index.size(1), dtype=torch.long)
+    batch.edge_index_precomputed = True
+
+    sequences = [sample.sequence for sample in prepared_samples]
+    pids = [sample.pid for sample in prepared_samples]
+    batch.fill_value = torch.full((batch.num_graphs,), fill_value)
+    batch.atom_list = [PROTEIN_ATOMS for _ in range(batch.num_graphs)]
+    batch.id = pids
+    batch.residue_id = [
+        [
+            f"A:{STANDARD_AMINO_ACID_MAPPING_1_TO_3[residue]}:{index}"
+            for index, residue in enumerate(sequence, start=1)
+        ]
+        for sequence in sequences
+    ]
+    batch.residue_type = torch.cat(
+        [
+            torch.tensor([STANDARD_AMINO_ACIDS.index(residue) for residue in sequence])
+            for sequence in sequences
+        ]
+    )
+    batch.residues = [
+        [STANDARD_AMINO_ACID_MAPPING_1_TO_3[residue] for residue in sequence]
+        for sequence in sequences
+    ]
+    batch.chains = torch.zeros_like(batch.batch)
+
+    batch.coords = torch.full(
+        (batch.num_nodes, len(PROTEIN_ATOMS), 3),
+        fill_value,
+        dtype=torch.float32,
+    )
+    batch.coords[:, :3] = batch.x_bb.float()
+    batch._slice_dict["coords"] = batch._slice_dict["x_bb"]
+    batch.seq_pos = torch.cat([torch.arange(len(sequence)).unsqueeze(1) for sequence in sequences])
+
+    with torch.inference_mode():
+        batch = ProteinFeaturiser().eval()(batch)
+    batch.features_precomputed = True
+
+    dev = torch.device(device) if device is not None else torch.device("cpu")
+    batch = batch.to(dev)
+    mask = torch.stack(masks).to(dev)
+    nan_mask = torch.stack(nan_masks).to(dev)
+    return LoadedStructures(
+        graph=batch,
+        mask=mask,
+        nan_mask=nan_mask,
+        pids=pids,
+        sequences=sequences,
     )
 
 
@@ -158,9 +303,7 @@ def structures_to_batch(
         )
         coords_full[:, :3, :] = coords_bb_clean
 
-        residue_type = torch.tensor(
-            [_aa_to_index(ch) for ch in seq], dtype=torch.long
-        )
+        residue_type = torch.tensor([_aa_to_index(ch) for ch in seq], dtype=torch.long)
         seq_pos = torch.arange(length, dtype=torch.long).unsqueeze(1)
 
         # Per-sample Data carrying the raw backbone and the padded 14-atom
@@ -198,9 +341,7 @@ def structures_to_batch(
     # Build kNN_16 edges from Cα positions.
     ca = batch.x_bb[:, 1].contiguous()
     batch.edge_index = _knn_graph(ca, k=k, batch_index=batch.batch)
-    batch.edge_type = torch.zeros(
-        batch.edge_index.size(1), dtype=torch.long
-    )
+    batch.edge_type = torch.zeros(batch.edge_index.size(1), dtype=torch.long)
     batch.num_relation = 1
 
     mask = torch.stack(masks, dim=0)
@@ -255,6 +396,51 @@ def _aa_to_index(ch: str) -> int:
         return 0
 
 
+def _upstream_sequence_index(residue: str) -> int:
+    """Return the categorical index used by upstream graph samples."""
+    return "ARNDCQEGHILKMFPSTWYVX".index(residue)
+
+
+def _normalize_graph_vector(
+    tensor: torch.Tensor,
+    dim: int = -1,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    return torch.nan_to_num(tensor / torch.norm(tensor, dim=dim, keepdim=True).clamp_min(eps))
+
+
+def _upstream_dihedrals(coords: torch.Tensor, eps: float = 1e-7) -> torch.Tensor:
+    flattened = torch.reshape(coords[:, :3], [3 * coords.shape[0], 3])
+    unit = _normalize_graph_vector(flattened[1:] - flattened[:-1], dim=-1)
+    unit_2 = unit[:-2]
+    unit_1 = unit[1:-1]
+    unit_0 = unit[2:]
+
+    normal_2 = _normalize_graph_vector(torch.linalg.cross(unit_2, unit_1), dim=-1)
+    normal_1 = _normalize_graph_vector(torch.linalg.cross(unit_1, unit_0), dim=-1)
+    cosine = torch.sum(normal_2 * normal_1, -1).clamp(-1 + eps, 1 - eps)
+    angles = torch.sign(torch.sum(unit_2 * normal_1, -1)) * torch.acos(cosine)
+    angles = torch.reshape(F.pad(angles, [1, 2]), [-1, 3])
+    return torch.cat([torch.cos(angles), torch.sin(angles)], dim=1)
+
+
+def _upstream_orientations(ca_coords: torch.Tensor) -> torch.Tensor:
+    forward = _normalize_graph_vector(ca_coords[1:] - ca_coords[:-1])
+    backward = _normalize_graph_vector(ca_coords[:-1] - ca_coords[1:])
+    forward = F.pad(forward, [0, 0, 0, 1])
+    backward = F.pad(backward, [0, 0, 1, 0])
+    return torch.cat([forward.unsqueeze(-2), backward.unsqueeze(-2)], dim=-2)
+
+
+def _upstream_sidechains(coords: torch.Tensor) -> torch.Tensor:
+    n_coords, origin, c_coords = coords[:, 0], coords[:, 1], coords[:, 2]
+    c_vector = _normalize_graph_vector(c_coords - origin)
+    n_vector = _normalize_graph_vector(n_coords - origin)
+    bisector = _normalize_graph_vector(c_vector + n_vector)
+    perpendicular = _normalize_graph_vector(torch.linalg.cross(c_vector, n_vector))
+    return -bisector * math.sqrt(1 / 3) - perpendicular * math.sqrt(2 / 3)
+
+
 def _knn_graph(
     x: torch.Tensor,
     k: int,
@@ -297,6 +483,6 @@ def _knn_graph(
         targets.append(tgt.reshape(-1))
     if not sources:
         return torch.zeros((2, 0), dtype=torch.long, device=device)
-    return torch.stack(
-        [torch.cat(sources), torch.cat(targets)], dim=0
-    ).to(device=device, dtype=torch.long)
+    return torch.stack([torch.cat(sources), torch.cat(targets)], dim=0).to(
+        device=device, dtype=torch.long
+    )

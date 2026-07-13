@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
+import torch
 from Bio.Align import PairwiseAligner
 from Bio.PDB import MMCIFParser, PDBParser
 from Bio.PDB.Polypeptide import PPBuilder
@@ -26,6 +27,13 @@ PREPROCESS_MAX_CONSECUTIVE_MISSING = 15
 PREPROCESS_USE_GAP_ESTIMATION = True
 PREPROCESS_GAP_THRESHOLD = 5
 PREPROCESS_SIMILARITY_THRESHOLD = 0.90
+
+BOND_LENGTHS = {
+    "N-CA": 1.458,
+    "CA-C": 1.525,
+    "C-O": 1.231,
+    "C-N": 1.329,
+}
 
 UPSTREAM_AA_MAP = {
     "CYS": "C",
@@ -63,7 +71,9 @@ _GLOBAL_IDENTITY_ALIGNER = PairwiseAligner(
 )
 
 __all__ = [
+    "BOND_LENGTHS",
     "GCPVQVAEStructureSample",
+    "PreparedGCPVQVAESample",
     "PREPROCESS_GAP_THRESHOLD",
     "PREPROCESS_MAX_CONSECUTIVE_MISSING",
     "PREPROCESS_MAX_MISSING_RATIO",
@@ -72,9 +82,14 @@ __all__ = [
     "PREPROCESS_USE_GAP_ESTIMATION",
     "UPSTREAM_AA_MAP",
     "estimate_missing_from_distance",
+    "enforce_backbone_bonds",
+    "enforce_ca_spacing",
     "evaluate_missing_content",
+    "handle_nan_coordinates",
     "parse_gcp_vqvae_samples",
+    "prepare_gcp_vqvae_sample",
     "propagate_nan_residues",
+    "recenter_coordinates",
     "sequence_similarity",
 ]
 
@@ -88,6 +103,179 @@ class GCPVQVAEStructureSample:
     coords: np.ndarray
     chain_id: str
     source_path: str
+
+
+@dataclass(frozen=True)
+class PreparedGCPVQVAESample:
+    """One accepted sample after upstream-compatible coordinate preparation."""
+
+    pid: str
+    sequence: str
+    coords: torch.Tensor
+    nan_mask: torch.Tensor
+
+
+def enforce_backbone_bonds(
+    coords: torch.Tensor,
+    changed: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Enforce upstream ideal backbone bonds around generated coordinates."""
+    n_residues = coords.size(0)
+    for index in range(n_residues):
+        for atom_a, atom_b, key in (
+            (0, 1, "N-CA"),
+            (1, 2, "CA-C"),
+            (2, 3, "C-O"),
+        ):
+            if changed is None or changed[index, atom_a] or changed[index, atom_b]:
+                if torch.isnan(coords[index, atom_b]).any():
+                    if atom_a > 0:
+                        vector = coords[index, atom_a] - coords[index, atom_a - 1]
+                    else:
+                        vector = coords[index, atom_a + 1] - coords[index, atom_a]
+                else:
+                    vector = coords[index, atom_b] - coords[index, atom_a]
+                norm = vector.norm(dim=-1, keepdim=True)
+                if norm.item() > 1e-6:
+                    coords[index, atom_b] = (
+                        coords[index, atom_a] + vector / norm * BOND_LENGTHS[key]
+                    )
+
+        if index < n_residues - 1:
+            if changed is None or changed[index, 2] or changed[index + 1, 0]:
+                vector = coords[index + 1, 0] - coords[index, 2]
+                norm = vector.norm(dim=-1, keepdim=True)
+                if norm > 1e-6:
+                    coords[index + 1, 0] = coords[index, 2] + vector / norm * BOND_LENGTHS["C-N"]
+    return coords
+
+
+def enforce_ca_spacing(
+    coords: torch.Tensor,
+    changed: torch.Tensor | None = None,
+    ideal: float = 3.8,
+) -> torch.Tensor:
+    """Enforce upstream C-alpha spacing around generated residues."""
+    n_residues = coords.size(0)
+    if changed is not None:
+        residue_changed = changed.any(dim=1)
+    else:
+        residue_changed = torch.ones(n_residues, dtype=torch.bool, device=coords.device)
+
+    for index in range(n_residues - 1):
+        if changed is not None and not residue_changed[index] and not residue_changed[index + 1]:
+            continue
+        ca_i = coords[index, 1]
+        ca_j = coords[index + 1, 1]
+        vector = ca_j - ca_i
+        distance = vector.norm()
+        if distance > 1e-6:
+            delta = vector * ((distance - ideal) / distance)
+            if changed is not None and not residue_changed[index]:
+                coords[index + 1] = coords[index + 1] - delta
+            elif changed is not None and not residue_changed[index + 1]:
+                coords[index] = coords[index] + delta
+            else:
+                coords[index] = coords[index] + delta / 2
+                coords[index + 1] = coords[index + 1] - delta / 2
+    return coords
+
+
+def handle_nan_coordinates(coords: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fill four-atom NaN coordinates using the installed upstream algorithm."""
+    atom_nan_mask = torch.isnan(coords).any(dim=-1)
+    if not atom_nan_mask.any():
+        return coords, coords.new_ones(coords.size(0), dtype=torch.bool)
+
+    coords = coords.clone()
+    _n_residues, n_atoms, _ = coords.shape
+    for atom in range(n_atoms):
+        flat = coords[:, atom].clone()
+        mask = atom_nan_mask[:, atom]
+        valid = torch.where(~mask)[0]
+        if valid.numel() == 0:
+            flat[:] = 0.0
+        else:
+            first, last = valid[0].item(), valid[-1].item()
+            flat[:first] = flat[first]
+            flat[last + 1 :] = flat[last]
+            for start, end in zip(valid[:-1], valid[1:]):
+                gap = end - start - 1
+                if gap > 0:
+                    vector = flat[end] - flat[start]
+                    distance = vector.norm().item()
+                    target_length = gap * 3.8
+                    if target_length > distance:
+                        unit = vector / distance
+                        temp = torch.tensor([1, 0, 0], device=vector.device, dtype=vector.dtype)
+                        if abs((unit * temp).sum()) > 0.9:
+                            temp = torch.tensor([0, 1, 0], device=vector.device, dtype=vector.dtype)
+                        normal = torch.linalg.cross(unit, temp)
+                        normal = normal / normal.norm()
+
+                        height_squared = (target_length / math.pi) ** 2 - (distance / 2) ** 2
+                        if height_squared < 0:
+                            weights = torch.linspace(
+                                0,
+                                1,
+                                gap + 2,
+                                device=flat.device,
+                                dtype=flat.dtype,
+                            )[1:-1].unsqueeze(1)
+                            flat[start + 1 : end] = (
+                                flat[start] * (1 - weights) + flat[end] * weights
+                            )
+                            continue
+
+                        height = height_squared**0.5
+                        for offset in range(1, gap + 1):
+                            theta = offset * math.pi / (gap + 1)
+                            distance_j = distance * offset / (gap + 1)
+                            height_j = height * math.sin(theta)
+                            flat[start + offset] = (
+                                flat[start] + distance_j * unit + height_j * normal
+                            )
+                    else:
+                        weights = torch.linspace(
+                            0,
+                            1,
+                            gap + 2,
+                            device=flat.device,
+                            dtype=flat.dtype,
+                        )[1:-1].unsqueeze(1)
+                        flat[start + 1 : end] = flat[start] * (1 - weights) + flat[end] * weights
+        coords[:, atom] = flat
+
+    coords = enforce_ca_spacing(coords, changed=atom_nan_mask)
+    coords = enforce_backbone_bonds(coords, changed=atom_nan_mask)
+    return coords, ~atom_nan_mask.any(dim=1)
+
+
+def recenter_coordinates(coords: torch.Tensor) -> torch.Tensor:
+    """Recenter a complete four-atom tensor using the mean over every atom."""
+    return coords - coords.view(-1, 3).mean(dim=0)
+
+
+def prepare_gcp_vqvae_sample(
+    sample: GCPVQVAEStructureSample,
+    *,
+    max_length: int,
+) -> PreparedGCPVQVAESample:
+    """Normalize, trim, fill, and recenter one accepted structure sample."""
+    sequence = sample.sequence
+    for residue in ("U", "O", "B", "Z"):
+        sequence = sequence.replace(residue, "X")
+    sequence = sequence[:max_length]
+
+    coords = torch.as_tensor(sample.coords, dtype=torch.float32)[:max_length]
+    coords, nan_mask = handle_nan_coordinates(coords)
+    coords = recenter_coordinates(coords)
+    return PreparedGCPVQVAESample(
+        pid=sample.pid,
+        sequence=sequence,
+        coords=coords,
+        nan_mask=nan_mask,
+    )
 
 
 def sequence_similarity(seq1: str, seq2: str) -> float:

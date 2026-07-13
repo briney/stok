@@ -3,7 +3,9 @@
 from pathlib import Path
 
 import numpy as np
+import torch
 
+import stok.utils.gcp_vqvae_preprocessing as preprocessing
 from stok.utils.gcp_vqvae_preprocessing import (
     GCPVQVAEStructureSample,
     estimate_missing_from_distance,
@@ -172,3 +174,36 @@ def test_upstream_helper_semantics():
     assert propagate_nan_residues(coords) == 1
     assert np.isnan(coords[0]).all()
     assert np.isnan(coords[1]).all()
+
+
+def test_prepare_sample_fills_nan_normalizes_trims_and_recenters_like_upstream():
+    coords = np.zeros((6, 4, 3), dtype=np.float32)
+    atom_offsets = np.asarray([0.0, 1.458, 2.983, 4.214], dtype=np.float32)
+    coords[:, :, 0] = np.arange(6, dtype=np.float32)[:, None] * 3.8 + atom_offsets
+    coords[:, :, 1] = np.asarray([0.0, 0.2, -0.1, 0.8], dtype=np.float32)
+    coords[2] = np.nan
+    original = coords.copy()
+    sample = GCPVQVAEStructureSample(
+        pid="sample",
+        sequence="AUOBZA",
+        coords=coords,
+        chain_id="A",
+        source_path="sample.cif",
+    )
+
+    prepared = preprocessing.prepare_gcp_vqvae_sample(sample, max_length=5)
+
+    assert prepared.pid == "sample"
+    assert prepared.sequence == "AXXXX"
+    assert prepared.coords.shape == (5, 4, 3)
+    assert prepared.coords.dtype == torch.float32
+    assert torch.isfinite(prepared.coords).all()
+    assert prepared.nan_mask.dtype == torch.bool
+    assert prepared.nan_mask.tolist() == [True, True, False, True, True]
+    torch.testing.assert_close(
+        prepared.coords.reshape(-1, 3).mean(0),
+        torch.zeros(3),
+        rtol=0.0,
+        atol=1e-6,
+    )
+    np.testing.assert_array_equal(coords, original)

@@ -15,6 +15,140 @@ pytest.importorskip("x_transformers")
 pytest.importorskip("graphein")
 
 
+def _gcp_sample(pid: str, sequence: str, ca_positions: list[float]):
+    from stok.utils.gcp_vqvae_preprocessing import GCPVQVAEStructureSample
+
+    coords = np.zeros((len(sequence), 4, 3), dtype=np.float32)
+    atom_offsets = np.asarray([0.0, 1.458, 2.983, 4.214], dtype=np.float32)
+    coords[:, :, 0] = np.asarray(ca_positions, dtype=np.float32)[:, None] + atom_offsets
+    coords[:, :, 1] = np.asarray([0.0, 0.2, -0.1, 0.8], dtype=np.float32)
+    return GCPVQVAEStructureSample(
+        pid=pid,
+        sequence=sequence,
+        coords=coords,
+        chain_id="A",
+        source_path="input.cif",
+    )
+
+
+def test_load_structures_flattens_samples_and_precomputes_upstream_graph_on_cpu(
+    monkeypatch, tmp_path: Path
+) -> None:
+    import stok.utils.gcp_vqvae_preprocessing as preprocessing
+    import stok.utils.structure_loader as loader
+
+    path = tmp_path / "input.cif"
+    path.write_text("fixture")
+    samples = [
+        _gcp_sample("0_input_chain_id_A", "AUXXAA", [0.0, 2.0, 5.0, 9.0, 14.0, 20.0]),
+        _gcp_sample("0_input_chain_id_B", "GGGGG", [10.0, 14.0, 19.0, 25.0, 32.0]),
+    ]
+
+    def fake_parser(parsed_path, *, file_index: int, max_length: int):
+        assert parsed_path == path
+        assert file_index == 0
+        assert max_length == 8
+        return samples
+
+    monkeypatch.setattr(loader, "parse_gcp_vqvae_samples", fake_parser)
+
+    loaded = loader.load_structures(path, max_length=8, k=2, device="cpu")
+
+    assert loaded.pids == ["0_input_chain_id_A", "0_input_chain_id_B"]
+    assert loaded.sequences == ["AXXXAA", "GGGGG"]
+    assert loaded.mask.tolist() == [
+        [True, True, True, True, True, True, False, False],
+        [True, True, True, True, True, False, False, False],
+    ]
+    for field in ("x", "x_vector_attr", "edge_attr", "edge_vector_attr"):
+        assert getattr(loaded.graph, field).device.type == "cpu"
+    assert loaded.graph.features_precomputed is True
+    assert {"x", "x_bb", "seq", "name", "h", "chi", "mask"} <= set(loaded.graph.keys())
+    assert "num_nodes" not in loaded.graph.keys()
+    assert {"x", "x_bb", "seq", "name", "h", "chi", "mask", "coords"} <= set(
+        loaded.graph._slice_dict
+    )
+    assert torch.equal(
+        loaded.graph._slice_dict["coords"],
+        loaded.graph._slice_dict["x_bb"],
+    )
+    assert loaded.graph._slice_dict["coords"].tolist() == [0, 6, 11]
+
+    import torch_cluster
+
+    expected_edges = torch_cluster.knn_graph(
+        loaded.graph.x_bb[:, 1].contiguous(),
+        k=2,
+        batch=loaded.graph.batch,
+        loop=False,
+    )
+    assert torch.equal(loaded.graph.edge_index, expected_edges)
+
+    prepared = preprocessing.prepare_gcp_vqvae_sample(samples[0], max_length=8)
+    torch.testing.assert_close(loaded.graph.coords[:6, :3], prepared.coords[:, :3])
+    assert torch.all(loaded.graph.coords[:6, 3:] == 1e-5)
+    assert not torch.all(prepared.coords[:, 3] == 1e-5)
+
+
+def test_load_structures_featurizes_on_cpu_before_requested_transfer(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from torch_geometric.data import Data
+
+    import stok.utils.structure_loader as loader
+
+    path = tmp_path / "input.cif"
+    path.write_text("fixture")
+    sample = _gcp_sample("0_input", "AAAAA", [0.0, 2.0, 5.0, 9.0, 14.0])
+    monkeypatch.setattr(
+        loader,
+        "parse_gcp_vqvae_samples",
+        lambda _path, *, file_index, max_length: [sample],
+    )
+
+    events: list[str] = []
+    original_forward = loader.ProteinFeaturiser.forward
+    original_tensor_to = torch.Tensor.to
+
+    def spy_forward(self, graph):
+        assert graph.coords.device.type == "cpu"
+        events.append("featurize")
+        return original_forward(self, graph)
+
+    def fake_batch_to(self, device, *args, **kwargs):
+        events.append(f"batch.to:{device}")
+        return self
+
+    def fake_tensor_to(self, *args, **kwargs):
+        device = args[0] if args else kwargs.get("device")
+        if str(device) == "cuda:0":
+            return self
+        return original_tensor_to(self, *args, **kwargs)
+
+    monkeypatch.setattr(loader.ProteinFeaturiser, "forward", spy_forward)
+    monkeypatch.setattr(Data, "to", fake_batch_to)
+    monkeypatch.setattr(torch.Tensor, "to", fake_tensor_to)
+
+    loader.load_structures(path, max_length=8, k=2, device="cuda:0")
+
+    assert events == ["featurize", "batch.to:cuda:0"]
+
+
+def test_load_structures_raises_when_no_samples_are_accepted(monkeypatch, tmp_path: Path) -> None:
+    import stok.utils.structure_loader as loader
+
+    path = tmp_path / "rejected.cif"
+    path.write_text("fixture")
+    monkeypatch.setattr(
+        loader,
+        "parse_gcp_vqvae_samples",
+        lambda _path, *, file_index, max_length: [],
+    )
+
+    with pytest.raises(loader.NoAcceptedStructuresError, match="No accepted structures"):
+        loader.load_structures(path, device="cpu")
+
+
 # ---------------------------------------------------------------------------
 # Presets + instantiation
 # ---------------------------------------------------------------------------
@@ -225,12 +359,8 @@ def test_conversion_strips_upstream_gcpnet_wrapper() -> None:
         "gcpnet.gcp_embedding.node_embedding.scalar_out.weight",
         "featurizer.positional_encoding.frequency",
     }
-    assert torch.equal(
-        remapped["gcpnet.gcp_embedding.node_embedding.scalar_out.weight"], tensor
-    )
-    assert torch.equal(
-        remapped["featurizer.positional_encoding.frequency"], torch.arange(4)
-    )
+    assert torch.equal(remapped["gcpnet.gcp_embedding.node_embedding.scalar_out.weight"], tensor)
+    assert torch.equal(remapped["featurizer.positional_encoding.frequency"], torch.arange(4))
 
 
 # ---------------------------------------------------------------------------
