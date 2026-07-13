@@ -1,10 +1,12 @@
 import hashlib
 import importlib.util
 import json
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pandas as pd
 import pytest
 import torch
@@ -848,6 +850,27 @@ def test_resume_reuses_only_compatible_successful_records(monkeypatch, tmp_path)
     assert capture_calls == ["reference", "reference", "reference", "reference"]
 
 
+def test_numpy_tolerances_are_normalized_to_canonical_builtin_context(monkeypatch, tmp_path):
+    input_dir, input_paths = _write_inputs(tmp_path, count=1)
+    capture_calls = _install_runner_mocks(monkeypatch, tmp_path, input_paths, input_paths)
+    config = runner.QualificationConfig(
+        input_dir=input_dir,
+        output_dir=tmp_path / "output",
+        rtol=np.float32(0.25),
+        atol=np.float64(0.125),
+    )
+
+    runner.run_qualification(config)
+    numpy_context = json.loads((config.output_dir / "run_context.json").read_text())
+    runner.run_qualification(replace(config, rtol=0.25, atol=0.125))
+    builtin_context = json.loads((config.output_dir / "run_context.json").read_text())
+
+    assert numpy_context["rtol"] == 0.25
+    assert numpy_context["atol"] == 0.125
+    assert numpy_context["context_sha256"] == builtin_context["context_sha256"]
+    assert capture_calls == ["reference"]
+
+
 def test_storage_unsafe_cached_metrics_are_recomputed_before_report_and_parquet(
     monkeypatch, tmp_path
 ):
@@ -1098,6 +1121,53 @@ def test_imported_upstream_source_state_hashes_python_tree_and_ignores_pycache(
     assert third["code_sha256"] != first["code_sha256"]
     assert third["dirty"] is True
     assert third["git_commit"] == "a" * 40
+
+
+def test_git_source_state_ignores_bytecode_but_tracks_added_and_modified_python(
+    tmp_path,
+):
+    repository = tmp_path / "editable"
+    source_root = repository / "gcp_vqvae"
+    source_root.mkdir(parents=True)
+    (source_root / "__init__.py").write_text("VALUE = 1\n")
+
+    def git(*arguments):
+        return subprocess.run(
+            ["git", "-C", str(repository), *arguments],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    git("init", "--quiet")
+    git("config", "user.name", "Parity Test")
+    git("config", "user.email", "parity@example.invalid")
+    git("add", "gcp_vqvae/__init__.py")
+    git("commit", "--quiet", "-m", "initial")
+
+    clean = runner._capture_git_source_state(source_root)
+    pycache = source_root / "__pycache__"
+    pycache.mkdir()
+    (pycache / "module.cpython-312.pyc").write_bytes(b"transient")
+    (source_root / "legacy.pyo").write_bytes(b"optimized")
+    bytecode_only = runner._capture_git_source_state(source_root)
+
+    implementation = source_root / "model.py"
+    implementation.write_text("MODEL_VALUE = 1\n")
+    source_added = runner._capture_git_source_state(source_root)
+    git("add", "gcp_vqvae/model.py")
+    git("commit", "--quiet", "-m", "add model")
+    clean_after_add = runner._capture_git_source_state(source_root)
+    implementation.write_text("MODEL_VALUE = 2\n")
+    source_modified = runner._capture_git_source_state(source_root)
+
+    assert clean["dirty"] is False
+    assert bytecode_only == clean
+    assert source_added["dirty"] is True
+    assert source_added["status_sha256"] != bytecode_only["status_sha256"]
+    assert clean_after_add["dirty"] is False
+    assert source_modified["dirty"] is True
+    assert source_modified["status_sha256"] != clean_after_add["status_sha256"]
 
 
 def test_editable_upstream_source_change_forces_resume_recomputation(monkeypatch, tmp_path):

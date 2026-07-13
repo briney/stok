@@ -11,9 +11,9 @@ import subprocess
 import traceback
 import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from numbers import Real
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import pandas as pd
@@ -413,7 +413,7 @@ def _compare_public_stok_path(
     return [_success("public.preprocessing"), indices, embeddings]
 
 
-def _validate_config(config: QualificationConfig) -> None:
+def _validate_config(config: QualificationConfig) -> QualificationConfig:
     if config.preset == "lite" and config.hf_repo_id == "Mahdip72/gcp-vqvae-large":
         raise ValueError("The lite preset requires --hf-repo-id Mahdip72/gcp-vqvae-lite")
     if type(config.batch_size) is not int or config.batch_size != 1:
@@ -440,6 +440,7 @@ def _validate_config(config: QualificationConfig) -> None:
             or tolerance < 0
         ):
             raise ValueError(f"{name} must be a finite nonnegative real number")
+    return replace(config, rtol=float(config.rtol), atol=float(config.atol))
 
 
 def _require_float32(module: torch.nn.Module, *, name: str) -> None:
@@ -625,6 +626,7 @@ def _capture_git_source_state(source_root: Path) -> dict[str, Any]:
                 "git",
                 "status",
                 "--porcelain=v1",
+                "-z",
                 "--untracked-files=all",
                 "--",
                 relative_source,
@@ -641,11 +643,12 @@ def _capture_git_source_state(source_root: Path) -> dict[str, Any]:
         if commit_result is not None and commit_result.returncode == 0
         else None
     )
-    status = (
+    raw_status = (
         status_result.stdout
         if status_result is not None and status_result.returncode == 0
         else None
     )
+    status = _filter_transient_git_status(raw_status) if raw_status is not None else None
     return {
         "git_root": str(git_root),
         "git_commit": commit,
@@ -654,6 +657,36 @@ def _capture_git_source_state(source_root: Path) -> dict[str, Any]:
         if status is not None
         else None,
     }
+
+
+def _is_transient_bytecode_path(path: str) -> bool:
+    parsed = PurePosixPath(path)
+    return "__pycache__" in parsed.parts or parsed.suffix.lower() in {".pyc", ".pyo"}
+
+
+def _filter_transient_git_status(status: str) -> str:
+    fields = status.split("\0")
+    filtered: list[str] = []
+    index = 0
+    while index < len(fields):
+        entry = fields[index]
+        index += 1
+        if not entry:
+            continue
+        paths = [entry[3:]] if len(entry) >= 4 else []
+        rename_path = None
+        status_code = entry[:2]
+        if ("R" in status_code or "C" in status_code) and index < len(fields):
+            rename_path = fields[index]
+            index += 1
+            if rename_path:
+                paths.append(rename_path)
+        if paths and all(_is_transient_bytecode_path(path) for path in paths):
+            continue
+        filtered.append(entry)
+        if rename_path:
+            filtered.append(rename_path)
+    return "".join(f"{field}\0" for field in filtered)
 
 
 def _capture_imported_source_state(module_name: str) -> dict[str, Any]:
@@ -903,7 +936,7 @@ def _append_metrics(
 
 
 def run_qualification(config: QualificationConfig) -> RunSummary:
-    _validate_config(config)
+    config = _validate_config(config)
     transaction = _begin_transaction(config.output_dir.resolve())
     configure_determinism(config.seed)
     device = require_cuda(config.device)
