@@ -16,6 +16,7 @@ from scripts.gcp_vqvae_parity.common import (
     select_shard,
     sha256_file,
 )
+from scripts.gcp_vqvae_parity.preprocessing import build_preprocessing_audit
 
 
 def test_discover_inputs_is_sorted_and_hashed(tmp_path):
@@ -321,3 +322,50 @@ def test_atomic_write_json_replaces_target(tmp_path):
     atomic_write_json(target, {"status": "second"})
     assert json.loads(target.read_text()) == {"status": "second"}
     assert not target.with_suffix(".json.tmp").exists()
+
+
+def test_preprocessing_audit_preserves_all_reference_samples(tmp_path):
+    path = tmp_path / "complex.cif"
+    path.write_text("structure")
+    inputs = discover_inputs(tmp_path)
+    reference_samples = [
+        {
+            "source_path": str(path),
+            "pid": "0_complex_chain_id_A",
+            "seq": "AC",
+            "coords": [[[0.0] * 3] * 4] * 2,
+        },
+        {
+            "source_path": str(path),
+            "pid": "0_complex_chain_id_B",
+            "seq": "GGG",
+            "coords": [[[0.0] * 3] * 4] * 3,
+        },
+    ]
+
+    records = build_preprocessing_audit(
+        inputs,
+        reference_samples,
+        stok_parser=lambda _: SimpleNamespace(protein_sequence="AC", chain_id="A"),
+    )
+
+    assert len(records) == 1
+    assert [sample.pid for sample in records[0].reference_samples] == [
+        "0_complex_chain_id_A",
+        "0_complex_chain_id_B",
+    ]
+    assert records[0].stok_sequence == "AC"
+    assert records[0].stok_chain_id == "A"
+
+
+def test_preprocessing_audit_records_parser_exception(tmp_path):
+    path = tmp_path / "bad.cif"
+    path.write_text("structure")
+
+    def fail(_):
+        raise ImportError("three_to_one")
+
+    record = build_preprocessing_audit(discover_inputs(tmp_path), [], stok_parser=fail)[0]
+    assert record.stok_error_type == "ImportError"
+    assert record.stok_error_message == "three_to_one"
+    assert record.stok_sequence is None
