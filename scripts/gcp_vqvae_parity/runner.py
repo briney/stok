@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -11,6 +12,7 @@ import traceback
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from numbers import Real
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +31,7 @@ from .common import (
     discover_inputs,
     require_cuda,
     select_shard,
+    sha256_file,
 )
 from .metrics import compare_floats, compare_indices
 from .preprocessing import build_preprocessing_audit
@@ -43,7 +46,8 @@ from .stages import (
 from .types import MAX_STORAGE_INTEGER, TensorComparison
 from .weights import audit_weight_parity, convert_checkpoint, resolve_hf_revision
 
-RECORD_SCHEMA_VERSION = 3
+RECORD_SCHEMA_VERSION = 4
+CONVERTER_SCHEMA_VERSION = 1
 PUBLIC_STAGES = (
     "public.preprocessing",
     "public.indices",
@@ -412,18 +416,30 @@ def _compare_public_stok_path(
 def _validate_config(config: QualificationConfig) -> None:
     if config.preset == "lite" and config.hf_repo_id == "Mahdip72/gcp-vqvae-large":
         raise ValueError("The lite preset requires --hf-repo-id Mahdip72/gcp-vqvae-lite")
-    if config.batch_size != 1:
+    if type(config.batch_size) is not int or config.batch_size != 1:
         raise ValueError("The primary qualification requires batch_size=1")
-    if config.seed != 0:
+    if type(config.seed) is not int or config.seed != 0:
         raise ValueError("The primary qualification requires seed=0")
-    if config.num_shards < 1:
-        raise ValueError("num_shards must be at least 1")
-    if config.shard_index < 0 or config.shard_index >= config.num_shards:
+    if type(config.num_shards) is not int or not 1 <= config.num_shards <= MAX_STORAGE_INTEGER:
+        raise ValueError("num_shards must be a storage-safe positive integer")
+    if (
+        type(config.shard_index) is not int
+        or not 0 <= config.shard_index <= MAX_STORAGE_INTEGER
+        or config.shard_index >= config.num_shards
+    ):
         raise ValueError(f"shard_index must be in [0, {config.num_shards})")
-    if config.max_samples is not None and config.max_samples < 0:
-        raise ValueError("max_samples must be nonnegative")
-    if config.rtol < 0 or config.atol < 0:
-        raise ValueError("rtol and atol must be nonnegative")
+    if config.max_samples is not None and (
+        type(config.max_samples) is not int or not 0 <= config.max_samples <= MAX_STORAGE_INTEGER
+    ):
+        raise ValueError("max_samples must be a storage-safe nonnegative integer or None")
+    for name, tolerance in (("rtol", config.rtol), ("atol", config.atol)):
+        if (
+            isinstance(tolerance, bool)
+            or not isinstance(tolerance, Real)
+            or not math.isfinite(tolerance)
+            or tolerance < 0
+        ):
+            raise ValueError(f"{name} must be a finite nonnegative real number")
 
 
 def _require_float32(module: torch.nn.Module, *, name: str) -> None:
@@ -446,6 +462,50 @@ def _manifest_fingerprint(records: Sequence[Any]) -> str:
 def _canonical_fingerprint(payload: Any) -> str:
     serialized = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(serialized).hexdigest()
+
+
+def _converted_checkpoint_key(*, preset: str, resolved_revision: str, upstream_sha256: str) -> str:
+    return _canonical_fingerprint(
+        {
+            "converter_schema_version": CONVERTER_SCHEMA_VERSION,
+            "preset": preset,
+            "resolved_revision": resolved_revision,
+            "upstream_sha256": upstream_sha256,
+        }
+    )
+
+
+def _ensure_converted_checkpoint(
+    *,
+    checkpoints_dir: Path,
+    preset: str,
+    resolved_revision: str,
+    upstream_path: Path,
+) -> tuple[Path, str]:
+    upstream_sha256 = sha256_file(upstream_path)
+    conversion_key = _converted_checkpoint_key(
+        preset=preset,
+        resolved_revision=resolved_revision,
+        upstream_sha256=upstream_sha256,
+    )
+    converted_path = checkpoints_dir / f"encoder-{preset}-{conversion_key}.pt"
+    if converted_path.exists():
+        return converted_path, conversion_key
+
+    temporary_path = converted_path.with_name(f".{converted_path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        convert_checkpoint(
+            preset=preset,
+            upstream_path=upstream_path,
+            output_path=temporary_path,
+        )
+        if not temporary_path.is_file():
+            raise RuntimeError("Checkpoint converter did not create its requested output")
+        os.replace(temporary_path, converted_path)
+    finally:
+        if temporary_path.exists():
+            temporary_path.unlink()
+    return converted_path, conversion_key
 
 
 def _classify_reference_samples(
@@ -528,6 +588,128 @@ def _relevant_source_paths(project_root: Path) -> list[Path]:
     return sorted(source_paths)
 
 
+def _capture_git_source_state(source_root: Path) -> dict[str, Any]:
+    try:
+        root_result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=source_root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        root_result = None
+    if root_result is None or root_result.returncode != 0:
+        return {
+            "git_root": None,
+            "git_commit": None,
+            "dirty": False,
+            "status_sha256": None,
+        }
+
+    git_root = Path(root_result.stdout.strip()).resolve()
+    try:
+        relative_source = source_root.resolve().relative_to(git_root).as_posix()
+    except ValueError:
+        relative_source = str(source_root.resolve())
+    try:
+        commit_result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=git_root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        status_result = subprocess.run(
+            [
+                "git",
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+                "--",
+                relative_source,
+            ],
+            cwd=git_root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        commit_result = status_result = None
+    commit = (
+        commit_result.stdout.strip()
+        if commit_result is not None and commit_result.returncode == 0
+        else None
+    )
+    status = (
+        status_result.stdout
+        if status_result is not None and status_result.returncode == 0
+        else None
+    )
+    return {
+        "git_root": str(git_root),
+        "git_commit": commit,
+        "dirty": bool(status),
+        "status_sha256": hashlib.sha256(status.encode()).hexdigest()
+        if status is not None
+        else None,
+    }
+
+
+def _capture_imported_source_state(module_name: str) -> dict[str, Any]:
+    try:
+        spec = importlib.util.find_spec(module_name)
+    except (ImportError, ModuleNotFoundError, ValueError):
+        spec = None
+    origin = None if spec is None else spec.origin
+    locations = None if spec is None else spec.submodule_search_locations
+    if locations:
+        source_root = Path(next(iter(locations))).resolve()
+    elif origin and origin not in {"built-in", "frozen"}:
+        source_root = Path(origin).resolve().parent
+    else:
+        source_root = None
+
+    source_paths = (
+        sorted(
+            path
+            for path in source_root.rglob("*.py")
+            if path.is_file() and "__pycache__" not in path.parts
+        )
+        if source_root is not None and source_root.is_dir()
+        else []
+    )
+    digest = hashlib.sha256()
+    for path in source_paths:
+        relative = path.relative_to(source_root).as_posix().encode()
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        content = path.read_bytes()
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+
+    git_state = (
+        _capture_git_source_state(source_root)
+        if source_root is not None
+        else {
+            "git_root": None,
+            "git_commit": None,
+            "dirty": False,
+            "status_sha256": None,
+        }
+    )
+    return {
+        "module": module_name,
+        "origin": str(Path(origin).resolve())
+        if origin and origin not in {"built-in", "frozen"}
+        else origin,
+        "root": str(source_root) if source_root is not None else None,
+        "code_sha256": digest.hexdigest(),
+        "file_count": len(source_paths),
+        **git_state,
+    }
+
+
 def _capture_source_state() -> dict[str, Any]:
     project_root = Path(__file__).resolve().parents[2]
     source_paths = _relevant_source_paths(project_root)
@@ -568,6 +750,7 @@ def _capture_source_state() -> dict[str, Any]:
         "status_sha256": hashlib.sha256(status.encode()).hexdigest(),
         "code_sha256": digest.hexdigest(),
         "file_count": len(source_paths),
+        "upstream_vq_encoder_decoder": _capture_imported_source_state("gcp_vqvae"),
     }
 
 
@@ -584,6 +767,7 @@ def _record_context(
     pid: str,
     sequence: str | None,
     sample_ordinal: int | None,
+    conversion_key: str,
 ) -> dict[str, Any]:
     sequence_sha256 = None
     if sequence is not None:
@@ -612,6 +796,8 @@ def _record_context(
         "atol": config.atol,
         "upstream_sha256": weight_audit.upstream_sha256,
         "stok_sha256": weight_audit.stok_sha256,
+        "converter_schema_version": CONVERTER_SCHEMA_VERSION,
+        "conversion_key": conversion_key,
         "required_core_stages": list(CANONICAL_STAGES),
         "required_public_stages": list(PUBLIC_STAGES),
         "source_path": source_path,
@@ -625,12 +811,23 @@ def _record_context(
 def _record_path(
     samples_dir: Path,
     *,
+    source_path: str,
     pid: str,
     source_sha256: str,
     sample_ordinal: int | None,
 ) -> Path:
-    identity = f"{source_sha256}\0{pid}\0{sample_ordinal}"
-    suffix = hashlib.sha256(identity.encode()).hexdigest()[:16]
+    canonical_source_path = (
+        source_path
+        if source_path.startswith("<") and source_path.endswith(">")
+        else str(Path(source_path).resolve())
+    )
+    identity = {
+        "source_path": canonical_source_path,
+        "source_sha256": source_sha256,
+        "pid": pid,
+        "sample_ordinal": sample_ordinal,
+    }
+    suffix = _canonical_fingerprint(identity)[:16]
     name = _safe_name(pid).strip("._")[:80] or "sample"
     return samples_dir / f"{name}-{suffix}.json"
 
@@ -762,13 +959,12 @@ def run_qualification(config: QualificationConfig) -> RunSummary:
     _require_float32(wrapper.model, name="reference model")
 
     upstream_path = Path(wrapper.checkpoint_path)
-    converted_path = checkpoints_dir / f"encoder-{config.preset}.pt"
-    if not converted_path.exists():
-        convert_checkpoint(
-            preset=config.preset,
-            upstream_path=upstream_path,
-            output_path=converted_path,
-        )
+    converted_path, conversion_key = _ensure_converted_checkpoint(
+        checkpoints_dir=checkpoints_dir,
+        preset=config.preset,
+        resolved_revision=resolved_revision,
+        upstream_path=upstream_path,
+    )
     weight_audit = audit_weight_parity(upstream_path, converted_path)
     atomic_write_json(output_dir / "weights.json", weight_audit.to_dict())
     if not weight_audit.passed:
@@ -795,6 +991,8 @@ def run_qualification(config: QualificationConfig) -> RunSummary:
         "atol": config.atol,
         "upstream_sha256": weight_audit.upstream_sha256,
         "stok_sha256": weight_audit.stok_sha256,
+        "converter_schema_version": CONVERTER_SCHEMA_VERSION,
+        "conversion_key": conversion_key,
         "required_core_stages": list(CANONICAL_STAGES),
         "required_public_stages": list(PUBLIC_STAGES),
     }
@@ -867,9 +1065,11 @@ def run_qualification(config: QualificationConfig) -> RunSummary:
             pid=entry.pid,
             sequence=entry.sequence,
             sample_ordinal=entry.dataset_index,
+            conversion_key=conversion_key,
         )
         sample_path = _record_path(
             samples_dir,
+            source_path=entry.source_path,
             pid=entry.pid,
             source_sha256=entry.source_sha256,
             sample_ordinal=entry.dataset_index,
@@ -920,9 +1120,11 @@ def run_qualification(config: QualificationConfig) -> RunSummary:
                 pid=pid,
                 sequence=None,
                 sample_ordinal=None,
+                conversion_key=conversion_key,
             )
             sample_path = _record_path(
                 samples_dir,
+                source_path=source_path_text,
                 pid=pid,
                 source_sha256=input_record.sha256,
                 sample_ordinal=None,
@@ -981,9 +1183,11 @@ def run_qualification(config: QualificationConfig) -> RunSummary:
                 pid=pid,
                 sequence=sequence,
                 sample_ordinal=sample_ordinal,
+                conversion_key=conversion_key,
             )
             sample_path = _record_path(
                 samples_dir,
+                source_path=source_path_text,
                 pid=pid,
                 source_sha256=input_record.sha256,
                 sample_ordinal=sample_ordinal,

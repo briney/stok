@@ -1,3 +1,5 @@
+import hashlib
+import importlib.util
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -177,6 +179,77 @@ def test_qualification_config_defaults_to_primary_protocol(tmp_path):
     assert config.rtol == 1e-5
     assert config.atol == 1e-6
     assert config.resume is True
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "overrides"),
+    [
+        ("num_shards", True, {}),
+        ("num_shards", 1.5, {}),
+        ("num_shards", 0, {}),
+        ("num_shards", -1, {}),
+        ("num_shards", 2**100, {}),
+        ("shard_index", True, {"num_shards": 2}),
+        ("shard_index", 0.5, {}),
+        ("shard_index", -1, {}),
+        ("shard_index", 2**100, {"num_shards": 2**63 - 1}),
+        ("batch_size", True, {}),
+        ("batch_size", 1.0, {}),
+        ("seed", False, {}),
+        ("seed", 0.0, {}),
+        ("max_samples", True, {}),
+        ("max_samples", 0.5, {}),
+        ("max_samples", -1, {}),
+        ("max_samples", 2**100, {}),
+    ],
+)
+def test_config_rejects_noninteger_or_storage_unsafe_persisted_integer_fields(
+    tmp_path, field, value, overrides
+):
+    config = runner.QualificationConfig(
+        input_dir=tmp_path,
+        output_dir=tmp_path / "output",
+        **overrides,
+    )
+
+    with pytest.raises(ValueError, match=field):
+        runner._validate_config(replace(config, **{field: value}))
+
+
+def test_storage_unsafe_num_shards_fails_before_transaction_or_parquet(tmp_path):
+    output_dir = tmp_path / "output"
+    config = runner.QualificationConfig(
+        input_dir=tmp_path,
+        output_dir=output_dir,
+        num_shards=2**100,
+    )
+
+    with pytest.raises(ValueError, match="num_shards"):
+        runner.run_qualification(config)
+
+    assert not output_dir.exists()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("rtol", True),
+        ("rtol", "1e-5"),
+        ("rtol", float("inf")),
+        ("rtol", float("nan")),
+        ("rtol", -1e-5),
+        ("atol", True),
+        ("atol", "1e-6"),
+        ("atol", float("inf")),
+        ("atol", float("nan")),
+        ("atol", -1e-6),
+    ],
+)
+def test_config_rejects_nonreal_nonfinite_or_negative_tolerances(tmp_path, field, value):
+    config = runner.QualificationConfig(input_dir=tmp_path, output_dir=tmp_path / "output")
+
+    with pytest.raises(ValueError, match=field):
+        runner._validate_config(replace(config, **{field: value}))
 
 
 def test_failed_sample_accounts_for_every_required_stage():
@@ -594,6 +667,109 @@ def test_run_accounts_for_manifest_input_missing_from_reference_dataset(monkeypa
     assert len(pd.read_parquet(output_dir / "preprocessing_comparison.parquet")) == 2
 
 
+def test_same_content_pid_and_ordinal_from_distinct_paths_get_distinct_records(
+    monkeypatch, tmp_path
+):
+    input_dir, input_paths = _write_inputs(tmp_path, count=2)
+    for path in input_paths:
+        path.write_text("IDENTICAL\n")
+    samples = [
+        {
+            "pid": "duplicate-pid",
+            "source_path": str(path.resolve()),
+            "seq": "ACD",
+        }
+        for path in input_paths
+    ]
+    _install_runner_mocks(
+        monkeypatch,
+        tmp_path,
+        input_paths,
+        [],
+        samples=samples,
+    )
+    output_dir = tmp_path / "output"
+
+    summary = runner.run_qualification(
+        runner.QualificationConfig(input_dir=input_dir, output_dir=output_dir)
+    )
+
+    assert summary.status is RunStatus.FULLY_QUALIFIED
+    published_records = sorted((output_dir / "samples").glob("*.json"))
+    assert len(published_records) == 2
+    manifest = pd.read_parquet(output_dir / "sample_manifest.parquet")
+    assert len(manifest) == 2
+    assert manifest["record_path"].nunique() == 2
+    assert set(manifest["source_path"]) == {str(path.resolve()) for path in input_paths}
+
+
+def test_upstream_checkpoint_change_uses_distinct_content_addressed_conversions(
+    monkeypatch, tmp_path
+):
+    input_dir, input_paths = _write_inputs(tmp_path, count=1)
+    capture_calls = _install_runner_mocks(monkeypatch, tmp_path, input_paths, input_paths)
+    upstream_path = tmp_path / "upstream.pt"
+    conversion_calls = []
+
+    def content_digest(path):
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+    def convert(*, preset, upstream_path, output_path):
+        del preset
+        conversion_calls.append(content_digest(upstream_path))
+        output_path.write_bytes(b"converted:" + Path(upstream_path).read_bytes())
+        return output_path
+
+    def audit(upstream_path, converted_path):
+        return WeightAudit(
+            upstream_sha256=content_digest(upstream_path),
+            stok_sha256=content_digest(converted_path),
+            compared=1,
+            missing=[],
+            unexpected=[],
+            different=[],
+            passed=True,
+        )
+
+    monkeypatch.setattr(runner, "convert_checkpoint", convert)
+    monkeypatch.setattr(runner, "audit_weight_parity", audit)
+    config = runner.QualificationConfig(input_dir=input_dir, output_dir=tmp_path / "output")
+
+    runner.run_qualification(config)
+    first_sha256 = content_digest(upstream_path)
+    upstream_path.write_bytes(b"upstream-second-source")
+    runner.run_qualification(config)
+    second_sha256 = content_digest(upstream_path)
+
+    assert conversion_calls == [first_sha256, second_sha256]
+    assert capture_calls == ["reference", "reference"]
+    cached = sorted((config.output_dir / ".cache" / "checkpoints").glob("encoder-base-*.pt"))
+    assert len(cached) == 2
+    assert {path.read_bytes() for path in cached} == {
+        b"converted:upstream",
+        b"converted:upstream-second-source",
+    }
+
+
+def test_failed_conversion_does_not_publish_partial_checkpoint(monkeypatch, tmp_path):
+    input_dir, input_paths = _write_inputs(tmp_path, count=1)
+    _install_runner_mocks(monkeypatch, tmp_path, input_paths, input_paths)
+
+    def fail_after_partial_write(*, preset, upstream_path, output_path):
+        del preset, upstream_path
+        output_path.write_bytes(b"partial")
+        raise RuntimeError("controlled conversion failure")
+
+    monkeypatch.setattr(runner, "convert_checkpoint", fail_after_partial_write)
+    config = runner.QualificationConfig(input_dir=input_dir, output_dir=tmp_path / "output")
+
+    with pytest.raises(RuntimeError, match="controlled conversion failure"):
+        runner.run_qualification(config)
+
+    checkpoint_cache = config.output_dir / ".cache" / "checkpoints"
+    assert list(checkpoint_cache.iterdir()) == []
+
+
 def test_sample_cap_is_reported_as_incomplete(monkeypatch, tmp_path):
     input_dir, input_paths = _write_inputs(tmp_path)
     _install_runner_mocks(monkeypatch, tmp_path, input_paths, input_paths)
@@ -875,6 +1051,92 @@ def test_source_fingerprint_covers_converter_harness_and_production_runtime():
     assert "src/stok/models/structure_encoder.py" in relative_paths
     assert "src/stok/utils/structure_loader.py" in relative_paths
     assert "src/stok/utils/structure_parser.py" in relative_paths
+
+
+def test_imported_upstream_source_state_hashes_python_tree_and_ignores_pycache(
+    monkeypatch, tmp_path
+):
+    source_root = tmp_path / "editable" / "gcp_vqvae"
+    source_root.mkdir(parents=True)
+    origin = source_root / "__init__.py"
+    implementation = source_root / "model.py"
+    origin.write_text("from .model import VALUE\n")
+    implementation.write_text("VALUE = 1\n")
+    spec = SimpleNamespace(
+        origin=str(origin),
+        submodule_search_locations=[str(source_root)],
+    )
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: spec)
+    git_state = {
+        "git_root": str((tmp_path / "editable").resolve()),
+        "git_commit": "a" * 40,
+        "dirty": False,
+        "status_sha256": "0" * 64,
+    }
+    monkeypatch.setattr(
+        runner,
+        "_capture_git_source_state",
+        lambda root: dict(git_state),
+        raising=False,
+    )
+    capture = getattr(runner, "_capture_imported_source_state", None)
+    assert capture is not None
+
+    first = capture("gcp_vqvae")
+    pycache = source_root / "__pycache__"
+    pycache.mkdir()
+    (pycache / "model.cpython-312.pyc").write_bytes(b"transient-one")
+    second = capture("gcp_vqvae")
+    (pycache / "model.cpython-312.pyc").write_bytes(b"transient-two")
+    implementation.write_text("VALUE = 2\n")
+    git_state.update(dirty=True, status_sha256="1" * 64)
+    third = capture("gcp_vqvae")
+
+    assert first["root"] == str(source_root.resolve())
+    assert first["file_count"] == 2
+    assert first["code_sha256"] == second["code_sha256"]
+    assert third["code_sha256"] != first["code_sha256"]
+    assert third["dirty"] is True
+    assert third["git_commit"] == "a" * 40
+
+
+def test_editable_upstream_source_change_forces_resume_recomputation(monkeypatch, tmp_path):
+    input_dir, input_paths = _write_inputs(tmp_path, count=1)
+    capture_calls = _install_runner_mocks(monkeypatch, tmp_path, input_paths, input_paths)
+    upstream_state = {
+        "module": "gcp_vqvae",
+        "origin": "/editable/gcp_vqvae/__init__.py",
+        "root": "/editable/gcp_vqvae",
+        "code_sha256": "4" * 64,
+        "file_count": 10,
+        "git_root": "/editable",
+        "git_commit": "e" * 40,
+        "dirty": False,
+        "status_sha256": "0" * 64,
+    }
+    monkeypatch.setattr(
+        runner,
+        "_capture_imported_source_state",
+        lambda module_name: dict(upstream_state),
+        raising=False,
+    )
+    config = runner.QualificationConfig(input_dir=input_dir, output_dir=tmp_path / "output")
+
+    runner.run_qualification(config)
+    runner.run_qualification(config)
+    assert capture_calls == ["reference"]
+
+    upstream_state.update(
+        code_sha256="5" * 64,
+        dirty=True,
+        status_sha256="6" * 64,
+    )
+    runner.run_qualification(config)
+
+    assert capture_calls == ["reference", "reference"]
+    source_state = json.loads((config.output_dir / "source_state.json").read_text())
+    assert source_state["upstream_vq_encoder_decoder"]["code_sha256"] == "5" * 64
+    assert source_state["upstream_vq_encoder_decoder"]["dirty"] is True
 
 
 def test_malformed_reference_metadata_is_accounted_without_aborting(monkeypatch, tmp_path):
