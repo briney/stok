@@ -188,3 +188,6 @@ cython_debug/
 
 # Local subagent workflow state
 .superpowers/
+
+# Local qualification artifacts
+.qualification/
