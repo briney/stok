@@ -29,6 +29,15 @@ _RENAME_RULES = (
     ("vqvae.vector_quantizer.", "vector_quantizer."),
     ("encoder.", "gcpnet."),
 )
+# Complete parameter/buffer roots of the converted StructureEncoder state.
+# ``featurizer.`` is excluded because it has no upstream checkpoint weights.
+_TARGET_IDENTITY_PREFIXES = (
+    "gcpnet.",
+    "encoder_tail.",
+    "encoder_blocks.",
+    "encoder_head.",
+    "vector_quantizer.",
+)
 
 
 @dataclass(frozen=True)
@@ -88,9 +97,9 @@ def _source_destination(source: str) -> str | None:
     for source_prefix, destination_prefix in _RENAME_RULES:
         if source.startswith(source_prefix):
             return destination_prefix + source.removeprefix(source_prefix)
-    if source.startswith("vqvae."):
-        raise ValueError(f"Uncategorized upstream key: {source}")
-    return source
+    if source.startswith(_TARGET_IDENTITY_PREFIXES):
+        return source
+    raise ValueError(f"Uncategorized upstream key: {source}")
 
 
 def _build_source_mapping(state: dict[str, torch.Tensor]) -> dict[str, str]:

@@ -17,7 +17,6 @@ def _upstream_state():
         "vqvae.vector_quantizer._codebook.embed": torch.arange(8, dtype=torch.float32).reshape(
             1, 4, 2
         ),
-        "shared_scale": torch.tensor(0.5),
         "vqvae.decoder.block.weight": torch.ones(1),
         "vqvae.ntp_projector_head.weight": torch.ones(1),
         "vqvae.markov_transition_head.weight": torch.ones(1),
@@ -37,7 +36,6 @@ def _converted_state():
         "vector_quantizer._codebook.embed": state[
             "vqvae.vector_quantizer._codebook.embed"
         ],
-        "shared_scale": state["shared_scale"],
     }
 
 
@@ -112,7 +110,7 @@ def test_audit_accounts_for_every_systematic_drop_and_rename(tmp_path):
     assert audit.missing == []
     assert audit.unexpected == []
     assert audit.different == []
-    assert audit.compared == 6
+    assert audit.compared == 5
     assert audit.upstream_sha256 == sha256_file(upstream_path)
     assert audit.stok_sha256 == sha256_file(stok_path)
 
@@ -139,7 +137,7 @@ def test_audit_weight_parity_reports_sorted_missing_tensors(tmp_path):
 
     assert audit.passed is False
     assert audit.missing == ["encoder_head.0.weight", "gcpnet.layer.weight"]
-    assert audit.compared == 4
+    assert audit.compared == 3
 
 
 def test_audit_weight_parity_reports_sorted_unexpected_tensors(tmp_path):
@@ -152,7 +150,7 @@ def test_audit_weight_parity_reports_sorted_unexpected_tensors(tmp_path):
 
     assert audit.passed is False
     assert audit.unexpected == ["aaa.unexpected", "zzz.unexpected"]
-    assert audit.compared == 6
+    assert audit.compared == 5
 
 
 def test_audit_weight_parity_reports_shape_mismatch(tmp_path):
@@ -222,6 +220,40 @@ def test_audit_rejects_uncategorized_upstream_key(tmp_path):
 
     with pytest.raises(ValueError, match=r"Uncategorized upstream key: vqvae\.unknown\.weight"):
         audit_weight_parity(upstream_path, stok_path)
+
+
+def test_audit_rejects_unknown_non_vqvae_source_key(tmp_path):
+    upstream = _upstream_state()
+    upstream["mystery.weight"] = torch.ones(1)
+    upstream_path, stok_path = _save_checkpoint_pair(tmp_path, upstream=upstream)
+
+    with pytest.raises(ValueError, match=r"Uncategorized upstream key: mystery\.weight"):
+        audit_weight_parity(upstream_path, stok_path)
+
+
+@pytest.mark.parametrize(
+    "identity_key",
+    [
+        "gcpnet.layer.weight",
+        "encoder_tail.0.bias",
+        "encoder_blocks.layer.weight",
+        "encoder_head.0.weight",
+        "vector_quantizer._codebook.embed",
+    ],
+)
+def test_audit_accepts_legitimate_model_identity_key_exactly(tmp_path, identity_key):
+    state = {identity_key: torch.arange(3, dtype=torch.float32)}
+    upstream_path, stok_path = _save_checkpoint_pair(
+        tmp_path,
+        upstream=state,
+        converted={identity_key: state[identity_key].clone()},
+    )
+
+    audit = audit_weight_parity(upstream_path, stok_path)
+
+    assert audit.passed is True
+    assert audit.compared == 1
+    assert audit.different == []
 
 
 def test_audit_rejects_duplicate_destination_targets(tmp_path):
