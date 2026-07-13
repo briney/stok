@@ -11,6 +11,20 @@ import torch.nn as nn
 from .metrics import compare_floats, compare_indices
 from .types import TensorComparison
 
+CANONICAL_STAGES = (
+    "featurizer.x",
+    "featurizer.x_vector_attr",
+    "featurizer.edge_attr",
+    "featurizer.edge_vector_attr",
+    "gcpnet",
+    "encoder_tail",
+    "encoder_blocks",
+    "encoder_head",
+    "indices",
+    "embeddings",
+    "valid",
+)
+
 
 @dataclass(frozen=True)
 class StageCapture:
@@ -37,14 +51,14 @@ def capture_module_outputs(
     captured: dict[str, torch.Tensor] = {}
     transforms = transforms or {}
     handles = []
-    for name, module in modules.items():
-
-        def hook(_module, _inputs, output, *, stage=name):
-            value = transforms.get(stage, _extract_tensor)(output)
-            captured[stage] = value.detach().clone().cpu()
-
-        handles.append(module.register_forward_hook(hook))
     try:
+        for name, module in modules.items():
+
+            def hook(_module, _inputs, output, *, stage=name):
+                value = transforms.get(stage, _extract_tensor)(output)
+                captured[stage] = value.detach().clone().cpu()
+
+            handles.append(module.register_forward_hook(hook))
         invoke()
     finally:
         for handle in handles:
@@ -65,6 +79,12 @@ def _vq_embeddings(output: Any) -> torch.Tensor:
     return output[0]
 
 
+def _canonical_capture(tensors: Mapping[str, torch.Tensor], *, implementation: str) -> StageCapture:
+    _validate_stage_keys(tensors, implementation=implementation)
+    return StageCapture(tensors={name: tensors[name] for name in CANONICAL_STAGES})
+
+
+@torch.inference_mode()
 def capture_reference_stages(wrapper: Any, batch: Mapping[str, Any]) -> StageCapture:
     super_model = wrapper.model
     if super_model is None:
@@ -104,9 +124,10 @@ def capture_reference_stages(wrapper: Any, batch: Mapping[str, Any]) -> StageCap
     tensors.update(captured)
     tensors["indices"] = output["indices"].detach().clone().cpu()
     tensors["embeddings"] = output["embeddings"].detach().clone().cpu()
-    return StageCapture(tensors=tensors)
+    return _canonical_capture(tensors, implementation="reference")
 
 
+@torch.inference_mode()
 def capture_stok_stages(encoder: nn.Module, batch: Mapping[str, Any]) -> StageCapture:
     from stok.utils.batching import unbatch_and_pad
 
@@ -119,13 +140,12 @@ def capture_stok_stages(encoder: nn.Module, batch: Mapping[str, Any]) -> StageCa
         for field in ("x", "x_vector_attr", "edge_attr", "edge_vector_attr")
     }
 
-    with torch.inference_mode():
-        node_embedding = encoder.gcpnet(canonical_graph)["node_embedding"]
-        x = unbatch_and_pad(node_embedding, canonical_graph.batch, encoder.max_length)
-        tail = encoder.encoder_tail(x.transpose(1, 2)).transpose(1, 2)
-        blocks = encoder.encoder_blocks(tail, mask=valid)
-        head = encoder.encoder_head(blocks.transpose(1, 2)).transpose(1, 2)
-        embeddings, indices, _ = encoder.vector_quantizer(head, mask=valid)
+    node_embedding = encoder.gcpnet(canonical_graph)["node_embedding"]
+    x = unbatch_and_pad(node_embedding, canonical_graph.batch, encoder.max_length)
+    tail = encoder.encoder_tail(x.transpose(1, 2)).transpose(1, 2)
+    blocks = encoder.encoder_blocks(tail, mask=valid)
+    head = encoder.encoder_head(blocks.transpose(1, 2)).transpose(1, 2)
+    embeddings, indices, _ = encoder.vector_quantizer(head, mask=valid)
 
     tensors.update(
         {
@@ -138,7 +158,18 @@ def capture_stok_stages(encoder: nn.Module, batch: Mapping[str, Any]) -> StageCa
             "valid": valid.detach().clone().cpu(),
         }
     )
-    return StageCapture(tensors=tensors)
+    return _canonical_capture(tensors, implementation="stok")
+
+
+def _validate_stage_keys(tensors: Mapping[str, torch.Tensor], *, implementation: str) -> None:
+    required = set(CANONICAL_STAGES)
+    actual = set(tensors)
+    missing = sorted(required - actual)
+    unexpected = sorted(actual - required)
+    if missing or unexpected:
+        raise ValueError(
+            f"{implementation} stage keys invalid: missing={missing}, unexpected={unexpected}"
+        )
 
 
 def compare_stage_captures(
@@ -148,22 +179,17 @@ def compare_stage_captures(
     rtol: float,
     atol: float,
 ) -> list[TensorComparison]:
-    reference_keys = set(reference.tensors)
-    stok_keys = set(stok.tensors)
-    if reference_keys != stok_keys:
-        raise ValueError(
-            f"Stage key mismatch: missing={sorted(reference_keys - stok_keys)}, "
-            f"unexpected={sorted(stok_keys - reference_keys)}"
-        )
+    _validate_stage_keys(reference.tensors, implementation="reference")
+    _validate_stage_keys(stok.tensors, implementation="stok")
     valid_ref = reference.tensors["valid"]
     valid_stok = stok.tensors["valid"]
     comparisons: list[TensorComparison] = []
-    for name in sorted(reference_keys - {"valid"}):
+    for name in CANONICAL_STAGES:
         lhs = reference.tensors[name]
         rhs = stok.tensors[name]
         if name == "indices":
             comparisons.append(compare_indices(name, lhs, rhs, valid_ref, valid_stok))
-        elif name == "embeddings":
+        elif name in {"embeddings", "valid"}:
             result = compare_floats(name, lhs, rhs, rtol=0.0, atol=0.0)
             comparisons.append(result)
         else:
