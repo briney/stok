@@ -2,9 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import os
 import re
+import shutil
+import subprocess
 import traceback
-from collections.abc import Sequence
+import uuid
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -38,11 +43,61 @@ from .stages import (
 from .types import TensorComparison
 from .weights import audit_weight_parity, convert_checkpoint, resolve_hf_revision
 
-RECORD_SCHEMA_VERSION = 1
+RECORD_SCHEMA_VERSION = 2
 PUBLIC_STAGES = (
     "public.preprocessing",
     "public.indices",
     "public.embeddings",
+)
+_RECORD_KEYS = frozenset(
+    {
+        "pid",
+        "source_path",
+        "context",
+        "error_type",
+        "error_message",
+        "traceback",
+        "failure_artifact_error_type",
+        "failure_artifact_error_message",
+        "core",
+        "public",
+    }
+)
+_COMPARISON_KEYS = frozenset(
+    {
+        "name",
+        "shape",
+        "compared",
+        "mismatched",
+        "exact",
+        "passed",
+        "mask_equal",
+        "finite_pattern_equal",
+        "within_tolerance",
+        "max_abs",
+        "max_rel",
+        "p50_abs",
+        "p95_abs",
+        "p99_abs",
+    }
+)
+_PUBLIC_ARTIFACTS = (
+    "summary.json",
+    "report.md",
+    "completion.json",
+    "input_manifest.parquet",
+    "environment.json",
+    "source_state.json",
+    "run_context.json",
+    "reference.json",
+    "weights.json",
+    "preprocessing_comparison.parquet",
+    "metrics.parquet",
+    "sample_manifest.parquet",
+    "qualification_manifest.parquet",
+    "samples",
+    "failures",
+    "checkpoints",
 )
 
 
@@ -64,6 +119,81 @@ class QualificationConfig:
     resume: bool = True
 
 
+@dataclass(frozen=True)
+class _ReferenceEntry:
+    dataset_index: int
+    source_path: str
+    source_sha256: str
+    pid: str
+    sequence: str | None
+    error_message: str | None
+
+
+@dataclass(frozen=True)
+class _RunTransaction:
+    root: Path
+    staging: Path
+    cache: Path
+    run_id: str
+
+    def bind_context(self, context_sha256: str) -> _RunTransaction:
+        run_id = f"run-{context_sha256[:16]}-{uuid.uuid4().hex}"
+        staging = self.root / ".runs" / f".{run_id}.staging"
+        self.staging.replace(staging)
+        return _RunTransaction(
+            root=self.root,
+            staging=staging,
+            cache=self.cache,
+            run_id=run_id,
+        )
+
+    def publish(self) -> None:
+        destination = self.root / ".runs" / self.run_id
+        self.staging.replace(destination)
+        temporary_link = self.root / ".current.tmp"
+        if temporary_link.is_symlink() or temporary_link.exists():
+            temporary_link.unlink()
+        temporary_link.symlink_to(Path(".runs") / self.run_id, target_is_directory=True)
+        os.replace(temporary_link, self.root / "current")
+
+
+def _remove_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
+
+
+def _begin_transaction(root: Path) -> _RunTransaction:
+    root.mkdir(parents=True, exist_ok=True)
+    cache = root / ".cache"
+    for directory in (cache / "samples", cache / "failures", cache / "checkpoints"):
+        directory.mkdir(parents=True, exist_ok=True)
+    current = root / "current"
+    previous_run = None
+    if current.is_symlink() or current.exists():
+        try:
+            previous_run = current.resolve(strict=True)
+        except OSError:
+            previous_run = None
+        _remove_path(current)
+    if previous_run is not None:
+        for published_record in (previous_run / "samples").glob("*.json"):
+            shutil.copy2(published_record, cache / "samples" / published_record.name)
+    for name in _PUBLIC_ARTIFACTS:
+        public_path = root / name
+        expected_target = Path("current") / name
+        if public_path.is_symlink() and Path(os.readlink(public_path)) == expected_target:
+            continue
+        if public_path.is_symlink() or public_path.exists():
+            _remove_path(public_path)
+        public_path.symlink_to(expected_target)
+    run_id = f"run-{uuid.uuid4().hex}"
+    staging = root / ".runs" / f".{run_id}.staging"
+    staging.mkdir(parents=True, exist_ok=False)
+    return _RunTransaction(root=root, staging=staging, cache=cache, run_id=run_id)
+
+
 def _safe_name(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", value)
 
@@ -72,7 +202,7 @@ def _failure(name: str) -> TensorComparison:
     return TensorComparison(
         name=name,
         shape=(),
-        compared=0,
+        compared=1,
         mismatched=1,
         exact=False,
         passed=False,
@@ -97,6 +227,53 @@ def _success(name: str) -> TensorComparison:
 
 
 def _comparison_from_dict(payload: dict[str, Any]) -> TensorComparison:
+    if type(payload) is not dict or set(payload) != _COMPARISON_KEYS:
+        raise ValueError("Comparison record keys are incomplete or unexpected")
+    name = payload["name"]
+    shape = payload["shape"]
+    if type(name) is not str or not name:
+        raise ValueError("Comparison name must be a nonempty string")
+    if type(shape) not in (list, tuple) or any(
+        type(dimension) is not int or dimension < 0 for dimension in shape
+    ):
+        raise ValueError("Comparison shape must contain nonnegative integers")
+    for key in ("compared", "mismatched"):
+        if type(payload[key]) is not int or payload[key] < 0:
+            raise ValueError(f"Comparison {key} must be a nonnegative integer")
+    if payload["compared"] > math.prod(shape):
+        raise ValueError("Comparison count cannot exceed the tensor shape capacity")
+    if payload["mismatched"] > payload["compared"]:
+        raise ValueError("Comparison mismatched count cannot exceed compared count")
+    boolean_keys = (
+        "exact",
+        "passed",
+        "mask_equal",
+        "finite_pattern_equal",
+        "within_tolerance",
+    )
+    if any(type(payload[key]) is not bool for key in boolean_keys):
+        raise ValueError("Comparison flags must be booleans")
+    metric_keys = ("max_abs", "max_rel", "p50_abs", "p95_abs", "p99_abs")
+    if any(
+        type(payload[key]) not in (int, float)
+        or not math.isfinite(payload[key])
+        or payload[key] < 0
+        for key in metric_keys
+    ):
+        raise ValueError("Comparison metrics must be finite nonnegative numbers")
+    if not (payload["p50_abs"] <= payload["p95_abs"] <= payload["p99_abs"] <= payload["max_abs"]):
+        raise ValueError("Comparison absolute-error quantiles are inconsistent")
+    if payload["passed"] != payload["within_tolerance"]:
+        raise ValueError("Comparison pass and tolerance flags are inconsistent")
+    if payload["passed"] and (not payload["mask_equal"] or not payload["finite_pattern_equal"]):
+        raise ValueError("A passing comparison must have matching masks and finite patterns")
+    if payload["exact"] and (
+        payload["mismatched"] != 0
+        or not payload["passed"]
+        or payload["max_abs"] != 0
+        or payload["max_rel"] != 0
+    ):
+        raise ValueError("Exact comparison invariants are inconsistent")
     normalized = dict(payload)
     normalized["shape"] = tuple(normalized["shape"])
     return TensorComparison(**normalized)
@@ -107,7 +284,7 @@ def _has_stage_set(payloads: Any, expected: Sequence[str]) -> bool:
         return False
     try:
         comparisons = [_comparison_from_dict(item) for item in payloads]
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, OverflowError, TypeError, ValueError):
         return False
     return tuple(item.name for item in comparisons) == tuple(expected)
 
@@ -117,12 +294,37 @@ def _is_usable_resume_record(
     *,
     expected_context: dict[str, Any],
 ) -> bool:
-    return (
-        isinstance(payload, dict)
-        and payload.get("error_type") is None
-        and payload.get("context") == expected_context
-        and _has_stage_set(payload.get("core"), CANONICAL_STAGES)
-        and _has_stage_set(payload.get("public"), PUBLIC_STAGES)
+    if type(payload) is not dict or set(payload) != _RECORD_KEYS:
+        return False
+    if type(payload["pid"]) is not str or not payload["pid"]:
+        return False
+    if type(payload["source_path"]) is not str or not payload["source_path"]:
+        return False
+    if type(payload["context"]) is not dict or payload["context"] != expected_context:
+        return False
+    if payload["pid"] != expected_context.get("pid"):
+        return False
+    if payload["source_path"] != expected_context.get("source_path"):
+        return False
+    if (
+        payload["error_type"] is not None
+        or payload["error_message"] is not None
+        or payload["traceback"] is not None
+    ):
+        return False
+    artifact_error_type = payload["failure_artifact_error_type"]
+    artifact_error_message = payload["failure_artifact_error_message"]
+    if (artifact_error_type is None) != (artifact_error_message is None):
+        return False
+    if artifact_error_type is not None and (
+        type(artifact_error_type) is not str
+        or not artifact_error_type
+        or type(artifact_error_message) is not str
+        or not artifact_error_message
+    ):
+        return False
+    return _has_stage_set(payload["core"], CANONICAL_STAGES) and _has_stage_set(
+        payload["public"], PUBLIC_STAGES
     )
 
 
@@ -202,18 +404,142 @@ def _require_float32(module: torch.nn.Module, *, name: str) -> None:
 
 
 def _manifest_fingerprint(records: Sequence[Any]) -> str:
-    serialized = json.dumps(
-        [record.to_dict() for record in records],
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode()
+    return _canonical_fingerprint([record.to_dict() for record in records])
+
+
+def _canonical_fingerprint(payload: Any) -> str:
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(serialized).hexdigest()
+
+
+def _classify_reference_samples(
+    samples: Sequence[Any],
+    inputs: Sequence[Any],
+) -> tuple[dict[str, list[_ReferenceEntry]], list[_ReferenceEntry], list[dict[str, str]]]:
+    inputs_by_path = {record.path: record for record in inputs}
+    entries_by_source = {record.path: [] for record in inputs}
+    unassigned: list[_ReferenceEntry] = []
+    preprocessing_samples: list[dict[str, str]] = []
+    for dataset_index, sample in enumerate(samples):
+        errors: list[str] = []
+        mapping = sample if isinstance(sample, Mapping) else {}
+        if not isinstance(sample, Mapping):
+            errors.append(f"sample must be a mapping, got {type(sample).__name__}")
+
+        raw_source = mapping.get("source_path")
+        resolved_source = None
+        if not isinstance(raw_source, (str, Path)) or not str(raw_source):
+            errors.append("source_path must be a nonempty string or Path")
+        else:
+            try:
+                resolved_source = str(Path(raw_source).resolve())
+            except (OSError, RuntimeError, ValueError) as exc:
+                errors.append(f"source_path cannot be resolved: {type(exc).__name__}: {exc}")
+        input_record = inputs_by_path.get(resolved_source)
+        if resolved_source is not None and input_record is None:
+            errors.append("source_path is not present in the input manifest")
+
+        raw_pid = mapping.get("pid")
+        if type(raw_pid) is not str or not raw_pid:
+            errors.append("pid must be a nonempty string")
+        raw_sequence = mapping.get("seq")
+        if type(raw_sequence) is not str or not raw_sequence:
+            errors.append("seq must be a nonempty string")
+
+        fallback_pid = f"invalid-reference:{dataset_index:06d}"
+        fallback_source = resolved_source or f"<invalid-source:{dataset_index:06d}>"
+        source_sha256 = (
+            input_record.sha256
+            if input_record is not None
+            else hashlib.sha256(
+                f"reference-anomaly:{dataset_index}:{fallback_source}".encode()
+            ).hexdigest()
+        )
+        entry = _ReferenceEntry(
+            dataset_index=dataset_index,
+            source_path=fallback_source,
+            source_sha256=source_sha256,
+            pid=fallback_pid if errors else raw_pid,
+            sequence=raw_sequence if type(raw_sequence) is str else None,
+            error_message="; ".join(errors) if errors else None,
+        )
+        if input_record is None:
+            unassigned.append(entry)
+        else:
+            entries_by_source[input_record.path].append(entry)
+        if not errors:
+            preprocessing_samples.append(
+                {
+                    "source_path": input_record.path,
+                    "pid": raw_pid,
+                    "seq": raw_sequence,
+                }
+            )
+    return entries_by_source, unassigned, preprocessing_samples
+
+
+def _relevant_source_paths(project_root: Path) -> list[Path]:
+    source_roots = (
+        project_root / "scripts" / "gcp_vqvae_parity",
+        project_root / "src" / "stok",
+    )
+    source_paths = {
+        path for source_root in source_roots for path in source_root.rglob("*.py") if path.is_file()
+    }
+    converter = project_root / "scripts" / "convert_gcp_vqvae_weights.py"
+    if converter.is_file():
+        source_paths.add(converter)
+    return sorted(source_paths)
+
+
+def _capture_source_state() -> dict[str, Any]:
+    project_root = Path(__file__).resolve().parents[2]
+    source_paths = _relevant_source_paths(project_root)
+    digest = hashlib.sha256()
+    for path in source_paths:
+        relative = path.relative_to(project_root).as_posix().encode()
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        content = path.read_bytes()
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=project_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    status = subprocess.run(
+        [
+            "git",
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--",
+            "scripts/gcp_vqvae_parity",
+            "scripts/convert_gcp_vqvae_weights.py",
+            "src/stok",
+        ],
+        cwd=project_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    return {
+        "git_commit": commit,
+        "dirty": bool(status),
+        "status_sha256": hashlib.sha256(status.encode()).hexdigest(),
+        "code_sha256": digest.hexdigest(),
+        "file_count": len(source_paths),
+    }
 
 
 def _record_context(
     *,
     config: QualificationConfig,
     environment: dict[str, Any],
+    source_state: dict[str, Any],
     resolved_revision: str,
     manifest_fingerprint: str,
     weight_audit: Any,
@@ -229,6 +555,12 @@ def _record_context(
     return {
         "schema_version": RECORD_SCHEMA_VERSION,
         "git_commit": environment.get("git_commit"),
+        "environment_sha256": _canonical_fingerprint(environment),
+        "source_state_sha256": _canonical_fingerprint(source_state),
+        "source_git_commit": source_state["git_commit"],
+        "source_dirty": source_state["dirty"],
+        "source_status_sha256": source_state["status_sha256"],
+        "source_code_sha256": source_state["code_sha256"],
         "manifest_fingerprint": manifest_fingerprint,
         "preset": config.preset,
         "hf_repo_id": config.hf_repo_id,
@@ -270,7 +602,7 @@ def _record_path(
 def _load_resume_record(path: Path, context: dict[str, Any]) -> dict[str, Any] | None:
     try:
         candidate = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+    except (OSError, RecursionError, UnicodeDecodeError, ValueError):
         return None
     if _is_usable_resume_record(candidate, expected_context=context):
         return candidate
@@ -295,6 +627,8 @@ def _error_payload(
         "error_type": error_type,
         "error_message": error_message,
         "traceback": traceback_text,
+        "failure_artifact_error_type": None,
+        "failure_artifact_error_message": None,
         "core": [item.to_dict() for item in core_comparisons],
         "public": [item.to_dict() for item in _failure_comparisons(PUBLIC_STAGES)],
     }
@@ -327,14 +661,13 @@ def _append_metrics(
 
 def run_qualification(config: QualificationConfig) -> RunSummary:
     _validate_config(config)
+    transaction = _begin_transaction(config.output_dir.resolve())
     configure_determinism(config.seed)
     device = require_cuda(config.device)
-    output_dir = config.output_dir.resolve()
-    samples_dir = output_dir / "samples"
-    failures_dir = output_dir / "failures"
-    checkpoints_dir = output_dir / "checkpoints"
-    for directory in (samples_dir, failures_dir, checkpoints_dir):
-        directory.mkdir(parents=True, exist_ok=True)
+    output_dir = transaction.staging
+    samples_dir = transaction.cache / "samples"
+    failures_dir = transaction.cache / "failures"
+    checkpoints_dir = transaction.cache / "checkpoints"
 
     all_inputs = discover_inputs(config.input_dir.resolve())
     selected_inputs = select_shard(
@@ -342,6 +675,7 @@ def run_qualification(config: QualificationConfig) -> RunSummary:
         shard_index=config.shard_index,
         num_shards=config.num_shards,
     )
+    manifest_fingerprint = _manifest_fingerprint(all_inputs)
     selected_paths = {record.path for record in selected_inputs}
     input_rows = [
         {
@@ -356,6 +690,8 @@ def run_qualification(config: QualificationConfig) -> RunSummary:
 
     environment = capture_environment(device)
     atomic_write_json(output_dir / "environment.json", environment)
+    source_state = _capture_source_state()
+    atomic_write_json(output_dir / "source_state.json", source_state)
     resolved_revision = resolve_hf_revision(config.hf_repo_id, config.hf_revision)
     atomic_write_json(
         output_dir / "reference.json",
@@ -393,15 +729,46 @@ def run_qualification(config: QualificationConfig) -> RunSummary:
         raise RuntimeError(
             "Converted STōk checkpoint is not bit-identical to retained upstream tensors"
         )
+    run_context = {
+        "schema_version": RECORD_SCHEMA_VERSION,
+        "environment_sha256": _canonical_fingerprint(environment),
+        "source_state_sha256": _canonical_fingerprint(source_state),
+        "manifest_fingerprint": manifest_fingerprint,
+        "preset": config.preset,
+        "hf_repo_id": config.hf_repo_id,
+        "requested_revision": config.hf_revision,
+        "resolved_revision": resolved_revision,
+        "device": config.device,
+        "dtype": "float32",
+        "batch_size": config.batch_size,
+        "seed": config.seed,
+        "shard_index": config.shard_index,
+        "num_shards": config.num_shards,
+        "max_samples": config.max_samples,
+        "rtol": config.rtol,
+        "atol": config.atol,
+        "upstream_sha256": weight_audit.upstream_sha256,
+        "stok_sha256": weight_audit.stok_sha256,
+        "required_core_stages": list(CANONICAL_STAGES),
+        "required_public_stages": list(PUBLIC_STAGES),
+    }
+    run_context_sha256 = _canonical_fingerprint(run_context)
+    run_context["context_sha256"] = run_context_sha256
+    transaction = transaction.bind_context(run_context_sha256)
+    output_dir = transaction.staging
+    atomic_write_json(output_dir / "run_context.json", run_context)
 
     dataset, collate_fn = wrapper._build_dataset(
         pdb_dir=str(config.input_dir.resolve()),
         max_task_samples=None,
         progress=True,
     )
+    reference_entries_by_source, unassigned_entries, preprocessing_samples = (
+        _classify_reference_samples(dataset.samples, all_inputs)
+    )
     preprocessing = build_preprocessing_audit(
         all_inputs,
-        dataset.samples,
+        preprocessing_samples,
         stok_parser=parse_structure,
     )
     preprocessing_rows = []
@@ -413,18 +780,14 @@ def run_qualification(config: QualificationConfig) -> RunSummary:
         output_dir / "preprocessing_comparison.parquet", index=False
     )
 
-    sample_indices_by_source = {record.path: [] for record in selected_inputs}
-    for dataset_index, sample in enumerate(dataset.samples):
-        try:
-            source = str(Path(sample["source_path"]).resolve())
-        except (KeyError, TypeError, ValueError):
-            continue
-        if source in sample_indices_by_source:
-            sample_indices_by_source[source].append(dataset_index)
+    sample_entries_by_source = {
+        record.path: reference_entries_by_source[record.path] for record in selected_inputs
+    }
     eligible_indices = [
-        dataset_index
+        entry.dataset_index
         for record in selected_inputs
-        for dataset_index in sample_indices_by_source[record.path]
+        for entry in sample_entries_by_source[record.path]
+        if entry.error_message is None
     ]
     if config.max_samples is not None:
         eligible_indices = eligible_indices[: config.max_samples]
@@ -444,17 +807,65 @@ def run_qualification(config: QualificationConfig) -> RunSummary:
     sample_manifest_rows: list[dict[str, Any]] = []
     completed_sources: set[str] = set()
     completed_indices_by_source = {record.path: set() for record in selected_inputs}
-    manifest_fingerprint = _manifest_fingerprint(all_inputs)
+
+    def record_metadata_anomaly(entry: _ReferenceEntry) -> None:
+        context = _record_context(
+            config=config,
+            environment=environment,
+            source_state=source_state,
+            resolved_revision=resolved_revision,
+            manifest_fingerprint=manifest_fingerprint,
+            weight_audit=weight_audit,
+            source_path=entry.source_path,
+            source_sha256=entry.source_sha256,
+            pid=entry.pid,
+            sequence=entry.sequence,
+            sample_ordinal=entry.dataset_index,
+        )
+        sample_path = _record_path(
+            samples_dir,
+            pid=entry.pid,
+            source_sha256=entry.source_sha256,
+            sample_ordinal=entry.dataset_index,
+        )
+        payload = _error_payload(
+            pid=entry.pid,
+            source_path=entry.source_path,
+            context=context,
+            error_type="ReferenceSampleMetadataError",
+            error_message=entry.error_message or "Invalid reference sample metadata",
+            traceback_text=None,
+        )
+        atomic_write_json(sample_path, payload)
+        _append_metrics(
+            payload=payload,
+            pid=entry.pid,
+            source_path=entry.source_path,
+            core_comparisons=core_comparisons,
+            public_comparisons=public_comparisons,
+            metric_rows=metric_rows,
+        )
+        sample_manifest_rows.append(
+            {
+                "pid": entry.pid,
+                "source_path": entry.source_path,
+                "record_path": str(transaction.root / "samples" / sample_path.name),
+                "cache_path": str(sample_path),
+                "reused": False,
+                "error_type": payload["error_type"],
+            }
+        )
 
     for input_record in selected_inputs:
         source_path_text = input_record.path
         source_path = Path(source_path_text)
-        source_indices = sample_indices_by_source[source_path_text]
-        if not source_indices:
+        source_entries = sample_entries_by_source[source_path_text]
+        if not source_entries:
             pid = f"missing-reference:{input_record.name}"
             context = _record_context(
                 config=config,
                 environment=environment,
+                source_state=source_state,
                 resolved_revision=resolved_revision,
                 manifest_fingerprint=manifest_fingerprint,
                 weight_audit=weight_audit,
@@ -491,7 +902,8 @@ def run_qualification(config: QualificationConfig) -> RunSummary:
                 {
                     "pid": pid,
                     "source_path": source_path_text,
-                    "record_path": str(sample_path),
+                    "record_path": str(transaction.root / "samples" / sample_path.name),
+                    "cache_path": str(sample_path),
                     "reused": False,
                     "error_type": payload["error_type"],
                 }
@@ -499,15 +911,22 @@ def run_qualification(config: QualificationConfig) -> RunSummary:
             completed_sources.add(source_path_text)
             continue
 
-        for sample_ordinal, dataset_index in enumerate(source_indices):
+        for sample_ordinal, entry in enumerate(source_entries):
+            dataset_index = entry.dataset_index
+            if entry.error_message is not None:
+                record_metadata_anomaly(entry)
+                completed_indices_by_source[source_path_text].add(dataset_index)
+                continue
             if dataset_index not in enabled_indices:
                 continue
-            sample = dataset.samples[dataset_index]
-            pid = str(sample["pid"])
-            sequence = str(sample["seq"])
+            pid = entry.pid
+            sequence = entry.sequence
+            if sequence is None:
+                raise RuntimeError("Validated reference entry has no sequence")
             context = _record_context(
                 config=config,
                 environment=environment,
+                source_state=source_state,
                 resolved_revision=resolved_revision,
                 manifest_fingerprint=manifest_fingerprint,
                 weight_audit=weight_audit,
@@ -587,6 +1006,8 @@ def run_qualification(config: QualificationConfig) -> RunSummary:
                             "error_type": None,
                             "error_message": None,
                             "traceback": None,
+                            "failure_artifact_error_type": None,
+                            "failure_artifact_error_message": None,
                             "core": [item.to_dict() for item in core],
                             "public": [item.to_dict() for item in public],
                         }
@@ -623,15 +1044,22 @@ def run_qualification(config: QualificationConfig) -> RunSummary:
                 {
                     "pid": pid,
                     "source_path": source_path_text,
-                    "record_path": str(sample_path),
+                    "record_path": str(transaction.root / "samples" / sample_path.name),
+                    "cache_path": str(sample_path),
                     "reused": reused,
                     "error_type": payload["error_type"],
                 }
             )
             completed_indices_by_source[source_path_text].add(dataset_index)
 
-        if completed_indices_by_source[source_path_text] == set(source_indices):
+        if completed_indices_by_source[source_path_text] == {
+            entry.dataset_index for entry in source_entries
+        }:
             completed_sources.add(source_path_text)
+
+    for entry in unassigned_entries:
+        if entry.dataset_index % config.num_shards == config.shard_index:
+            record_metadata_anomaly(entry)
 
     metric_columns = [
         "pid",
@@ -668,13 +1096,13 @@ def run_qualification(config: QualificationConfig) -> RunSummary:
     qualification_rows = []
     for record in all_inputs:
         selected = record.path in selected_paths
-        source_indices = sample_indices_by_source.get(record.path, [])
+        source_entries = reference_entries_by_source.get(record.path, [])
         complete = record.path in completed_sources
         qualification_rows.append(
             {
                 **record.to_dict(),
                 "selected": selected,
-                "reference_sample_count": len(source_indices),
+                "reference_sample_count": len(source_entries),
                 "completed": complete,
                 "status": (
                     "not_selected" if not selected else "completed" if complete else "incomplete"
@@ -691,7 +1119,32 @@ def run_qualification(config: QualificationConfig) -> RunSummary:
         public_comparisons=public_comparisons,
         input_count=len(selected_inputs),
         completed_count=len(completed_sources),
+        diagnostic=config.max_samples is not None,
     )
     atomic_write_json(output_dir / "summary.json", summary.to_dict())
     (output_dir / "report.md").write_text(render_markdown(summary))
+    published_samples = output_dir / "samples"
+    published_failures = output_dir / "failures"
+    published_checkpoints = output_dir / "checkpoints"
+    for directory in (published_samples, published_failures, published_checkpoints):
+        directory.mkdir(parents=True, exist_ok=True)
+    for row in sample_manifest_rows:
+        cache_path = Path(row["cache_path"])
+        shutil.copy2(cache_path, published_samples / cache_path.name)
+        failure_path = failures_dir / cache_path.with_suffix(".pt").name
+        if failure_path.exists():
+            shutil.copy2(failure_path, published_failures / failure_path.name)
+    shutil.copy2(converted_path, published_checkpoints / converted_path.name)
+    atomic_write_json(
+        output_dir / "completion.json",
+        {
+            "complete": True,
+            "context_sha256": run_context_sha256,
+            "diagnostic": summary.diagnostic,
+            "qualification_complete": summary.complete,
+            "run_id": transaction.run_id,
+            "status": summary.status.value,
+        },
+    )
+    transaction.publish()
     return summary

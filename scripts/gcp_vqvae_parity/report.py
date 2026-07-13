@@ -11,6 +11,7 @@ from .types import RunStatus, TensorComparison, classify_run
 class RunSummary:
     status: RunStatus
     complete: bool
+    diagnostic: bool
     weights_pass: bool
     core_pass: bool
     public_pass: bool
@@ -32,13 +33,14 @@ def summarize_run(
     public_comparisons: Sequence[TensorComparison],
     input_count: int,
     completed_count: int,
+    diagnostic: bool = False,
 ) -> RunSummary:
     if input_count < 0 or completed_count < 0 or completed_count > input_count:
         raise ValueError(
             "Run counts must satisfy 0 <= completed_count <= input_count, "
             f"got {completed_count}/{input_count}"
         )
-    complete = input_count == completed_count
+    complete = input_count == completed_count and not diagnostic
     core_failures = tuple(item.name for item in core_comparisons if not item.passed)
     public_failures = tuple(item.name for item in public_comparisons if not item.passed)
     core_pass = complete and bool(core_comparisons) and not core_failures
@@ -51,6 +53,7 @@ def summarize_run(
     return RunSummary(
         status=status,
         complete=complete,
+        diagnostic=diagnostic,
         weights_pass=weight_pass,
         core_pass=core_pass,
         public_pass=public_pass,
@@ -68,6 +71,7 @@ def render_markdown(summary: RunSummary) -> str:
             "",
             f"- Status: `{summary.status.value}`",
             f"- Inputs completed: `{summary.completed_count}/{summary.input_count}`",
+            f"- Diagnostic sample cap: `{'YES' if summary.diagnostic else 'NO'}`",
             f"- Weight parity: `{'PASS' if summary.weights_pass else 'FAIL'}`",
             f"- Shared-input core parity: `{'PASS' if summary.core_pass else 'FAIL'}`",
             f"- Public pipeline parity: `{'PASS' if summary.public_pass else 'FAIL'}`",

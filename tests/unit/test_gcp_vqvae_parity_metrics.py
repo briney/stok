@@ -174,13 +174,7 @@ def test_failed_sample_accounts_for_every_required_stage():
 
 
 def test_resume_rejects_errors_stale_context_and_incomplete_stage_sets():
-    context = {"schema_version": runner.RECORD_SCHEMA_VERSION, "fingerprint": "current"}
-    payload = {
-        "context": context,
-        "error_type": None,
-        "core": [item.to_dict() for item in runner._failure_comparisons(CANONICAL_STAGES)],
-        "public": [item.to_dict() for item in runner._failure_comparisons(runner.PUBLIC_STAGES)],
-    }
+    context, payload = _valid_resume_payload()
 
     assert runner._is_usable_resume_record(payload, expected_context=context)
     assert not runner._is_usable_resume_record(
@@ -193,6 +187,87 @@ def test_resume_rejects_errors_stale_context_and_incomplete_stage_sets():
     assert not runner._is_usable_resume_record(
         {**payload, "core": payload["core"][:-1]}, expected_context=context
     )
+
+
+def _valid_resume_payload():
+    context = {
+        "schema_version": runner.RECORD_SCHEMA_VERSION,
+        "fingerprint": "current",
+        "pid": "sample-0",
+        "source_path": "/inputs/input-0.pdb",
+    }
+    return context, {
+        "pid": context["pid"],
+        "source_path": context["source_path"],
+        "context": context,
+        "error_type": None,
+        "error_message": None,
+        "traceback": None,
+        "failure_artifact_error_type": None,
+        "failure_artifact_error_message": None,
+        "core": [_comparison(name, True).to_dict() for name in CANONICAL_STAGES],
+        "public": [_comparison(name, True).to_dict() for name in runner.PUBLIC_STAGES],
+    }
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "missing_identity",
+        "extra_key",
+        "wrong_pid",
+        "wrong_source",
+        "string_boolean",
+        "nonfinite_metric",
+        "overflow_metric",
+        "negative_count",
+        "mismatch_overflow",
+        "count_exceeds_shape",
+        "invalid_shape",
+        "success_error_message",
+        "empty_artifact_error_message",
+    ],
+)
+def test_resume_rejects_corrupt_identity_types_metrics_and_invariants(corruption):
+    context, payload = _valid_resume_payload()
+    payload = json.loads(json.dumps(payload))
+    if corruption == "missing_identity":
+        del payload["pid"]
+    elif corruption == "extra_key":
+        payload["unexpected"] = True
+    elif corruption == "wrong_pid":
+        payload["pid"] = "other"
+    elif corruption == "wrong_source":
+        payload["source_path"] = "/inputs/other.pdb"
+    elif corruption == "string_boolean":
+        payload["core"][0]["passed"] = "true"
+    elif corruption == "nonfinite_metric":
+        payload["core"][0]["max_abs"] = float("nan")
+    elif corruption == "overflow_metric":
+        payload["core"][0]["max_abs"] = 10**10000
+    elif corruption == "negative_count":
+        payload["core"][0]["compared"] = -1
+    elif corruption == "mismatch_overflow":
+        payload["core"][0]["mismatched"] = 2
+    elif corruption == "count_exceeds_shape":
+        payload["core"][0]["compared"] = 2
+    elif corruption == "invalid_shape":
+        payload["core"][0]["shape"] = [True]
+    elif corruption == "success_error_message":
+        payload["error_message"] = "not actually successful"
+    elif corruption == "empty_artifact_error_message":
+        payload["failure_artifact_error_type"] = "OSError"
+        payload["failure_artifact_error_message"] = ""
+
+    assert not runner._is_usable_resume_record(payload, expected_context=context)
+
+
+def test_resume_loader_rejects_json_integer_overflow(tmp_path):
+    context, _ = _valid_resume_payload()
+    path = tmp_path / "corrupt.json"
+    path.write_text('{"too_large": ' + "9" * 5000 + "}")
+
+    assert runner._load_resume_record(path, context) is None
 
 
 def test_cli_rejects_non_primary_batch_size(monkeypatch, tmp_path):
@@ -264,15 +339,16 @@ class _FakeEncoder(nn.Module):
         self.weight = nn.Parameter(torch.ones(1, dtype=torch.float32))
 
 
-def _install_runner_mocks(monkeypatch, tmp_path, input_paths, reference_paths):
-    samples = [
-        {
-            "pid": f"sample-{index}",
-            "source_path": str(path.resolve()),
-            "seq": "ACD",
-        }
-        for index, path in enumerate(reference_paths)
-    ]
+def _install_runner_mocks(monkeypatch, tmp_path, input_paths, reference_paths, *, samples=None):
+    if samples is None:
+        samples = [
+            {
+                "pid": f"sample-{index}",
+                "source_path": str(path.resolve()),
+                "seq": "ACD",
+            }
+            for index, path in enumerate(reference_paths)
+        ]
     dataset = _FakeDataset(samples)
     upstream_path = tmp_path / "upstream.pt"
     upstream_path.write_bytes(b"upstream")
@@ -427,6 +503,40 @@ def test_sample_cap_is_reported_as_incomplete(monkeypatch, tmp_path):
     assert summary.status is RunStatus.NOT_QUALIFIED
 
 
+@pytest.mark.parametrize("reference_count", [0, 1])
+def test_any_sample_cap_is_persisted_as_diagnostic_and_cannot_qualify(
+    monkeypatch, tmp_path, reference_count
+):
+    input_dir, input_paths = _write_inputs(tmp_path, count=1)
+    _install_runner_mocks(
+        monkeypatch,
+        tmp_path,
+        input_paths,
+        input_paths[:reference_count],
+    )
+    output_dir = tmp_path / "output"
+
+    summary = runner.run_qualification(
+        runner.QualificationConfig(
+            input_dir=input_dir,
+            output_dir=output_dir,
+            max_samples=999,
+        )
+    )
+
+    assert summary.diagnostic is True
+    assert summary.complete is False
+    assert summary.status is RunStatus.NOT_QUALIFIED
+    persisted = json.loads((output_dir / "summary.json").read_text())
+    assert persisted["diagnostic"] is True
+    assert json.loads((output_dir / "run_context.json").read_text())["max_samples"] == 999
+    completion = json.loads((output_dir / "completion.json").read_text())
+    assert completion["complete"] is True
+    assert completion["diagnostic"] is True
+    assert completion["qualification_complete"] is False
+    assert completion["status"] == "not_qualified"
+
+
 def test_resume_reuses_only_compatible_successful_records(monkeypatch, tmp_path):
     input_dir, input_paths = _write_inputs(tmp_path, count=1)
     capture_calls = _install_runner_mocks(monkeypatch, tmp_path, input_paths, input_paths)
@@ -469,3 +579,228 @@ def test_public_exception_preserves_successful_core_result(monkeypatch, tmp_path
     assert summary.status is RunStatus.CORE_QUALIFIED
     assert summary.core_pass is True
     assert summary.public_pass is False
+
+
+def test_fatal_rerun_invalidates_old_terminal_qualification_until_atomic_publish(
+    monkeypatch, tmp_path
+):
+    input_dir, input_paths = _write_inputs(tmp_path, count=1)
+    _install_runner_mocks(monkeypatch, tmp_path, input_paths, input_paths)
+    output_dir = tmp_path / "output"
+    config = runner.QualificationConfig(input_dir=input_dir, output_dir=output_dir)
+
+    first = runner.run_qualification(config)
+    assert first.status is RunStatus.FULLY_QUALIFIED
+    assert json.loads((output_dir / "summary.json").read_text())["status"] == "fully_qualified"
+
+    working_loader = runner.load_pretrained_encoder
+
+    def fail_initialization(**kwargs):
+        del kwargs
+        raise RuntimeError("controlled fatal rerun")
+
+    monkeypatch.setattr(runner, "load_pretrained_encoder", fail_initialization)
+    with pytest.raises(RuntimeError, match="controlled fatal rerun"):
+        runner.run_qualification(config)
+
+    assert not (output_dir / "summary.json").exists()
+    assert not (output_dir / "report.md").exists()
+    assert not (output_dir / "completion.json").exists()
+
+    monkeypatch.setattr(runner, "load_pretrained_encoder", working_loader)
+    rerun = runner.run_qualification(config)
+
+    assert rerun.status is RunStatus.FULLY_QUALIFIED
+    completion = json.loads((output_dir / "completion.json").read_text())
+    assert completion["complete"] is True
+    assert completion["status"] == "fully_qualified"
+    assert (output_dir / "summary.json").exists()
+    assert (output_dir / "report.md").exists()
+
+
+def test_resume_cache_sync_failure_cannot_leave_old_terminal_qualification(monkeypatch, tmp_path):
+    input_dir, input_paths = _write_inputs(tmp_path, count=1)
+    _install_runner_mocks(monkeypatch, tmp_path, input_paths, input_paths)
+    output_dir = tmp_path / "output"
+    config = runner.QualificationConfig(input_dir=input_dir, output_dir=output_dir)
+
+    first = runner.run_qualification(config)
+    assert first.status is RunStatus.FULLY_QUALIFIED
+
+    def fail_cache_sync(source, destination):
+        del source, destination
+        raise OSError("controlled cache sync failure")
+
+    monkeypatch.setattr(runner.shutil, "copy2", fail_cache_sync)
+    with pytest.raises(OSError, match="controlled cache sync failure"):
+        runner.run_qualification(config)
+
+    assert not (output_dir / "summary.json").exists()
+    assert not (output_dir / "report.md").exists()
+    assert not (output_dir / "completion.json").exists()
+
+
+def test_resume_context_recomputes_for_dependency_and_dirty_source_changes(monkeypatch, tmp_path):
+    input_dir, input_paths = _write_inputs(tmp_path, count=1)
+    capture_calls = _install_runner_mocks(monkeypatch, tmp_path, input_paths, input_paths)
+    environment = {
+        "git_commit": "c" * 40,
+        "python": "3.12.0",
+        "torch": "2.7.0",
+        "torch_cuda": "12.8",
+        "cuda": {
+            "device": {"index": 0, "name": "A6000", "capability": [8, 6]},
+            "versions": {
+                "nvidia_driver": "570.00",
+                "cuda_runtime": "12.8",
+                "torch_build_cuda": "12.8",
+                "cudnn": 90701,
+            },
+        },
+        "package_provenance": {
+            "gcp-vqvae": {
+                "version": "0.3.2",
+                "origin": "/env/site-packages/gcp_vqvae/__init__.py",
+                "source": {"commit_id": "e" * 40},
+            }
+        },
+        "upstream_vq_encoder_decoder": {"source_revision": "e" * 40},
+    }
+    source_state = {
+        "git_commit": "c" * 40,
+        "dirty": False,
+        "status_sha256": "0" * 64,
+        "code_sha256": "1" * 64,
+    }
+    monkeypatch.setattr(
+        runner,
+        "capture_environment",
+        lambda device: json.loads(json.dumps(environment)),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_capture_source_state",
+        lambda: dict(source_state),
+        raising=False,
+    )
+    config = runner.QualificationConfig(input_dir=input_dir, output_dir=tmp_path / "output")
+
+    runner.run_qualification(config)
+    runner.run_qualification(config)
+    assert capture_calls == ["reference"]
+
+    environment["package_provenance"]["gcp-vqvae"]["version"] = "0.3.3"
+    runner.run_qualification(config)
+    assert capture_calls == ["reference", "reference"]
+
+    source_state["dirty"] = True
+    source_state["status_sha256"] = "2" * 64
+    source_state["code_sha256"] = "3" * 64
+    runner.run_qualification(config)
+    assert capture_calls == ["reference", "reference", "reference"]
+
+    record = json.loads(next((config.output_dir / "samples").glob("*.json")).read_text())
+    assert record["context"]["environment_sha256"]
+    assert record["context"]["source_state_sha256"]
+
+
+def test_source_fingerprint_covers_converter_harness_and_production_runtime():
+    project_root = Path(__file__).resolve().parents[2]
+    source_paths = getattr(runner, "_relevant_source_paths", lambda root: [])(project_root)
+    relative_paths = {path.relative_to(project_root).as_posix() for path in source_paths}
+
+    assert "scripts/convert_gcp_vqvae_weights.py" in relative_paths
+    assert "scripts/gcp_vqvae_parity/runner.py" in relative_paths
+    assert "src/stok/models/structure_encoder.py" in relative_paths
+    assert "src/stok/utils/structure_loader.py" in relative_paths
+    assert "src/stok/utils/structure_parser.py" in relative_paths
+
+
+def test_malformed_reference_metadata_is_accounted_without_aborting(monkeypatch, tmp_path):
+    input_dir, input_paths = _write_inputs(tmp_path, count=1)
+    source = str(input_paths[0].resolve())
+    malformed_samples = [
+        {"source_path": source, "seq": "ACD"},
+        {"source_path": source, "pid": 123, "seq": "ACD"},
+        {"source_path": source, "pid": "missing-sequence"},
+        {"path": source, "pid": "wrong-path-key", "seq": "ACD"},
+        {
+            "source_path": str((tmp_path / "not-in-manifest.pdb").resolve()),
+            "pid": "unknown-source",
+            "seq": "ACD",
+        },
+    ]
+    _install_runner_mocks(
+        monkeypatch,
+        tmp_path,
+        input_paths,
+        [],
+        samples=malformed_samples,
+    )
+    output_dir = tmp_path / "output"
+
+    summary = runner.run_qualification(
+        runner.QualificationConfig(input_dir=input_dir, output_dir=output_dir)
+    )
+
+    assert summary.input_count == 1
+    assert summary.completed_count == 1
+    assert summary.status is RunStatus.NOT_QUALIFIED
+    records = [
+        json.loads(path.read_text()) for path in sorted((output_dir / "samples").glob("*.json"))
+    ]
+    anomalies = [
+        record for record in records if record["error_type"] == "ReferenceSampleMetadataError"
+    ]
+    assert len(anomalies) == len(malformed_samples)
+    assert len({record["pid"] for record in anomalies}) == len(malformed_samples)
+    assert all(record["pid"].startswith("invalid-reference:") for record in anomalies)
+    assert all(record["source_path"] for record in anomalies)
+    assert all(
+        [item["name"] for item in record["core"]] == list(CANONICAL_STAGES)
+        and [item["name"] for item in record["public"]] == list(runner.PUBLIC_STAGES)
+        for record in anomalies
+    )
+    assert not any(record["error_type"] == "ReferenceSampleMissing" for record in records)
+
+
+def test_reference_metadata_accepts_path_source_identity(monkeypatch, tmp_path):
+    input_dir, input_paths = _write_inputs(tmp_path, count=1)
+    samples = [
+        {
+            "source_path": input_paths[0].resolve(),
+            "pid": "path-source",
+            "seq": "ACD",
+        }
+    ]
+    _install_runner_mocks(monkeypatch, tmp_path, input_paths, [], samples=samples)
+
+    summary = runner.run_qualification(
+        runner.QualificationConfig(input_dir=input_dir, output_dir=tmp_path / "output")
+    )
+
+    assert summary.status is RunStatus.FULLY_QUALIFIED
+
+
+def test_all_manifest_inputs_missing_from_reference_dataset_are_individually_accounted(
+    monkeypatch, tmp_path
+):
+    input_dir, input_paths = _write_inputs(tmp_path, count=2)
+    _install_runner_mocks(monkeypatch, tmp_path, input_paths, [])
+    output_dir = tmp_path / "output"
+
+    summary = runner.run_qualification(
+        runner.QualificationConfig(input_dir=input_dir, output_dir=output_dir)
+    )
+
+    records = [
+        json.loads(path.read_text()) for path in sorted((output_dir / "samples").glob("*.json"))
+    ]
+    assert summary.input_count == 2
+    assert summary.completed_count == 2
+    assert summary.status is RunStatus.NOT_QUALIFIED
+    assert len(records) == 2
+    assert all(record["error_type"] == "ReferenceSampleMissing" for record in records)
+    assert {record["source_path"] for record in records} == {
+        str(path.resolve()) for path in input_paths
+    }
