@@ -27,11 +27,13 @@ _RENAME_RULES = (
     ("vqvae.encoder_blocks.", "encoder_blocks."),
     ("vqvae.encoder_head.", "encoder_head."),
     ("vqvae.vector_quantizer.", "vector_quantizer."),
+    ("encoder.featuriser.", "featurizer."),
+    ("encoder.encoder.", "gcpnet."),
     ("encoder.", "gcpnet."),
 )
 # Complete parameter/buffer roots of the converted StructureEncoder state.
-# ``featurizer.`` is excluded because it has no upstream checkpoint weights.
 _TARGET_IDENTITY_PREFIXES = (
+    "featurizer.",
     "gcpnet.",
     "encoder_tail.",
     "encoder_blocks.",

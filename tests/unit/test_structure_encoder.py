@@ -209,6 +209,30 @@ def test_conversion_roundtrip_strict_loads(preset: str) -> None:
     mod._verify_strict_load(remapped, preset)
 
 
+def test_conversion_strips_upstream_gcpnet_wrapper() -> None:
+    """The released checkpoint nests GCPNet below ``encoder.encoder``."""
+    mod = _load_conversion_module()
+    tensor = torch.ones(2, 3)
+
+    remapped = mod.remap_state_dict(
+        {
+            "encoder.encoder.gcp_embedding.node_embedding.scalar_out.weight": tensor,
+            "encoder.featuriser.positional_encoding.frequency": torch.arange(4),
+        }
+    )
+
+    assert set(remapped) == {
+        "gcpnet.gcp_embedding.node_embedding.scalar_out.weight",
+        "featurizer.positional_encoding.frequency",
+    }
+    assert torch.equal(
+        remapped["gcpnet.gcp_embedding.node_embedding.scalar_out.weight"], tensor
+    )
+    assert torch.equal(
+        remapped["featurizer.positional_encoding.frequency"], torch.arange(4)
+    )
+
+
 # ---------------------------------------------------------------------------
 # load_pretrained_encoder with --path override
 # ---------------------------------------------------------------------------
