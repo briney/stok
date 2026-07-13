@@ -4,7 +4,7 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from .types import RunStatus, TensorComparison, classify_run
+from .types import MAX_STORAGE_INTEGER, RunStatus, TensorComparison, classify_run
 
 
 @dataclass(frozen=True)
@@ -35,7 +35,15 @@ def summarize_run(
     completed_count: int,
     diagnostic: bool = False,
 ) -> RunSummary:
-    if input_count < 0 or completed_count < 0 or completed_count > input_count:
+    if any(
+        type(count) is not int or not 0 <= count <= MAX_STORAGE_INTEGER
+        for count in (input_count, completed_count)
+    ):
+        raise ValueError(
+            "Run counts must be storage-safe signed-int64 nonnegative integers, "
+            f"got {completed_count}/{input_count}"
+        )
+    if completed_count > input_count:
         raise ValueError(
             "Run counts must satisfy 0 <= completed_count <= input_count, "
             f"got {completed_count}/{input_count}"

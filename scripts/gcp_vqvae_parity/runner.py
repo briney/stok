@@ -40,15 +40,18 @@ from .stages import (
     capture_stok_stages,
     compare_stage_captures,
 )
-from .types import TensorComparison
+from .types import MAX_STORAGE_INTEGER, TensorComparison
 from .weights import audit_weight_parity, convert_checkpoint, resolve_hf_revision
 
-RECORD_SCHEMA_VERSION = 2
+RECORD_SCHEMA_VERSION = 3
 PUBLIC_STAGES = (
     "public.preprocessing",
     "public.indices",
     "public.embeddings",
 )
+_EXACT_CORE_STAGES = frozenset({"indices", "embeddings", "valid"})
+_EXACT_PUBLIC_STAGES = frozenset(PUBLIC_STAGES)
+_INDEX_STAGES = frozenset({"indices", "public.indices"})
 _RECORD_KEYS = frozenset(
     {
         "pid",
@@ -234,12 +237,17 @@ def _comparison_from_dict(payload: dict[str, Any]) -> TensorComparison:
     if type(name) is not str or not name:
         raise ValueError("Comparison name must be a nonempty string")
     if type(shape) not in (list, tuple) or any(
-        type(dimension) is not int or dimension < 0 for dimension in shape
+        type(dimension) is not int or not 0 <= dimension <= MAX_STORAGE_INTEGER
+        for dimension in shape
     ):
-        raise ValueError("Comparison shape must contain nonnegative integers")
+        raise ValueError(
+            "Comparison shape must contain storage-safe signed-int64 nonnegative integers"
+        )
     for key in ("compared", "mismatched"):
-        if type(payload[key]) is not int or payload[key] < 0:
-            raise ValueError(f"Comparison {key} must be a nonnegative integer")
+        if type(payload[key]) is not int or not 0 <= payload[key] <= MAX_STORAGE_INTEGER:
+            raise ValueError(
+                f"Comparison {key} must be a storage-safe signed-int64 nonnegative integer"
+            )
     if payload["compared"] > math.prod(shape):
         raise ValueError("Comparison count cannot exceed the tensor shape capacity")
     if payload["mismatched"] > payload["compared"]:
@@ -263,6 +271,10 @@ def _comparison_from_dict(payload: dict[str, Any]) -> TensorComparison:
         raise ValueError("Comparison metrics must be finite nonnegative numbers")
     if not (payload["p50_abs"] <= payload["p95_abs"] <= payload["p99_abs"] <= payload["max_abs"]):
         raise ValueError("Comparison absolute-error quantiles are inconsistent")
+    if payload["mismatched"] == 0 and payload["max_abs"] != 0:
+        raise ValueError("A zero-mismatch comparison cannot have absolute error")
+    if payload["max_abs"] == 0 and payload["max_rel"] != 0:
+        raise ValueError("A zero-absolute-error comparison cannot have relative error")
     if payload["passed"] != payload["within_tolerance"]:
         raise ValueError("Comparison pass and tolerance flags are inconsistent")
     if payload["passed"] and (not payload["mask_equal"] or not payload["finite_pattern_equal"]):
@@ -279,14 +291,38 @@ def _comparison_from_dict(payload: dict[str, Any]) -> TensorComparison:
     return TensorComparison(**normalized)
 
 
-def _has_stage_set(payloads: Any, expected: Sequence[str]) -> bool:
+def _has_stage_set(
+    payloads: Any,
+    expected: Sequence[str],
+    *,
+    exact_required: frozenset[str],
+) -> bool:
     if not isinstance(payloads, list):
         return False
     try:
         comparisons = [_comparison_from_dict(item) for item in payloads]
     except (KeyError, OverflowError, TypeError, ValueError):
         return False
-    return tuple(item.name for item in comparisons) == tuple(expected)
+    if tuple(item.name for item in comparisons) != tuple(expected):
+        return False
+    for comparison in comparisons:
+        if comparison.name in exact_required and not (
+            comparison.exact
+            and comparison.mismatched == 0
+            and comparison.passed
+            and comparison.within_tolerance
+            and comparison.mask_equal
+            and comparison.finite_pattern_equal
+        ):
+            return False
+        if (
+            comparison.name not in _INDEX_STAGES
+            and comparison.name != "public.preprocessing"
+            and comparison.mismatched > 0
+            and comparison.max_abs == 0
+        ):
+            return False
+    return True
 
 
 def _is_usable_resume_record(
@@ -323,9 +359,9 @@ def _is_usable_resume_record(
         or not artifact_error_message
     ):
         return False
-    return _has_stage_set(payload["core"], CANONICAL_STAGES) and _has_stage_set(
-        payload["public"], PUBLIC_STAGES
-    )
+    return _has_stage_set(
+        payload["core"], CANONICAL_STAGES, exact_required=_EXACT_CORE_STAGES
+    ) and _has_stage_set(payload["public"], PUBLIC_STAGES, exact_required=_EXACT_PUBLIC_STAGES)
 
 
 def _move_reference_batch(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
@@ -597,6 +633,16 @@ def _record_path(
     suffix = hashlib.sha256(identity.encode()).hexdigest()[:16]
     name = _safe_name(pid).strip("._")[:80] or "sample"
     return samples_dir / f"{name}-{suffix}.json"
+
+
+def _failure_bundle_path(
+    failures_dir: Path,
+    *,
+    sample_path: Path,
+    context: dict[str, Any],
+) -> Path:
+    context_suffix = _canonical_fingerprint(context)[:16]
+    return failures_dir / f"{sample_path.stem}-{context_suffix}.pt"
 
 
 def _load_resume_record(path: Path, context: dict[str, Any]) -> dict[str, Any] | None:
@@ -944,6 +990,12 @@ def run_qualification(config: QualificationConfig) -> RunSummary:
             )
             payload = None
             reused = False
+            failure_cache_path = None
+            diagnostic_path = _failure_bundle_path(
+                failures_dir,
+                sample_path=sample_path,
+                context=context,
+            )
             if config.resume and sample_path.exists():
                 payload = _load_resume_record(sample_path, context)
                 reused = payload is not None
@@ -1017,7 +1069,6 @@ def run_qualification(config: QualificationConfig) -> RunSummary:
                     *[_comparison_from_dict(item) for item in payload["public"]],
                 ]
                 if not all(item.passed for item in comparisons):
-                    diagnostic_path = failures_dir / sample_path.with_suffix(".pt").name
                     if reference_capture is not None and stok_capture is not None:
                         try:
                             torch.save(
@@ -1027,10 +1078,19 @@ def run_qualification(config: QualificationConfig) -> RunSummary:
                                 },
                                 diagnostic_path,
                             )
+                            failure_cache_path = str(diagnostic_path)
                         except Exception as exc:
                             payload["failure_artifact_error_type"] = type(exc).__name__
                             payload["failure_artifact_error_message"] = str(exc)
                 atomic_write_json(sample_path, payload)
+
+            if reused:
+                comparisons = [
+                    *[_comparison_from_dict(item) for item in payload["core"]],
+                    *[_comparison_from_dict(item) for item in payload["public"]],
+                ]
+                if not all(item.passed for item in comparisons) and diagnostic_path.exists():
+                    failure_cache_path = str(diagnostic_path)
 
             _append_metrics(
                 payload=payload,
@@ -1046,6 +1106,7 @@ def run_qualification(config: QualificationConfig) -> RunSummary:
                     "source_path": source_path_text,
                     "record_path": str(transaction.root / "samples" / sample_path.name),
                     "cache_path": str(sample_path),
+                    "failure_cache_path": failure_cache_path,
                     "reused": reused,
                     "error_type": payload["error_type"],
                 }
@@ -1131,8 +1192,9 @@ def run_qualification(config: QualificationConfig) -> RunSummary:
     for row in sample_manifest_rows:
         cache_path = Path(row["cache_path"])
         shutil.copy2(cache_path, published_samples / cache_path.name)
-        failure_path = failures_dir / cache_path.with_suffix(".pt").name
-        if failure_path.exists():
+        failure_path_value = row.get("failure_cache_path")
+        if failure_path_value is not None:
+            failure_path = Path(failure_path_value)
             shutil.copy2(failure_path, published_failures / failure_path.name)
     shutil.copy2(converted_path, published_checkpoints / converted_path.name)
     atomic_write_json(

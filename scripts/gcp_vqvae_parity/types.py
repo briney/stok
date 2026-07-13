@@ -4,6 +4,9 @@ from dataclasses import asdict, dataclass
 from enum import StrEnum
 from typing import Any
 
+# Pandas/PyArrow persist qualification counts and shape dimensions as signed int64.
+MAX_STORAGE_INTEGER = 2**63 - 1
+
 
 class RunStatus(StrEnum):
     FULLY_QUALIFIED = "fully_qualified"

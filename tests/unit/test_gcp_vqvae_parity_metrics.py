@@ -153,6 +153,21 @@ def test_summarize_run_rejects_impossible_counts(input_count, completed_count):
         )
 
 
+@pytest.mark.parametrize(
+    ("input_count", "completed_count"),
+    [(2**100, 0), (2**100, 2**100)],
+)
+def test_summarize_run_rejects_storage_unsafe_counts(input_count, completed_count):
+    with pytest.raises(ValueError, match="storage"):
+        summarize_run(
+            weight_pass=True,
+            core_comparisons=[_comparison("indices", True)],
+            public_comparisons=[_comparison("public.indices", True)],
+            input_count=input_count,
+            completed_count=completed_count,
+        )
+
+
 def test_qualification_config_defaults_to_primary_protocol(tmp_path):
     config = runner.QualificationConfig(input_dir=tmp_path, output_dir=tmp_path / "output")
 
@@ -268,6 +283,100 @@ def test_resume_loader_rejects_json_integer_overflow(tmp_path):
     path.write_text('{"too_large": ' + "9" * 5000 + "}")
 
     assert runner._load_resume_record(path, context) is None
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("shape", -1),
+        ("shape", 2**100),
+        ("compared", -1),
+        ("compared", 2**100),
+        ("mismatched", -1),
+        ("mismatched", 2**100),
+    ],
+)
+def test_comparison_validation_rejects_storage_unsafe_integers(field, value):
+    payload = _comparison("encoder_head", True).to_dict()
+    if field == "shape":
+        payload["shape"] = [value]
+    elif value < 0:
+        payload[field] = value
+    else:
+        payload["shape"] = [2**63 - 1, 2**63 - 1]
+        payload["compared"] = 2**100
+        payload[field] = value
+        if field == "mismatched":
+            payload["exact"] = False
+            payload["passed"] = False
+            payload["within_tolerance"] = False
+
+    with pytest.raises(ValueError, match="storage"):
+        runner._comparison_from_dict(payload)
+
+
+@pytest.mark.parametrize(
+    ("category", "stage"),
+    [
+        ("core", "indices"),
+        ("core", "embeddings"),
+        ("core", "valid"),
+        ("public", "public.preprocessing"),
+        ("public", "public.indices"),
+        ("public", "public.embeddings"),
+    ],
+)
+def test_resume_rejects_tolerant_metadata_for_exact_required_stages(category, stage):
+    context, payload = _valid_resume_payload()
+    target = next(item for item in payload[category] if item["name"] == stage)
+    target["exact"] = False
+    target["mismatched"] = 1
+
+    assert not runner._is_usable_resume_record(payload, expected_context=context)
+
+
+def test_resume_accepts_consistent_tolerant_core_stage_metadata():
+    context, payload = _valid_resume_payload()
+    target = next(item for item in payload["core"] if item["name"] == "encoder_head")
+    target.update(
+        exact=False,
+        mismatched=1,
+        max_abs=5e-7,
+        max_rel=5e-7,
+        p50_abs=5e-7,
+        p95_abs=5e-7,
+        p99_abs=5e-7,
+    )
+
+    assert runner._is_usable_resume_record(payload, expected_context=context)
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "positive_error_without_mismatch",
+        "mismatch_without_absolute_error",
+        "relative_error_without_absolute_error",
+    ],
+)
+def test_resume_rejects_inconsistent_tolerant_stage_metadata(corruption):
+    context, payload = _valid_resume_payload()
+    target = next(item for item in payload["core"] if item["name"] == "encoder_head")
+    target["exact"] = False
+    if corruption == "positive_error_without_mismatch":
+        target.update(
+            max_abs=5e-7,
+            max_rel=5e-7,
+            p50_abs=5e-7,
+            p95_abs=5e-7,
+            p99_abs=5e-7,
+        )
+    elif corruption == "mismatch_without_absolute_error":
+        target["mismatched"] = 1
+    elif corruption == "relative_error_without_absolute_error":
+        target["max_rel"] = 5e-7
+
+    assert not runner._is_usable_resume_record(payload, expected_context=context)
 
 
 def test_cli_rejects_non_primary_batch_size(monkeypatch, tmp_path):
@@ -563,6 +672,31 @@ def test_resume_reuses_only_compatible_successful_records(monkeypatch, tmp_path)
     assert capture_calls == ["reference", "reference", "reference", "reference"]
 
 
+def test_storage_unsafe_cached_metrics_are_recomputed_before_report_and_parquet(
+    monkeypatch, tmp_path
+):
+    input_dir, input_paths = _write_inputs(tmp_path, count=1)
+    capture_calls = _install_runner_mocks(monkeypatch, tmp_path, input_paths, input_paths)
+    output_dir = tmp_path / "output"
+    config = runner.QualificationConfig(input_dir=input_dir, output_dir=output_dir)
+
+    runner.run_qualification(config)
+    sample_path = next((output_dir / "samples").glob("*.json"))
+    corrupt = json.loads(sample_path.read_text())
+    target = next(item for item in corrupt["core"] if item["name"] == "encoder_head")
+    target["shape"] = [2**100]
+    target["compared"] = 2**100
+    sample_path.write_text(json.dumps(corrupt))
+
+    summary = runner.run_qualification(config)
+
+    assert summary.status is RunStatus.FULLY_QUALIFIED
+    assert capture_calls == ["reference", "reference"]
+    metrics = pd.read_parquet(output_dir / "metrics.parquet")
+    assert metrics["compared"].max() <= 2**63 - 1
+    assert (output_dir / "report.md").exists()
+
+
 def test_public_exception_preserves_successful_core_result(monkeypatch, tmp_path):
     input_dir, input_paths = _write_inputs(tmp_path, count=1)
     _install_runner_mocks(monkeypatch, tmp_path, input_paths, input_paths)
@@ -638,6 +772,33 @@ def test_resume_cache_sync_failure_cannot_leave_old_terminal_qualification(monke
     assert not (output_dir / "summary.json").exists()
     assert not (output_dir / "report.md").exists()
     assert not (output_dir / "completion.json").exists()
+
+
+def test_context_changing_pass_does_not_publish_stale_failure_bundle(monkeypatch, tmp_path):
+    input_dir, input_paths = _write_inputs(tmp_path, count=1)
+    _install_runner_mocks(monkeypatch, tmp_path, input_paths, input_paths)
+    output_dir = tmp_path / "output"
+    state = {"passes": False}
+
+    def compare_with_controlled_result(reference, stok, **kwargs):
+        del reference, stok, kwargs
+        return [
+            _comparison(name, state["passes"] if name == "indices" else True)
+            for name in CANONICAL_STAGES
+        ]
+
+    monkeypatch.setattr(runner, "compare_stage_captures", compare_with_controlled_result)
+    config = runner.QualificationConfig(input_dir=input_dir, output_dir=output_dir)
+
+    first = runner.run_qualification(config)
+    assert first.status is RunStatus.NOT_QUALIFIED
+    assert len(list((output_dir / "failures").glob("*.pt"))) == 1
+
+    state["passes"] = True
+    second = runner.run_qualification(replace(config, rtol=0.25))
+
+    assert second.status is RunStatus.FULLY_QUALIFIED
+    assert list((output_dir / "failures").glob("*.pt")) == []
 
 
 def test_resume_context_recomputes_for_dependency_and_dirty_source_changes(monkeypatch, tmp_path):
