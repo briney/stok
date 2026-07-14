@@ -134,6 +134,33 @@ def test_load_structures_featurizes_on_cpu_before_requested_transfer(
     assert events == ["featurize", "batch.to:cuda:0"]
 
 
+def test_load_structures_matches_upstream_knn_order_for_tied_distances(
+    monkeypatch, tmp_path: Path
+) -> None:
+    import torch_cluster
+
+    import stok.utils.structure_loader as loader
+
+    path = tmp_path / "tied-distances.cif"
+    path.write_text("fixture")
+    sample = _gcp_sample("0_tied", "AAAAA", [0.0, 1.0, 1.0, 2.0, 3.0])
+    monkeypatch.setattr(
+        loader,
+        "parse_gcp_vqvae_samples",
+        lambda _path, *, file_index, max_length: [sample],
+    )
+
+    loaded = loader.load_structures(path, max_length=8, k=2, device="cpu")
+
+    expected = torch_cluster.knn_graph(
+        loaded.graph.x_bb[:, 1].contiguous(),
+        k=2,
+        batch=loaded.graph.batch,
+        loop=False,
+    )
+    assert torch.equal(loaded.graph.edge_index, expected)
+
+
 def test_load_structures_raises_when_no_samples_are_accepted(monkeypatch, tmp_path: Path) -> None:
     import stok.utils.structure_loader as loader
 

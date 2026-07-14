@@ -134,6 +134,13 @@ def _gcp_vqvae_samples_to_batch(
     device: torch.device | str | None,
 ) -> LoadedStructures:
     """Prepare and featurize accepted GCP-VQVAE samples on CPU."""
+    try:
+        from torch_cluster import knn_graph
+    except ImportError as exc:
+        raise ImportError(
+            "Exact GCP-VQVAE production graph preparation requires torch-cluster"
+        ) from exc
+
     prepared_samples = [
         prepare_gcp_vqvae_sample(sample, max_length=max_length) for sample in samples
     ]
@@ -180,10 +187,11 @@ def _gcp_vqvae_samples_to_batch(
         nan_masks.append(nan_mask)
 
     batch: Batch = Batch.from_data_list(data_list)
-    batch.edge_index = _knn_graph(
+    batch.edge_index = knn_graph(
         batch.x_bb[:, 1].contiguous(),
         k=k,
-        batch_index=batch.batch,
+        batch=batch.batch,
+        loop=False,
     )
     batch.edge_type = torch.zeros(batch.edge_index.size(1), dtype=torch.long)
     batch.edge_index_precomputed = True
