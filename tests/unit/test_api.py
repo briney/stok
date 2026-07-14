@@ -488,20 +488,22 @@ def _loaded_structure_rows(pids: list[str], sequences: list[str]):
 def test_encode_preserves_multiple_samples_from_one_input(monkeypatch):
     import stok.utils.structure_loader as loader
 
+    loaded = _loaded_structure_rows(
+        ["0_complex_chain_id_A", "0_complex_chain_id_B"],
+        ["AAA", "GG"],
+    )
+    loaded.nan_mask[0, 1] = False
     monkeypatch.setattr(
         loader,
         "load_structures",
-        lambda *_args, **_kwargs: _loaded_structure_rows(
-            ["0_complex_chain_id_A", "0_complex_chain_id_B"],
-            ["AAA", "GG"],
-        ),
+        lambda *_args, **_kwargs: loaded,
     )
 
     result = encode("complex.cif", encoder=_FakeStructureEncoder())
 
     assert result.sample_ids == ["0_complex_chain_id_A", "0_complex_chain_id_B"]
     assert result.sequences == ["AAA", "GG"]
-    assert result.struct_tokens == [[0, 1, 2], [4, 5]]
+    assert result.struct_tokens == [[0, 0, 2], [4, 5]]
 
 
 def test_encode_skips_rejected_batch_and_continues(monkeypatch):

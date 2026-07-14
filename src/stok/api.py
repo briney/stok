@@ -894,8 +894,10 @@ def encode(
         valid_cpu = out["valid"].detach().cpu()
 
         for i, (pid, seq) in enumerate(zip(loaded.pids, loaded.sequences)):
-            length = int(valid_cpu[i].sum().item())
-            tokens = indices_cpu[i, :length].tolist()
+            length = len(seq)
+            tokens_tensor = indices_cpu[i, :length].clone()
+            tokens_tensor[~valid_cpu[i, :length]] = 0
+            tokens = tokens_tensor.tolist()
             sample_ids.append(pid)
             sequences.append(seq)
             struct_tokens_out.append(tokens)
