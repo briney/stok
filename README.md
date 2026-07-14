@@ -288,6 +288,40 @@ accelerate launch -m stok.train \
 
 For comprehensive training documentation — including all objectives, dataset formats, config options, LR schedules, evaluation metrics, decoder integration, and dataset mixtures — see **[docs/train.md](docs/train.md)**.
 
+## Testing
+
+Run the normal unit and integration test suite with:
+
+```bash
+python -m pytest -q
+```
+
+### GCP-VQVAE encoder parity eval
+
+Changes to the structure parser, graph construction, featurizer, or
+`StructureEncoder` should also be checked with the local GPU parity eval. It
+runs the production STōk encoder against a 5.6 MB oracle cached from the real
+GCP-VQVAE base encoder, so routine runs do not require `gcp_vqvae` or network
+access.
+
+The eval expects the 500-file qualification set at
+`~/datasets/structure/cif_500` and a converted base-encoder checkpoint:
+
+```bash
+STOK_ENCODER_CHECKPOINT=/path/to/encoder-base.pt \
+PYTHONPATH=src python -m pytest -q evals/gcp_vqvae/test_encoder_parity.py
+```
+
+It requires exact agreement for the 497 upstream-accepted structures on
+validity masks, VQ indices, codebook weights, and valid embeddings, and checks
+that the three upstream-rejected fixtures remain rejected. The eval is outside
+the configured `tests/` path and is therefore not collected by the normal
+pytest command or GitHub CI. Set `STOK_GCP_VQVAE_CIF_DIR` to use a different
+fixture location.
+
+See **[evals/gcp_vqvae/README.md](evals/gcp_vqvae/README.md)** for oracle
+provenance and regeneration instructions.
+
 ## Smoke test
 
 Validate your installation by printing the config, model parameter count, and running a forward pass:
