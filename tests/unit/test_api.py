@@ -8,6 +8,8 @@ missing ``mask`` argument to the geometric decoder).
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -17,6 +19,7 @@ from stok.api import (
     MDLMModelConfig,
     NoiseScheduleConfig,
     design,
+    encode,
     fold,
     load_decoder,
     load_model,
@@ -26,7 +29,6 @@ from stok.api import (
 )
 from stok.models.mdlm import MDLMModel
 from stok.models.noise_schedule import NoiseSchedule
-
 
 CODEBOOK_SIZE = 16
 CODEBOOK_DIM = 8
@@ -130,7 +132,7 @@ def seq_only_loaded(tmp_path) -> LoadedModel:
 
 
 @pytest.fixture
-def joint_codebook(tmp_path) -> tuple[torch.Tensor, "object"]:
+def joint_codebook(tmp_path) -> tuple[torch.Tensor, object]:
     codebook = torch.randn(CODEBOOK_SIZE, CODEBOOK_DIM) * 0.1
     codebook_path = tmp_path / "codebook.pt"
     torch.save(codebook, codebook_path)
@@ -450,6 +452,79 @@ class TestUnfold:
     def test_raises_not_implemented(self):
         with pytest.raises(NotImplementedError, match="untokenize"):
             unfold()
+
+
+class _FakeStructureEncoder:
+    max_length = 4
+
+    def to(self, _device):
+        return self
+
+    def eval(self):
+        return self
+
+    def __call__(self, _graph, mask, nan_mask):
+        rows = mask.shape[0]
+        indices = torch.arange(rows * self.max_length, dtype=torch.long).reshape(
+            rows, self.max_length
+        )
+        return {"indices": indices, "valid": mask & nan_mask}
+
+
+def _loaded_structure_rows(pids: list[str], sequences: list[str]):
+    rows = len(pids)
+    mask = torch.zeros(rows, 4, dtype=torch.bool)
+    for index, sequence in enumerate(sequences):
+        mask[index, : len(sequence)] = True
+    return SimpleNamespace(
+        graph=object(),
+        mask=mask,
+        nan_mask=mask.clone(),
+        pids=pids,
+        sequences=sequences,
+    )
+
+
+def test_encode_preserves_multiple_samples_from_one_input(monkeypatch):
+    import stok.utils.structure_loader as loader
+
+    loaded = _loaded_structure_rows(
+        ["0_complex_chain_id_A", "0_complex_chain_id_B"],
+        ["AAA", "GG"],
+    )
+    loaded.nan_mask[0, 1] = False
+    monkeypatch.setattr(
+        loader,
+        "load_structures",
+        lambda *_args, **_kwargs: loaded,
+    )
+
+    result = encode("complex.cif", encoder=_FakeStructureEncoder())
+
+    assert result.sample_ids == ["0_complex_chain_id_A", "0_complex_chain_id_B"]
+    assert result.sequences == ["AAA", "GG"]
+    assert result.struct_tokens == [[0, 0, 2], [4, 5]]
+
+
+def test_encode_skips_rejected_batch_and_continues(monkeypatch):
+    import stok.utils.structure_loader as loader
+
+    def fake_load(paths, **_kwargs):
+        if paths == ["rejected.cif"]:
+            raise loader.NoAcceptedStructuresError("rejected")
+        return _loaded_structure_rows(["0_accepted"], ["AAA"])
+
+    monkeypatch.setattr(loader, "load_structures", fake_load)
+
+    result = encode(
+        ["rejected.cif", "accepted.cif"],
+        encoder=_FakeStructureEncoder(),
+        batch_size=1,
+    )
+
+    assert result.sample_ids == ["0_accepted"]
+    assert result.sequences == ["AAA"]
+    assert result.struct_tokens == [[0, 1, 2]]
 
 
 # ---------------------------------------------------------------------------

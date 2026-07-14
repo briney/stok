@@ -195,8 +195,8 @@ class EncodeResult(NamedTuple):
     """Structured result of :func:`encode`.
 
     Attributes:
-        sample_ids: One identifier per input structure (filename stem
-            when a file path was provided).
+        sample_ids: One identifier per accepted structure sample. A file may
+            yield multiple chain-qualified identifiers.
         sequences: One-letter amino-acid sequences as parsed from the
             structure, trimmed to the encoder's ``max_length``.
         struct_tokens: Per-sample lists of VQ code indices, already
@@ -841,9 +841,8 @@ def encode(
 
     Runs a pretrained :class:`~stok.models.structure_encoder.StructureEncoder`
     over one or more structures and returns per-sample token indices trimmed
-    to each input's true sequence length. The encoder's
-    ``max_length`` determines the maximum supported protein length; longer
-    proteins are silently truncated (matching upstream inference behavior).
+    to each accepted sample's true sequence length. Upstream-rejected samples,
+    including proteins longer than the encoder's ``max_length``, are omitted.
 
     Args:
         structures: A single file path, a directory (recursively scanned for
@@ -859,9 +858,9 @@ def encode(
             with :func:`untokenize` downstream.
 
     Returns:
-        An :class:`EncodeResult` with one row per input structure.
+        An :class:`EncodeResult` with one row per accepted structure sample.
     """
-    from stok.utils.structure_loader import load_structures
+    from stok.utils.structure_loader import NoAcceptedStructuresError, load_structures
 
     device = torch.device(device) if isinstance(device, str) else device
     encoder = encoder.to(device).eval()
@@ -879,7 +878,14 @@ def encode(
 
     for start in range(0, len(structures_list), batch_size):
         batch_paths = structures_list[start : start + batch_size]
-        loaded = load_structures(batch_paths, max_length=max_length, device=device)
+        try:
+            loaded = load_structures(
+                batch_paths,
+                max_length=max_length,
+                device=device,
+            )
+        except NoAcceptedStructuresError:
+            continue
 
         with torch.inference_mode():
             out = encoder(loaded.graph, loaded.mask, loaded.nan_mask)
@@ -888,8 +894,10 @@ def encode(
         valid_cpu = out["valid"].detach().cpu()
 
         for i, (pid, seq) in enumerate(zip(loaded.pids, loaded.sequences)):
-            length = int(valid_cpu[i].sum().item())
-            tokens = indices_cpu[i, :length].tolist()
+            length = len(seq)
+            tokens_tensor = indices_cpu[i, :length].clone()
+            tokens_tensor[~valid_cpu[i, :length]] = 0
+            tokens = tokens_tensor.tolist()
             sample_ids.append(pid)
             sequences.append(seq)
             struct_tokens_out.append(tokens)

@@ -2,10 +2,13 @@
 
 import numpy as np
 import pytest
-from pathlib import Path
 
-from stok.utils.structure_parser import parse_structure, StructureData, AA3TO1
-
+from stok.utils.structure_parser import (
+    AA3TO1,
+    StructureData,
+    _get_one_letter_code,
+    parse_structure,
+)
 
 # Minimal valid PDB content with two residues (ALA, GLY)
 MINIMAL_PDB = """\
@@ -201,10 +204,26 @@ class TestAA3TO1Mapping:
     def test_standard_amino_acids(self):
         """All 20 standard amino acids are mapped."""
         standard = {
-            "ALA": "A", "CYS": "C", "ASP": "D", "GLU": "E", "PHE": "F",
-            "GLY": "G", "HIS": "H", "ILE": "I", "LYS": "K", "LEU": "L",
-            "MET": "M", "ASN": "N", "PRO": "P", "GLN": "Q", "ARG": "R",
-            "SER": "S", "THR": "T", "VAL": "V", "TRP": "W", "TYR": "Y",
+            "ALA": "A",
+            "CYS": "C",
+            "ASP": "D",
+            "GLU": "E",
+            "PHE": "F",
+            "GLY": "G",
+            "HIS": "H",
+            "ILE": "I",
+            "LYS": "K",
+            "LEU": "L",
+            "MET": "M",
+            "ASN": "N",
+            "PRO": "P",
+            "GLN": "Q",
+            "ARG": "R",
+            "SER": "S",
+            "THR": "T",
+            "VAL": "V",
+            "TRP": "W",
+            "TYR": "Y",
         }
         for three, one in standard.items():
             assert AA3TO1.get(three) == one
@@ -213,3 +232,7 @@ class TestAA3TO1Mapping:
         """Common non-standard amino acids are mapped."""
         assert AA3TO1.get("MSE") == "M"  # Selenomethionine
         assert AA3TO1.get("UNK") == "X"  # Unknown
+
+
+def test_unknown_residue_does_not_import_removed_biopython_api():
+    assert _get_one_letter_code("FME") == "X"

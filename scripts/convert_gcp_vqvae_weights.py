@@ -50,13 +50,16 @@ _DROP_EXACT = {
 }
 
 # ``(src, dst)`` pairs for strip-and-rename. Processed in order; the first
-# match wins. The GCPNet ``encoder.*`` prefix is renamed to ``gcpnet.*`` to
-# avoid naming an ``encoder`` attribute inside stok's ``StructureEncoder``.
+# match wins. Released checkpoints wrap GCPNet as ``encoder.encoder.*``;
+# older/synthetic checkpoints use ``encoder.*`` directly. Both map to the
+# single ``gcpnet.*`` module in stok's ``StructureEncoder``.
 _RENAME_RULES: list[tuple[str, str]] = [
     ("vqvae.encoder_tail.", "encoder_tail."),
     ("vqvae.encoder_blocks.", "encoder_blocks."),
     ("vqvae.encoder_head.", "encoder_head."),
     ("vqvae.vector_quantizer.", "vector_quantizer."),
+    ("encoder.featuriser.", "featurizer."),
+    ("encoder.encoder.", "gcpnet."),
     ("encoder.", "gcpnet."),
 ]
 

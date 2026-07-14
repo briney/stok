@@ -94,6 +94,13 @@ _GCPNET_LAYER_CFG = {
     },
 }
 
+_PRECOMPUTED_FEATURE_FIELDS = (
+    "x",
+    "x_vector_attr",
+    "edge_attr",
+    "edge_vector_attr",
+)
+
 
 def _build_gcpnet() -> GCPNetModel:
     """Instantiate :class:`GCPNetModel` with the frozen upstream config."""
@@ -208,6 +215,15 @@ class StructureEncoder(nn.Module):
             kmeans_init=False,
         )
 
+    def _prepare_graph_features(self, graph):
+        """Reuse a complete explicitly marked feature set, or build it once."""
+        if bool(getattr(graph, "features_precomputed", False)):
+            missing = [name for name in _PRECOMPUTED_FEATURE_FIELDS if not hasattr(graph, name)]
+            if missing:
+                raise ValueError(f"precomputed graph is missing features: {missing}")
+            return graph
+        return self.featurizer(graph)
+
     @torch.inference_mode()
     def forward(
         self,
@@ -236,7 +252,7 @@ class StructureEncoder(nn.Module):
         """
         valid = mask.to(torch.bool) & nan_mask.to(torch.bool)
 
-        graph = self.featurizer(graph)
+        graph = self._prepare_graph_features(graph)
         gcp_out = self.gcpnet(graph)
         node_emb = gcp_out["node_embedding"]  # (ΣLᵢ, 128)
 

@@ -288,6 +288,45 @@ accelerate launch -m stok.train \
 
 For comprehensive training documentation — including all objectives, dataset formats, config options, LR schedules, evaluation metrics, decoder integration, and dataset mixtures — see **[docs/train.md](docs/train.md)**.
 
+## Testing
+
+Run the normal unit and integration test suite with:
+
+```bash
+python -m pytest -q
+```
+
+### GCP-VQVAE parity eval
+
+Changes to the structure parser, graph construction, featurizer, or
+structure encoder/decoder should also be checked with the local GPU parity
+eval. It runs the production STōk models against a 5.9 MB oracle cached from
+the real GCP-VQVAE base model. Routine runs do not import or execute
+`gcp_vqvae`, and need no network access after the STōk checkpoints are cached.
+
+The 500 CIF fixtures are bundled in `evals/gcp_vqvae/cif_500.tar.gz` and are
+extracted into a pytest temporary directory for the run. Allow about 149 MB of
+temporary disk space. Run both checks with:
+
+```bash
+PYTHONPATH=src python -m pytest -q evals/gcp_vqvae/test_parity.py
+```
+
+The encoder check requires exact agreement for the 497 upstream-accepted
+structures on validity masks, VQ indices, codebook weights, and valid
+embeddings, and checks that the three upstream-rejected fixtures remain
+rejected. The decoder check directly compares N/CA/C coordinates for a
+deterministic, length-stratified subset of 32 structures with `rtol=0` and
+`atol=1e-5`.
+
+The eval is outside the configured `tests/` path and is therefore not collected
+by the normal pytest command or GitHub CI. `STOK_ENCODER_CHECKPOINT` and
+`STOK_DECODER_CHECKPOINT` may override the normal production checkpoints. Set
+`STOK_GCP_VQVAE_CIF_DIR` to bypass fixture extraction.
+
+See **[evals/gcp_vqvae/README.md](evals/gcp_vqvae/README.md)** for oracle
+provenance and regeneration instructions.
+
 ## Smoke test
 
 Validate your installation by printing the config, model parameter count, and running a forward pass:
