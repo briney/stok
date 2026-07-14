@@ -7,7 +7,9 @@ from pathlib import Path
 
 import torch
 
+from stok.models.decoder import load_pretrained_decoder
 from stok.models.structure_encoder import load_pretrained_encoder
+from stok.utils.decoding import decode_coords
 from stok.utils.structure_loader import NoAcceptedStructuresError, load_structures
 
 EVAL_DIR = Path(__file__).resolve().parent
@@ -54,7 +56,7 @@ def test_stok_encoder_matches_cached_gcp_vqvae_outputs(tmp_path: Path) -> None:
     assert fixture_dir.is_dir(), f"Fixture directory does not exist: {fixture_dir}"
     assert torch.cuda.is_available(), "This local eval requires a CUDA GPU"
     oracle = torch.load(ORACLE_PATH, map_location="cpu", weights_only=True)
-    assert oracle["schema_version"] == 1
+    assert oracle["schema_version"] == 2
     assert oracle["preset"] == "base"
 
     _configure_determinism()
@@ -102,3 +104,54 @@ def test_stok_encoder_matches_cached_gcp_vqvae_outputs(tmp_path: Path) -> None:
 
     assert accepted == 497
     assert rejected == 3
+
+
+def test_stok_decoder_matches_cached_gcp_vqvae_outputs() -> None:
+    assert torch.cuda.is_available(), "This local eval requires a CUDA GPU"
+    oracle = torch.load(ORACLE_PATH, map_location="cpu", weights_only=True)
+    assert oracle["schema_version"] == 2
+    assert oracle["preset"] == "base"
+    assert oracle["decoder_sample_count"] == 32
+    assert oracle["decoder_max_length"] == 1280
+
+    records = [record for record in oracle["samples"] if record["decoder_coords"].numel()]
+    assert len(records) == 32
+    lengths = [len(record["sequence"]) for record in records]
+    assert (min(lengths), max(lengths)) == (35, 1055)
+    assert sum(bool((~record["valid"]).any()) for record in records) == 13
+
+    _configure_determinism()
+    device = torch.device("cuda:0")
+    checkpoint = os.environ.get("STOK_DECODER_CHECKPOINT")
+    decoder = load_pretrained_decoder(
+        "base",
+        path=checkpoint,
+        device=device,
+        freeze=True,
+        progress=False,
+    )
+    codebook = oracle["codebook"][0].to(device)
+    max_length = int(oracle["decoder_max_length"])
+
+    for record in records:
+        length = len(record["sequence"])
+        valid = record["valid"].bool()
+        sample_indices = record["indices"].clone().long()
+        sample_indices[~valid] = 0
+
+        indices = torch.zeros((1, max_length), dtype=torch.long, device=device)
+        mask = torch.zeros((1, max_length), dtype=torch.bool, device=device)
+        indices[0, :length] = sample_indices.to(device)
+        mask[0, :length] = valid.to(device)
+
+        with torch.inference_mode():
+            actual = decode_coords(decoder, codebook[indices], mask)[0, :length].cpu()
+        expected = record["decoder_coords"]
+        assert torch.isfinite(expected[valid]).all(), record["filename"]
+        torch.testing.assert_close(
+            actual[valid],
+            expected[valid],
+            rtol=0,
+            atol=1e-5,
+            msg=record["filename"],
+        )

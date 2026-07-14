@@ -16,6 +16,7 @@ UPSTREAM_REVISION = "64bb4ff628f7d2ccba587cdc9f0eaa97c1f3f9a1"
 DEFAULT_INPUT_DIR = Path("~/datasets/structure/cif_500").expanduser()
 DEFAULT_OUTPUT = Path(__file__).resolve().with_name("oracle_base.pt")
 STRUCTURE_SUFFIXES = {".cif", ".mmcif", ".pdb", ".ent"}
+DECODER_SAMPLE_COUNT = 32
 
 
 def _sha256(path: Path) -> str:
@@ -43,6 +44,24 @@ def _move_batch(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
     moved["masks"] = batch["masks"].to(device)
     moved["nan_masks"] = batch["nan_masks"].to(device)
     return moved
+
+
+def _select_decoder_indices(samples: list[dict[str, Any]], count: int) -> set[int]:
+    if not 2 <= count <= len(samples):
+        raise ValueError(f"Decoder sample count must be in [2, {len(samples)}], got {count}")
+    ranked = sorted(
+        range(len(samples)),
+        key=lambda index: (
+            len(str(samples[index]["seq"])),
+            Path(samples[index]["source_path"]).name,
+        ),
+    )
+    selected = {
+        ranked[round(rank * (len(ranked) - 1) / (count - 1))] for rank in range(count)
+    }
+    if len(selected) != count:
+        raise RuntimeError(f"Expected {count} distinct decoder samples, selected {len(selected)}")
+    return selected
 
 
 @torch.inference_mode()
@@ -78,21 +97,33 @@ def generate_oracle(input_dir: Path, output: Path) -> None:
         max_task_samples=None,
         progress=True,
     )
+    decoder_indices = _select_decoder_indices(dataset.samples, DECODER_SAMPLE_COUNT)
     accepted: dict[Path, dict[str, Any]] = {}
     for index, sample in enumerate(dataset.samples):
         source = Path(sample["source_path"]).resolve()
         if source in accepted:
             raise ValueError(f"Expected at most one accepted sample per fixture: {source}")
         batch = _move_batch(collate_fn([dataset[index]]), device)
-        output_values = model(batch, return_vq_layer=True)
+        include_decoder = index in decoder_indices
+        output_values = model(batch, return_vq_layer=not include_decoder)
         sequence = str(batch["seq"][0])
         length = len(sequence)
         valid = (batch["masks"] & batch["nan_masks"])[0, :length].detach().cpu().bool()
         indices = output_values["indices"][0, :length].detach().cpu().long()
+        decoder_coords = torch.empty((0, 3, 3), dtype=torch.float32)
+        if include_decoder:
+            decoder_coords = (
+                output_values["outputs"]
+                .view(-1, wrapper.max_length, 3, 3)[0, :length]
+                .detach()
+                .cpu()
+                .float()
+            )
         accepted[source] = {
             "sequence": sequence,
             "valid": valid,
             "indices": indices,
+            "decoder_coords": decoder_coords,
         }
 
     samples = []
@@ -108,13 +139,20 @@ def generate_oracle(input_dir: Path, output: Path) -> None:
                 "indices": (
                     torch.empty(0, dtype=torch.long) if sample is None else sample["indices"]
                 ),
+                "decoder_coords": (
+                    torch.empty((0, 3, 3), dtype=torch.float32)
+                    if sample is None
+                    else sample["decoder_coords"]
+                ),
             }
         )
 
     checkpoint_path = Path(wrapper.checkpoint_path)
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "preset": "base",
+        "decoder_sample_count": DECODER_SAMPLE_COUNT,
+        "decoder_max_length": wrapper.max_length,
         "upstream_repo": UPSTREAM_REPO,
         "upstream_revision": UPSTREAM_REVISION,
         "upstream_checkpoint_sha256": _sha256(checkpoint_path),
