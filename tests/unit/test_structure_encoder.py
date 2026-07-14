@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -174,6 +175,56 @@ def test_load_structures_raises_when_no_samples_are_accepted(monkeypatch, tmp_pa
 
     with pytest.raises(loader.NoAcceptedStructuresError, match="No accepted structures"):
         loader.load_structures(path, device="cpu")
+
+
+def test_encoder_reuses_explicit_complete_precomputed_features() -> None:
+    from torch_geometric.data import Data
+
+    from stok.models.structure_encoder import StructureEncoder
+
+    graph = Data(
+        x=torch.zeros(2, 49),
+        x_vector_attr=torch.zeros(2, 2, 3),
+        edge_attr=torch.zeros(2, 1),
+        edge_vector_attr=torch.zeros(2, 1, 3),
+    )
+    graph.features_precomputed = True
+
+    def fail_if_called(_graph):
+        raise AssertionError("precomputed features must not be recomputed")
+
+    holder = SimpleNamespace(featurizer=fail_if_called)
+    assert StructureEncoder._prepare_graph_features(holder, graph) is graph
+
+
+def test_encoder_rejects_incomplete_precomputed_features() -> None:
+    from torch_geometric.data import Data
+
+    from stok.models.structure_encoder import StructureEncoder
+
+    graph = Data(x=torch.zeros(2, 49))
+    graph.features_precomputed = True
+    holder = SimpleNamespace(featurizer=lambda value: value)
+
+    with pytest.raises(ValueError, match="precomputed graph is missing features"):
+        StructureEncoder._prepare_graph_features(holder, graph)
+
+
+def test_encoder_still_featurizes_unmarked_raw_graph() -> None:
+    from torch_geometric.data import Data
+
+    from stok.models.structure_encoder import StructureEncoder
+
+    graph = Data()
+    calls: list[object] = []
+
+    def record(value):
+        calls.append(value)
+        return value
+
+    holder = SimpleNamespace(featurizer=record)
+    assert StructureEncoder._prepare_graph_features(holder, graph) is graph
+    assert calls == [graph]
 
 
 # ---------------------------------------------------------------------------
