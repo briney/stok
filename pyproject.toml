@@ -12,6 +12,7 @@ license = { file = "LICENSE" }
 authors = [{ name = "Bryan Briney" }]
 dependencies = [
   "torch",
+  "torch-cluster>=1.6.3",
   "hydra-core",
   "omegaconf",
   "graphein",
