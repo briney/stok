@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 from pathlib import Path
 
 import torch
@@ -11,7 +12,7 @@ from stok.utils.structure_loader import NoAcceptedStructuresError, load_structur
 
 EVAL_DIR = Path(__file__).resolve().parent
 ORACLE_PATH = EVAL_DIR / "oracle_base.pt"
-DEFAULT_FIXTURE_DIR = Path("~/datasets/structure/cif_500").expanduser()
+FIXTURE_ARCHIVE = EVAL_DIR / "cif_500.tar.gz"
 
 
 def _sha256(path: Path) -> str:
@@ -22,8 +23,14 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _fixture_dir() -> Path:
-    return Path(os.environ.get("STOK_GCP_VQVAE_CIF_DIR", DEFAULT_FIXTURE_DIR)).expanduser()
+def _fixture_dir(tmp_path: Path) -> Path:
+    override = os.environ.get("STOK_GCP_VQVAE_CIF_DIR")
+    if override:
+        return Path(override).expanduser()
+
+    assert FIXTURE_ARCHIVE.is_file(), f"Missing bundled fixtures: {FIXTURE_ARCHIVE}"
+    shutil.unpack_archive(FIXTURE_ARCHIVE, tmp_path)
+    return tmp_path / "cif_500"
 
 
 def _configure_determinism() -> None:
@@ -37,15 +44,15 @@ def _configure_determinism() -> None:
     torch.use_deterministic_algorithms(True)
 
 
-def test_stok_encoder_matches_cached_gcp_vqvae_outputs() -> None:
+def test_stok_encoder_matches_cached_gcp_vqvae_outputs(tmp_path: Path) -> None:
     assert ORACLE_PATH.is_file(), (
         f"Missing {ORACLE_PATH.name}; regenerate it with "
         "python -m evals.gcp_vqvae.generate_oracle"
     )
-    assert torch.cuda.is_available(), "This local eval requires a CUDA GPU"
 
-    fixture_dir = _fixture_dir()
+    fixture_dir = _fixture_dir(tmp_path)
     assert fixture_dir.is_dir(), f"Fixture directory does not exist: {fixture_dir}"
+    assert torch.cuda.is_available(), "This local eval requires a CUDA GPU"
     oracle = torch.load(ORACLE_PATH, map_location="cpu", weights_only=True)
     assert oracle["schema_version"] == 1
     assert oracle["preset"] == "base"

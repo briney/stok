@@ -304,8 +304,9 @@ runs the production STōk encoder against a 5.6 MB oracle cached from the real
 GCP-VQVAE base encoder, so routine runs do not require `gcp_vqvae` or network
 access.
 
-The eval expects the 500-file qualification set at
-`~/datasets/structure/cif_500` and a converted base-encoder checkpoint:
+The 500 CIF fixtures are bundled in `evals/gcp_vqvae/cif_500.tar.gz` and are
+extracted into a pytest temporary directory for the run. Allow about 149 MB of
+temporary disk space. A converted base-encoder checkpoint is also required:
 
 ```bash
 STOK_ENCODER_CHECKPOINT=/path/to/encoder-base.pt \
@@ -316,8 +317,8 @@ It requires exact agreement for the 497 upstream-accepted structures on
 validity masks, VQ indices, codebook weights, and valid embeddings, and checks
 that the three upstream-rejected fixtures remain rejected. The eval is outside
 the configured `tests/` path and is therefore not collected by the normal
-pytest command or GitHub CI. Set `STOK_GCP_VQVAE_CIF_DIR` to use a different
-fixture location.
+pytest command or GitHub CI. Set `STOK_GCP_VQVAE_CIF_DIR` to bypass extraction
+and use a different fixture directory.
 
 See **[evals/gcp_vqvae/README.md](evals/gcp_vqvae/README.md)** for oracle
 provenance and regeneration instructions.
