@@ -1,5 +1,4 @@
 import numpy as np
-import torch
 
 from experiments.gcp_mdlm.stage1 import provenance
 from experiments.gcp_mdlm.stage1.features import CachedFeatures, write_feature_cache

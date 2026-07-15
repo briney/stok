@@ -101,7 +101,7 @@ class CachedFeatures:
     manifest: dict
 
     @classmethod
-    def load(cls, cache_dir: str | Path) -> "CachedFeatures":
+    def load(cls, cache_dir: str | Path) -> CachedFeatures:
         cache_dir = Path(cache_dir)
         features = np.load(cache_dir / _FEATURES, mmap_mode="r")
         token_ids = np.load(cache_dir / _TOKENS)
