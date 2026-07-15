@@ -32,13 +32,16 @@ def write_shard(
             "mean_plddt": [r.mean_plddt for r in rows],
         }
     )
+    # Write outcomes atomically first (write-commit ordering for resume safety)
+    outcomes_path = staging_dir / f"shard_{shard_index:05d}.outcomes.json"
+    outcomes_tmp = outcomes_path.with_suffix(".outcomes.json.tmp")
+    outcomes_tmp.write_text(json.dumps([dataclasses.asdict(o) for o in outcomes]))
+    outcomes_tmp.replace(outcomes_path)
+    # Then write parquet atomically as final completion signal for resume checks
     pq = staging_dir / f"shard_{shard_index:05d}.parquet"
     tmp = pq.with_suffix(".parquet.tmp")
     df.to_parquet(tmp, index=False)
     tmp.replace(pq)
-    (staging_dir / f"shard_{shard_index:05d}.outcomes.json").write_text(
-        json.dumps([dataclasses.asdict(o) for o in outcomes])
-    )
 
 
 def run(
