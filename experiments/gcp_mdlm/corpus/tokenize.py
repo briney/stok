@@ -40,7 +40,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import DataLoader, Dataset
 from torch_geometric.data import Batch, Data
 
 from stok.utils.structure_loader import NoAcceptedStructuresError, load_structures
@@ -154,3 +154,63 @@ def collate_featurized(items: list[StructureItem]) -> CollatedBatch:
     nan_mask = torch.stack([it.nan_mask for it in accepted])
     metas = [(it.sequence_id, it.sequence, it.mean_plddt) for it in accepted]
     return CollatedBatch(graph, mask, nan_mask, metas, outcomes)
+
+
+@dataclass
+class Row:
+    sequence_id: str
+    sequence: str
+    structure_tokens: list[int]
+    length: int
+    mean_plddt: float
+
+
+def tokenize_batch(encoder, batch: CollatedBatch, *, device) -> list[Row]:
+    """Encode a collated batch and return aligned per-structure rows."""
+    if batch.graph is None:
+        return []
+    graph = batch.graph.to(device)
+    mask = batch.mask.to(device)
+    nan_mask = batch.nan_mask.to(device)
+    with torch.inference_mode():
+        out = encoder(graph, mask, nan_mask)
+    indices = out["indices"].cpu()
+    valid = out["valid"].cpu()
+    rows: list[Row] = []
+    for i, (sid, seq, plddt) in enumerate(batch.metas):
+        length = len(seq)
+        tokens = indices[i, :length].clone()
+        tokens[~valid[i, :length]] = 0
+        token_list = tokens.tolist()
+        assert len(token_list) == length, sid
+        rows.append(Row(sid, seq, token_list, length, plddt))
+    return rows
+
+
+def tokenize_paths(
+    paths: list[str],
+    encoder,
+    filters: CorpusFilters,
+    *,
+    batch_size: int,
+    num_workers: int,
+    device,
+    batch_forward: bool = True,
+) -> tuple[list[Row], list[StructureOutcome]]:
+    """Featurize (parallel workers) + encode (batched, or B=1 if ``batch_forward=False``)."""
+    max_length = encoder.max_length
+    dataset = StructureFeatureDataset(paths, filters, max_length=max_length)
+    load_bs = batch_size if batch_forward else 1
+    loader = DataLoader(
+        dataset,
+        batch_size=load_bs,
+        num_workers=num_workers,
+        collate_fn=collate_featurized,
+        shuffle=False,
+    )
+    rows: list[Row] = []
+    outcomes: list[StructureOutcome] = []
+    for batch in loader:
+        rows.extend(tokenize_batch(encoder, batch, device=device))
+        outcomes.extend(batch.outcomes)
+    return rows, outcomes

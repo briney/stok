@@ -80,3 +80,52 @@ def test_plddt_rejection_recorded():
     assert all(it.status == "rejected_plddt" for it in items)
     batch = collate_featurized(items)
     assert batch.graph is None and len(batch.outcomes) == len(items)
+
+
+def _load_encoder():
+    import os
+
+    from stok.models.structure_encoder import load_pretrained_encoder
+
+    try:
+        return load_pretrained_encoder(
+            "base", path=os.environ.get("STOK_ENCODER_CHECKPOINT"), device="cpu", freeze=True
+        )
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"encoder weights unavailable: {exc}")
+
+
+@pytest.mark.slow
+def test_tokenize_rows_aligned_and_in_range():
+    from experiments.gcp_mdlm.corpus.tokenize import tokenize_paths
+
+    encoder = _load_encoder()
+    rows, outcomes = tokenize_paths(
+        _paths(),
+        encoder,
+        CorpusFilters(min_mean_plddt=0.0),
+        batch_size=4,
+        num_workers=0,
+        device="cpu",
+    )
+    assert rows, "no structures tokenized"
+    for r in rows:
+        assert r.length == len(r.sequence) == len(r.structure_tokens)
+        assert all(0 <= t < 4096 for t in r.structure_tokens)
+
+
+@pytest.mark.slow
+def test_batched_matches_b1_parity():
+    from experiments.gcp_mdlm.corpus.tokenize import tokenize_paths
+
+    encoder = _load_encoder()
+    f = CorpusFilters(min_mean_plddt=0.0)
+    batched, _ = tokenize_paths(
+        _paths(), encoder, f, batch_size=4, num_workers=0, device="cpu", batch_forward=True
+    )
+    one_at_a_time, _ = tokenize_paths(
+        _paths(), encoder, f, batch_size=1, num_workers=0, device="cpu", batch_forward=False
+    )
+    bx = {r.sequence_id: r.structure_tokens for r in batched}
+    for r in one_at_a_time:
+        assert bx[r.sequence_id] == r.structure_tokens, f"batched tokens differ for {r.sequence_id}"
