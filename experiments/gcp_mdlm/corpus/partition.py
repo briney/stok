@@ -12,10 +12,17 @@ _COLUMNS = ["sequence_id", "sequence", "structure_tokens", "length", "mean_plddt
 
 
 def partition(
-    staging_dir: str | Path, split_map: dict[str, str], out_dir: str | Path,
-    *, rows_per_shard: int = 5000,
+    staging_dir: str | Path,
+    split_map: dict[str, str],
+    out_dir: str | Path,
+    *,
+    rows_per_shard: int = 5000,
 ) -> dict[str, int]:
     """Route staging rows to ``out_dir/{split}/part_*.parquet`` by ``sequence_id``."""
+    assert set(split_map.values()) <= {"train", "val", "test"}, (
+        f"split_map contains invalid split value(s): "
+        f"{set(split_map.values()) - {'train', 'val', 'test'}}"
+    )
     staging_dir, out_dir = Path(staging_dir), Path(out_dir)
     buffers: dict[str, list[pd.DataFrame]] = {"train": [], "val": [], "test": []}
     part_idx = {"train": 0, "val": 0, "test": 0}
@@ -54,7 +61,9 @@ def main() -> None:
     p.add_argument("--rows-per-shard", type=int, default=5000)
     args = p.parse_args()
     split_map = json.loads(Path(args.splits_json).read_text())
-    counts = partition(args.staging_dir, split_map, args.out_dir, rows_per_shard=args.rows_per_shard)
+    counts = partition(
+        args.staging_dir, split_map, args.out_dir, rows_per_shard=args.rows_per_shard
+    )
     print(counts)
 
 
