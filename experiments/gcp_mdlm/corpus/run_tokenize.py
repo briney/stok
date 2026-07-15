@@ -62,6 +62,7 @@ def run(
     from stok.models.structure_encoder import load_pretrained_encoder
 
     dataset_dir, staging_dir = Path(dataset_dir), Path(staging_dir)
+    staging_dir.mkdir(parents=True, exist_ok=True)
     paths = sorted(str(p) for p in dataset_dir.glob("*.cif.gz"))
     if limit is not None:
         paths = paths[:limit]
