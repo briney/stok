@@ -5,11 +5,13 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import os
 from pathlib import Path
 
 import pandas as pd
 
 from .filters import CorpusFilters
+from .manifest import build_corpus_manifest
 from .tokenize import Row, StructureOutcome, tokenize_paths
 
 
@@ -84,6 +86,18 @@ def run(
         summary["written"] += 1
         summary["rows"] += len(rows)
         print(f"shard {i}/{len(shards)}: {len(rows)} rows, {len(outcomes)} rejected")
+    manifest = build_corpus_manifest(
+        encoder_checkpoint=os.environ.get("STOK_ENCODER_CHECKPOINT"),
+        codebook_checkpoint=None,
+        preset=preset,
+        min_mean_plddt=filters.min_mean_plddt,
+        max_length=encoder.max_length,
+        mmseqs_params={},  # filled by Phase 2 (cluster_split) into its own _split/ manifest
+        split_seed=-1,
+        val_size=-1,
+        test_size=-1,
+    )
+    (staging_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
     return summary
 
 
