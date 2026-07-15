@@ -54,6 +54,43 @@ def run_mmseqs_cluster(
     return Path(f"{out_prefix}_cluster.tsv")
 
 
+def mmseqs_version() -> str:
+    """Best-effort ``mmseqs version`` string for the run manifest; ``"unknown"`` on failure."""
+    try:
+        return subprocess.run(
+            ["mmseqs", "version"], capture_output=True, text=True, check=True
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+
+
+def build_split_manifest(
+    *,
+    min_seq_id: float,
+    coverage: float,
+    seed: int,
+    val_size: int,
+    test_size: int,
+    n_sequences: int,
+    split: dict[str, str],
+    version: str | None = None,
+) -> dict:
+    """Assemble the Phase-2 provenance manifest: mmseqs params + split seed + sizes."""
+    if version is None:
+        version = mmseqs_version()
+    split_counts = {s: sum(1 for v in split.values() if v == s) for s in ("train", "val", "test")}
+    return {
+        "min_seq_id": min_seq_id,
+        "coverage": coverage,
+        "mmseqs_version": version,
+        "seed": seed,
+        "val_size": val_size,
+        "test_size": test_size,
+        "n_sequences": n_sequences,
+        "split_counts": split_counts,
+    }
+
+
 def assign_splits(
     cluster_tsv: str | Path, *, val_size: int, test_size: int, seed: int = 0
 ) -> dict[str, str]:
@@ -105,8 +142,17 @@ def main() -> None:
     )
     split = assign_splits(tsv, val_size=args.val_size, test_size=args.test_size, seed=args.seed)
     (work / "splits.json").write_text(json.dumps(split))
-    counts = {s: sum(1 for v in split.values() if v == s) for s in ("train", "val", "test")}
-    print(f"{n} sequences; splits: {counts}")
+    manifest = build_split_manifest(
+        min_seq_id=args.min_seq_id,
+        coverage=args.coverage,
+        seed=args.seed,
+        val_size=args.val_size,
+        test_size=args.test_size,
+        n_sequences=n,
+        split=split,
+    )
+    (work / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    print(f"{n} sequences; splits: {manifest['split_counts']}")
 
 
 if __name__ == "__main__":

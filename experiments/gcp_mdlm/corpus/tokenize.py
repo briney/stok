@@ -38,6 +38,7 @@ offset per subgraph after merging.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import torch
 from torch.utils.data import DataLoader, Dataset
@@ -115,7 +116,13 @@ class StructureFeatureDataset(Dataset):
 
     def __getitem__(self, index: int) -> StructureItem:
         path = self.paths[index]
-        sid = accession_from_path(path)
+        try:
+            sid = accession_from_path(path)
+        except ValueError:
+            # Filename doesn't match the AF-<ACC>-F1 pattern -- record instead of raising,
+            # so one stray file can't crash the DataLoader worker (and, on resume, cause an
+            # infinite reprocess loop since the shard for it never gets written).
+            return StructureItem(Path(path).name, "parse_error", float("nan"))
         try:
             with decompressed_cif(path) as cif:
                 plddt = mean_plddt_from_cif(cif)

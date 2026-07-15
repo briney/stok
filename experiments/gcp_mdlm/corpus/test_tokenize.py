@@ -73,6 +73,17 @@ def test_collate_stacks_accepted():
     assert torch.equal(single_batch.graph.pos, graph.pos[lo:hi])
 
 
+def test_bad_filename_yields_parse_error_without_raising(tmp_path):
+    bad_path = tmp_path / "not-an-af-file.cif.gz"
+    bad_path.write_bytes(b"")  # contents irrelevant -- accession parsing fails first
+    ds = StructureFeatureDataset(
+        [str(bad_path)], CorpusFilters(min_mean_plddt=0.0), max_length=1280
+    )
+    item = ds[0]
+    assert item.status == "parse_error"
+    assert item.sequence_id == bad_path.name
+
+
 def test_plddt_rejection_recorded():
     # impossible threshold -> every structure rejected_plddt, no featurization
     ds = StructureFeatureDataset(_paths(), CorpusFilters(min_mean_plddt=101.0), max_length=1280)
