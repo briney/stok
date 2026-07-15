@@ -67,7 +67,9 @@ def run(
     if limit is not None:
         paths = paths[:limit]
     shards = shard_paths(paths, shard_size)
-    encoder = load_pretrained_encoder(preset, device=device, freeze=True)
+    encoder = load_pretrained_encoder(
+        preset, path=os.environ.get("STOK_ENCODER_CHECKPOINT"), device=device, freeze=True
+    )
     filters = CorpusFilters()
     summary = {"shards": len(shards), "written": 0, "skipped": 0, "rows": 0}
     for i, shard in enumerate(shards):
