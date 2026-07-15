@@ -38,6 +38,40 @@ def test_collate_stacks_accepted():
         assert batch.mask.shape == (n_ok, 1280)
         assert getattr(batch.graph, "features_precomputed", False) is True
 
+    # Accept-all fixtures must actually produce accepted structures, or the assertions
+    # below (which need a real merged batch) would vacuously pass.
+    assert n_ok > 0
+    graph = batch.graph
+    assert graph.num_graphs == n_ok
+
+    # These four fields are what stok.models.structure_encoder's features_precomputed
+    # path requires -- it raises ValueError if any is missing.
+    for feature_name in ("x", "x_vector_attr", "edge_attr", "edge_vector_attr"):
+        assert hasattr(graph, feature_name), f"merged batch missing {feature_name!r}"
+
+    # Per-subgraph edge_index confinement: every edge sourced from subgraph i must have
+    # both endpoints inside [ptr[i], ptr[i + 1]) -- proves edge_index was re-offset with
+    # no cross-graph bleed during collation.
+    ptr = graph.ptr
+    edge_index = graph.edge_index
+    for i in range(graph.num_graphs):
+        lo, hi = int(ptr[i]), int(ptr[i + 1])
+        src_in_graph = (edge_index[0] >= lo) & (edge_index[0] < hi)
+        assert src_in_graph.any(), f"graph {i} has no edges"
+        endpoints = edge_index[:, src_in_graph]
+        assert endpoints.min() >= lo
+        assert endpoints.max() < hi
+
+    # Per-node value equality for graph 0: a single-item batch built from just the first
+    # accepted path must match, bit-for-bit, the corresponding node-range slice of the
+    # merged batch -- this is the "bit-for-bit" claim that was previously only checked
+    # manually.
+    first_accepted_index = next(i for i, it in enumerate(items) if it.status == "accepted")
+    single_batch = collate_featurized([ds[first_accepted_index]])
+    lo, hi = int(ptr[0]), int(ptr[1])
+    assert torch.equal(single_batch.graph.x, graph.x[lo:hi])
+    assert torch.equal(single_batch.graph.pos, graph.pos[lo:hi])
+
 
 def test_plddt_rejection_recorded():
     # impossible threshold -> every structure rejected_plddt, no featurization

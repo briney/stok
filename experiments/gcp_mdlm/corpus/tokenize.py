@@ -25,7 +25,8 @@ boolean flag ``edge_index_precomputed`` gets treated as an edge-index-like attri
 attribute off the (always num_graphs == 1) loaded batch into a plain ``Data`` -- skipping the
 batch-bookkeeping keys and the two "*_precomputed" flags/`num_relation` (reset once on the
 merged batch in ``collate_featurized`` instead of being carried, and re-collated, per item)
-and unwrapping the length-1 list attributes (`id`, `atom_list`, `residue_id`, `residues`).
+and unwrapping the length-1 list attributes (`id`, `name`, `atom_list`, `residue_id`,
+`residues`).
 The resulting ``Data`` objects round-trip cleanly through the standard
 ``Batch.from_data_list`` path used by ``collate_featurized``. Verified against the real
 fixtures: every derived feature (``pos``, ``x_vector_attr``, ``edge_attr``,
@@ -55,7 +56,7 @@ _BATCH_ONLY_KEYS = frozenset(
 # List-valued attributes that `load_structures` stores as a length-1 list (one entry per
 # graph) when num_graphs == 1; unwrap to the bare value so re-collation across many items
 # reconstructs the length-N list the same way `load_structures` would for N paths at once.
-_UNWRAP_SINGLETON_LIST_KEYS = frozenset({"id", "atom_list", "residue_id", "residues"})
+_UNWRAP_SINGLETON_LIST_KEYS = frozenset({"id", "name", "atom_list", "residue_id", "residues"})
 
 
 @dataclass
@@ -121,21 +122,20 @@ class StructureFeatureDataset(Dataset):
                 if classify(mean_plddt=plddt, filters=self.filters) == "rejected_plddt":
                     return StructureItem(sid, "rejected_plddt", plddt)
                 loaded = load_structures([str(cif)], max_length=self.max_length, device="cpu")
+                data = _extract_single_data(loaded.graph)
+            return StructureItem(
+                sequence_id=sid,
+                status="accepted",
+                mean_plddt=plddt,
+                sequence=loaded.sequences[0],
+                data=data,
+                mask=loaded.mask[0],
+                nan_mask=loaded.nan_mask[0],
+            )
         except NoAcceptedStructuresError:
             return StructureItem(sid, "rejected_parser", float("nan"))
         except Exception:  # noqa: BLE001 - any parse failure is a recorded per-file outcome
             return StructureItem(sid, "parse_error", float("nan"))
-
-        data = _extract_single_data(loaded.graph)
-        return StructureItem(
-            sequence_id=sid,
-            status="accepted",
-            mean_plddt=plddt,
-            sequence=loaded.sequences[0],
-            data=data,
-            mask=loaded.mask[0],
-            nan_mask=loaded.nan_mask[0],
-        )
 
 
 def collate_featurized(items: list[StructureItem]) -> CollatedBatch:
