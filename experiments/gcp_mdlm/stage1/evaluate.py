@@ -29,7 +29,7 @@ def evaluate_arm(arm, cache: CachedFeatures, *, device: str | torch.device = "cp
         for sequence_id, start, length in cache.protein_ranges:
             feats = torch.from_numpy(features[start : start + length].astype(np.float32)).to(device)
             targets = torch.from_numpy(cache.token_ids[start : start + length]).to(device)
-            logits = _logits_for(arm, feats)
+            logits = _logits_for(arm, feats).to(device)
             num_classes = logits.shape[-1]
             rows.append(
                 {
