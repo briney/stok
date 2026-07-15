@@ -42,6 +42,8 @@ No pretrained checkpoint exists, so Stage 1 begins by pretraining its own backbo
   Chosen over MLM because it transfers to Stages 2–4 (time conditioning included)
   and its training distribution includes near-clean inputs, so clean feature
   extraction is in-distribution. This checkpoint also seeds all later stages.
+  Pilot size mirrors ESM-C 300M: `d_model = 960`, `n_layers = 30`, `n_heads = 15`
+  (`d_head = 64`).
 - **Primary regime — frozen features.** Freeze the pretrained backbone, run a clean
   structure-absent forward, and **cache per-residue hidden states once** for every
   split. Each head then trains on cached vectors in minutes, so the head sweep is
@@ -65,8 +67,9 @@ deterministic evaluator + per-protein report, and the promotion assertion.
 
 ## Data and alignment
 
-Corpus is (sequence, GCP-token) pairs in Parquet — ~500k pilot / millions full,
-single-chain monomers, no coordinates. A lightweight loader:
+Corpus is Parquet with three columns — `sequence_id`, `sequence`,
+`structure_tokens` — ~500k pilot / millions full, single-chain monomers, no
+coordinates. A lightweight loader:
 
 - **asserts `len(sequence) == len(structure_tokens)` per record** and carries a
   `valid_residue_mask` — the audit §5.3 alignment guarantee in the form this
