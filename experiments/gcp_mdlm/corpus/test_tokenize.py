@@ -126,6 +126,7 @@ def test_batched_matches_b1_parity():
     one_at_a_time, _ = tokenize_paths(
         _paths(), encoder, f, batch_size=1, num_workers=0, device="cpu", batch_forward=False
     )
+    assert batched and one_at_a_time, "parity test tokenized no rows"
     bx = {r.sequence_id: r.structure_tokens for r in batched}
     for r in one_at_a_time:
         assert bx[r.sequence_id] == r.structure_tokens, f"batched tokens differ for {r.sequence_id}"
