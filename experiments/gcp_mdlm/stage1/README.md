@@ -17,7 +17,11 @@ Spec: `docs/superpowers/specs/2026-07-14-stage1-seq-to-structure-head-qualificat
    ```
 2. **Cache features** for each split with the frozen backbone (`write_feature_cache`).
    ~0.5 TB for 500k proteins at d_model=960/float16 — use `max_train_proteins` to
-   subsample the train split if disk-bound; cache val/test in full.
+   subsample the train split if disk-bound; cache val/test in full. Pass
+   `manifest_extra=build_run_manifest(corpus_path=..., codebook_path=...,
+   backbone_checkpoint=..., decoder_checkpoint=...)` (from `provenance.py`) so the
+   cache manifest carries all four provenance hashes (corpus, codebook,
+   backbone-checkpoint, decoder-checkpoint).
 3. **Train** the `independent` and `prototype` heads on the cached train features
    (`train_head`); the `frequency` arm is closed-form (`FrequencyBaseline.fit`).
 4. **Evaluate** each arm on the cached test features (`evaluate_arm`) and, optionally,

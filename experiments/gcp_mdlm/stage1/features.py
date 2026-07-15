@@ -69,6 +69,11 @@ def write_feature_cache(
         with torch.no_grad():
             feats = encode_fn(padded, kpm).float().cpu().numpy()  # (B, L, d_model)
         for i, rec in enumerate(batch):
+            if len(seqs[i]) != len(rec.valid_residue_mask):
+                raise ValueError(
+                    f"tokenizer produced {len(seqs[i])} tokens for {rec.sequence_id!r} "
+                    f"but the record has {len(rec.valid_residue_mask)} residues"
+                )
             valid = rec.valid_residue_mask
             n_valid = int(valid.sum())
             protein_index.append((rec.sequence_id, cursor, n_valid))
