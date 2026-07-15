@@ -229,6 +229,37 @@ class MDLMModel(nn.Module):
             self.struct_mask_id = -1
             self.struct_pad_id = -1
 
+    def encode_features(
+        self,
+        seq_tokens: torch.Tensor,
+        key_padding_mask: torch.Tensor | None = None,
+        t_seq: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Return clean, structure-absent per-residue encoder hidden states.
+
+        Runs the sequence-only path (no structure track, no track embeddings) with the
+        time input pinned to ``t_seq`` (default all-zeros = the clean limit), stopping
+        before the output heads. This is the feature primitive used by Stage 1 caching
+        and by any later structure-absent inference.
+
+        Args:
+            seq_tokens: Amino-acid token ids, shape ``(B, L)``.
+            key_padding_mask: Optional bool mask, shape ``(B, L)``, True at padding.
+                Defaults to ``seq_tokens == self.seq_pad_id``.
+            t_seq: Optional diffusion time, shape ``(B,)``. Defaults to zeros.
+
+        Returns:
+            Hidden states, shape ``(B, L, d_model)``.
+        """
+        if key_padding_mask is None:
+            key_padding_mask = seq_tokens == self.seq_pad_id
+        if t_seq is None:
+            t_seq = torch.zeros(seq_tokens.shape[0], device=seq_tokens.device)
+        h = self.embed_seq(seq_tokens)  # (B, L, d_model)
+        t_embed = self.time_embed(t_seq)  # (B, d_time)
+        h = self.encoder(h, key_padding_mask=key_padding_mask, t_embed=t_embed)
+        return h
+
     def forward(
         self,
         seq_tokens: torch.Tensor,

@@ -225,3 +225,28 @@ class TestMDLMModelEdgeCases:
                 tracks="invalid",
                 noise_schedule_seq=ns,
             )
+
+
+class TestEncodeFeatures:
+    """Tests for encode_features method."""
+
+    def test_encode_features_matches_pre_head_hidden_state(self, small_model):
+        """encode_features must return exactly the hidden state the seq head consumes at t=0."""
+        torch.manual_seed(0)
+        small_model.eval()
+        seq_tokens = torch.randint(4, 24, (2, 10))  # amino-acid ids, no special tokens
+        with torch.no_grad():
+            h = small_model.encode_features(seq_tokens)
+            assert h.shape == (2, 10, 64)
+            # Feeding h through the seq head equals a clean forward at t=0 with no masking.
+            logits_from_h = small_model.head_seq(h)
+            out = small_model(seq_tokens=seq_tokens, t_seq=torch.zeros(2))
+        assert torch.allclose(logits_from_h, out["seq_logits"], atol=1e-5)
+
+    def test_encode_features_is_deterministic_in_eval(self, small_model):
+        small_model.eval()
+        seq_tokens = torch.randint(4, 24, (2, 10))
+        with torch.no_grad():
+            a = small_model.encode_features(seq_tokens)
+            b = small_model.encode_features(seq_tokens)
+        assert torch.allclose(a, b)
