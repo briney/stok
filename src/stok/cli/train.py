@@ -1284,22 +1284,11 @@ def run_training(cfg: DictConfig):
                         outputs["pred_nan_frac"] = float(
                             pred_nan_frac_t.detach().item()
                         )
-                    # don't bother with FAPE loss if all predicted coords are NaN
-                    if torch.isnan(pred_coords).all():
-                        outputs["pred_coords"] = pred_coords
-                        outputs["structure_loss"] = None
-                    else:
-                        fape = fape_loss(
-                            pred_coords=pred_coords,
-                            true_coords=coords,
-                            residue_mask=mask,
-                        )
-                        outputs["pred_coords"] = pred_coords
-                        # Always expose FAPE value (even if NaN/Inf) for logging
-                        outputs["structure_loss"] = fape
-                        # Only add finite FAPE to the optimization loss
-                        if torch.isfinite(fape).item():
-                            loss = loss + float(cfg.train.fape.weight) * fape
+                    fape = fape_loss(pred_coords=pred_coords, true_coords=coords,
+                                     residue_mask=mask)
+                    outputs["pred_coords"] = pred_coords
+                    outputs["structure_loss"] = fape
+                    loss = loss + float(cfg.train.fape.weight) * fape
                 elif is_main and (global_step == 0):
                     printer(
                         "FAPE enabled but no coords in dataset; skipping FAPE term."

@@ -43,10 +43,8 @@ def _make_decoder_ckpt(tmp_path: Path, preset: str = "lite") -> Path:
     # match d_code to codebook preset
     codebook = load_codebook(preset=preset)
     d_code = int(codebook.shape[1])
-    if preset == "base":
-        arch = dict(d_model=1024, ffn_mult=4.0, n_layers=16, n_heads=16, attn_kv_heads=1, num_memory_tokens=0, max_length=1280)
-    else:
-        arch = dict(d_model=1024, ffn_mult=4.0, n_layers=12, n_heads=8, attn_kv_heads=2, num_memory_tokens=0, max_length=1280)
+    from stok.models.decoder import _DECODER_ARCH
+    arch = _DECODER_ARCH[preset]
     model = GeometricDecoder(
         d_model=arch["d_model"],
         n_heads=arch["n_heads"],
@@ -62,7 +60,10 @@ def _make_decoder_ckpt(tmp_path: Path, preset: str = "lite") -> Path:
     return ckpt_path
 
 
-def test_training_with_decoder_and_fape(tmp_path):
+def test_training_with_decoder_and_fape(tmp_path, monkeypatch):
+    from stok.models.decoder import _DECODER_ARCH
+    monkeypatch.setitem(_DECODER_ARCH, "lite", dict(d_model=32, ffn_mult=1.,
+        n_layers=1, n_heads=2, attn_kv_heads=1, num_memory_tokens=0, max_length=32))
     runner = CliRunner()
 
     max_len = 16
@@ -94,12 +95,15 @@ def test_training_with_decoder_and_fape(tmp_path):
         "train.fape.start_step=0",
         "train.decoding.eval_enabled=true",
         # small data loader
+        "data.load_coords=true",
         "data.batch_size=2",
         f"data.max_len={max_len}",
         "data.num_workers=0",
         "data.pin_memory=false",
         # short run and ensure eval triggers
-        "train.num_steps=3",
+        "train.num_steps=2",
+        "train.optimizer.lr=0.01",
+        "train.scheduler.warmup_steps=0",
         "train.log_steps=1",
         "train.eval.steps=2",
         # disable external logging
@@ -108,8 +112,13 @@ def test_training_with_decoder_and_fape(tmp_path):
         f"train.project_path={tmp_path.as_posix()}",
     ]
 
-    result = runner.invoke(cli, ["train", *overrides])  # type: ignore[arg-type]
-    assert result.exit_code == 0, result.output
-    # Should still complete
-    assert "Training complete." in result.output
+    states = []
+    for weight in (0., 10.):
+        result = runner.invoke(cli, ["train", *overrides, f"train.fape.weight={weight}"])
+        assert result.exit_code == 0, (result.output, result.exception)
+        assert "fape " in result.output
+        state = torch.load(tmp_path / "model/final.pt", weights_only=False, map_location="cpu")["model"]
+        assert all(torch.isfinite(v).all() for v in state.values())
+        states.append(state)
+    assert any(not torch.equal(states[0][key], states[1][key]) for key in states[0])
 

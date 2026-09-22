@@ -25,7 +25,7 @@ class fp32_autocast_context:
 
     def __enter__(self):
         if self.device_type == "cuda":
-            self._ctx = torch.amp.autocast("cuda", enabled=True, dtype=torch.float32)
+            self._ctx = torch.amp.autocast("cuda", enabled=False)
         elif self.device_type == "cpu":
             self._ctx = torch.amp.autocast("cpu", enabled=False)
         else:  # mps or other future unsupported device types -> no autocast
@@ -301,3 +301,23 @@ def _graham_schmidt(
         rots = torch.stack([x_axis, e1, e2], dim=-1)
 
         return rots
+
+
+def sanitize_coordinates(pred: torch.Tensor, true: torch.Tensor,
+                         residue_mask: torch.Tensor | None = None, *,
+                         ca_only: bool = False):
+    """Exclude missing targets before arithmetic; never hide invalid predictions."""
+    required_true = true[..., 1, :] if ca_only else true.flatten(-2)
+    required_pred = pred[..., 1, :] if ca_only else pred.flatten(-2)
+    valid = torch.isfinite(required_true).all(-1)
+    if residue_mask is not None:
+        valid = valid & residue_mask.to(device=true.device, dtype=torch.bool)
+    if (valid & ~torch.isfinite(required_pred).all(-1)).any():
+        raise ValueError("Nonfinite predictions on valid ground-truth residues")
+    canonical = true.new_tensor([[-1., 0., 0.], [0., 0., 0.], [0., 1., 0.]])
+    # For CA metrics, other atoms are not observations and may be missing.
+    atom_mask = valid[..., None, None]
+    if ca_only:
+        atom_mask = atom_mask & (torch.arange(3, device=true.device)[None, :, None] == 1)
+    return (torch.where(atom_mask, pred, canonical).float(),
+            torch.where(atom_mask, true, canonical).float(), valid)

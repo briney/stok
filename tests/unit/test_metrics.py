@@ -104,3 +104,39 @@ def test_noise_effects_on_metrics():
     assert (r_low <= r_high).all()        # RMSD increases with noise
 
 
+
+
+def test_alignment_nan_padding_and_reflection():
+    true = _stable_ncac_coords(1, 6)
+    pred = true + .2 * torch.randn_like(true)
+    reference_r = rmsd(pred[:, :5], true[:, :5])
+    reference_tm = tm_score(pred[:, :5], true[:, :5])[0]
+    true[:, -1] = float('nan')
+    pred[:, -1] = float('nan')
+    mask = torch.ones(1, 6, dtype=torch.bool)
+    torch.testing.assert_close(rmsd(pred, true, mask), reference_r)
+    torch.testing.assert_close(tm_score(pred, true, mask)[0], reference_tm)
+    reflected = true[:, :5].clone()
+    reflected[..., 0] *= -1
+    assert rmsd(reflected, true[:, :5]).item() > .01
+
+
+def test_alignment_requires_adequate_targets_but_scores_collapsed_predictions():
+    true = _stable_ncac_coords(1, 5)
+    collapsed = torch.zeros_like(true)
+    assert torch.isfinite(rmsd(collapsed, true)).all()
+    assert torch.isfinite(tm_score(collapsed, true)[0]).all()
+    assert torch.isnan(rmsd(true[:, :2], true[:, :2])).all()
+    line = true.clone()
+    line[:, :, 1] = torch.arange(5)[:, None]
+    assert torch.isnan(tm_score(line, line)[0]).all()
+
+
+def test_structure_metrics_reject_bad_predictions():
+    import pytest
+    true = _stable_ncac_coords(1, 5)
+    pred = true.clone()
+    pred[:, 2] = float('nan')
+    for metric in (rmsd, tm_score, lddt_ca, true_aligned_error):
+        with pytest.raises(ValueError, match='Nonfinite predictions'):
+            metric(pred, true)
