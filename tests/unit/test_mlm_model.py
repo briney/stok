@@ -305,7 +305,7 @@ class TestSTokModelCodebook:
 
 def test_empty_mlm_supervision_has_finite_zero_gradients():
     model = STokModel(vocab_size=32, pad_id=1, d_model=16, n_heads=2,
-                      n_layers=1, ffn_mult=1., dropout=0., head_type='mlm')
+                      n_layers=1, ffn_mult=1., dropout=0., attn_dropout=0., head_type='mlm')
     tokens = torch.tensor([[0, 4, 5, 2]])
     result = model(tokens=tokens, labels=torch.full_like(tokens, -100))
     result['loss'].backward()
