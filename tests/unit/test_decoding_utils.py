@@ -68,3 +68,22 @@ def test_decode_coords_runs_when_decoder_available(monkeypatch):
     coords = decode_coords(dec, codes, mask)
     assert coords.shape == (B, L, 3, 3)
     assert torch.isfinite(coords).all()
+
+
+def test_token_aligned_decoder_excludes_boundaries_and_empty_rows():
+    from stok.utils.decoding import decode_token_aligned_coords
+    from stok.utils.masking import residue_mask_from_tokens
+    tokens = torch.tensor([[0, 4, 3, 31, 2, 1], [0, 2, 1, 1, 1, 1]])
+    mask = residue_mask_from_tokens(tokens, pad_id=1, bos_id=0, eos_id=2)
+    codes = torch.randn(2, 6, 9, requires_grad=True)
+    def decoder(x, mask):
+        assert x.shape == (1, 4, 9)
+        assert mask.tolist() == [[True, True, True, False]]
+        return x * 2
+    coords = decode_token_aligned_coords(decoder, codes, mask)
+    assert torch.isnan(coords[1]).all()
+    assert torch.isnan(coords[0, [0, 4, 5]]).all()
+    coords[0, 1:4].sum().backward()
+    assert torch.isfinite(codes.grad).all()
+    assert (codes.grad[0, 1:4] == 2).all()
+    assert (codes.grad[1] == 0).all()

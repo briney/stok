@@ -65,7 +65,7 @@ def _create_train_csv(tmp_path: Path, n_rows: int, seq_len: int, indices_len: in
     rows = []
     for i in range(n_rows):
         seq = random_protein_sequence(seq_len, seq_len)
-        indices = " ".join(str(j % 128) for j in range(indices_len))
+        indices = " ".join(str(j % 128) for j in range(len(seq)))
         rows.append({"pid": f"train_{i}", "protein_sequence": seq, "indices": indices})
     
     df = pd.DataFrame(rows)

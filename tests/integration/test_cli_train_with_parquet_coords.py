@@ -23,13 +23,12 @@ def _make_coords(L: int) -> list[list[list[float]]]:
 def _write_parquet_with_coords(path: Path, n_rows: int, seq_min_len: int, seq_max_len: int, indices_len: int):
     path.parent.mkdir(parents=True, exist_ok=True)
     rows = []
-    indices_val = [0] * indices_len
     for i in range(n_rows):
         seq = random_protein_sequence(seq_min_len, seq_max_len)
         rows.append({
             "pid": f"pc{i}",
             "protein_sequence": seq,
-            "indices": indices_val,
+            "indices": [0] * len(seq),
             "coordinates": _make_coords(len(seq)),
         })
     df = pd.DataFrame(rows)

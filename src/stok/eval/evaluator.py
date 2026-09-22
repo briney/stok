@@ -11,6 +11,7 @@ from accelerate.utils import gather_object
 from omegaconf import DictConfig
 from torch.utils.data import DataLoader
 
+from stok.utils.masking import residue_mask_from_tokens
 from stok.eval.base import Metric
 from stok.eval.registry import build_metrics
 
@@ -144,14 +145,16 @@ class Evaluator:
 
         # Import decoding utilities
         from stok.utils.decoding import (
-            decode_coords,
+            decode_token_aligned_coords,
             indices_to_codes,
             sample_indices_top_p,
         )
 
         logits = outputs["logits"]
         pad_id = int(self.cfg.model.encoder.pad_id)
-        res_mask = tokens != pad_id
+        res_mask = residue_mask_from_tokens(tokens, pad_id=pad_id,
+            bos_id=int(self.cfg.model.encoder.get("bos_id", 0)),
+            eos_id=int(self.cfg.model.encoder.get("eos_id", 2)))
 
         # Get codebook from model
         unwrapped = _unwrap_model(self.model, self.accelerator)
@@ -168,7 +171,7 @@ class Evaluator:
                 idx = logits.argmax(dim=-1)
 
             codes = indices_to_codes(codebook, idx)
-            pred_coords = decode_coords(self.decoder, codes, res_mask)
+            pred_coords = decode_token_aligned_coords(self.decoder, codes, res_mask)
 
         return pred_coords
 
@@ -290,6 +293,11 @@ class Evaluator:
                     ignore_index=ignore_index,
                     output_attentions=needs_attentions,
                 )
+
+                outputs["residue_mask"] = residue_mask_from_tokens(tokens,
+                    pad_id=int(self.cfg.model.encoder.pad_id),
+                    bos_id=int(self.cfg.model.encoder.get("bos_id", 0)),
+                    eos_id=int(self.cfg.model.encoder.get("eos_id", 2)))
 
                 # Decode predictions for structure metrics
                 if (

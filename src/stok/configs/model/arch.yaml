@@ -6,6 +6,8 @@ encoder:
   ffn_mult: 2.667  # 8/3 to account for SwiGLU projection
   vocab_size: 32
   pad_id: 1
+  bos_id: 0
+  eos_id: 2
   dropout: 0.1
   attn_dropout: 0.0
   norm: "layernorm"  # "layernorm" or "rmsnorm"

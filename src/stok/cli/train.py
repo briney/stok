@@ -20,7 +20,7 @@ from torch.utils.data import (
     Sampler,
 )
 
-from stok.data.collate import mlm_collate
+from stok.data.collate import align_coords, mlm_collate, tokenize_residues
 from stok.data.dataset import (
     DummyMLMDataset,
     DummySequenceDataset,
@@ -34,7 +34,8 @@ from stok.models.decoder import load_pretrained_decoder
 from stok.models.stok import STokModel
 from stok.utils.codebook import load_codebook
 from stok.utils.console import ConsoleLogger
-from stok.utils.decoding import logits_to_soft_codes_gumbel
+from stok.utils.decoding import decode_token_aligned_coords, logits_to_soft_codes_gumbel
+from stok.utils.masking import residue_mask_from_tokens
 from stok.utils.flops import compute_flops_6n, count_parameters, format_flops_scientific
 from stok.utils.losses import fape_loss
 from stok.utils.tokenizer import Tokenizer
@@ -302,6 +303,7 @@ def _tokenize_and_align(
     max_len: int,
     ignore_index: int,
     pad_id: int,
+    num_classes: int | None = None,
 ):
     # if using DummySequenceDataset, batch is tuples(tokens, labels)
     if tokenizer is None:
@@ -315,15 +317,9 @@ def _tokenize_and_align(
     for item in batch:  # type: ignore[assignment]
         seq: str = item["seq"]
 
-        enc = tokenizer(
-            seq,
-            add_special_tokens=True,
-            truncation=True,
-            max_length=max_len,
-            padding="max_length",
-            return_tensors="pt",
-        )
-        ids = enc["input_ids"][0]
+        if pad_id != tokenizer.pad_token_id:
+            raise ValueError("Model pad_id must match tokenizer padding")
+        ids = tokenize_residues(seq, tokenizer, max_len)
 
         # build labels aligned to tokens: CLS/EOS/PAD -> ignore_index
         L = ids.size(0)
@@ -333,23 +329,21 @@ def _tokenize_and_align(
         indices_raw = item.get("indices")
         if indices_raw is not None:
             indices: torch.Tensor = indices_raw.long()
-            # copy only non-negative indices; positions 1..(1+copy_len) receive labels,
-            # respecting truncation before EOS
-            valid_indices = indices[indices >= 0]
-            copy_len = min(int(valid_indices.numel()), max(0, L - 2))
-            if copy_len > 0:
-                labels[1 : 1 + copy_len] = valid_indices[:copy_len]
+            if num_classes is not None and (indices >= num_classes).any():
+                raise ValueError(f"Sample {item.get('pid', '?')}: class ID out of range")
+            copy_len = min(len(seq), int(indices.numel()), L - 2)
+            values = indices[:copy_len]
+            labels[1:1+copy_len] = values.masked_fill(values < 0, ignore_index)
 
         input_ids.append(ids)
         label_ids.append(labels)
         # optional coords tensor [max_len, 3, 3]
         c = item.get("coords")
-        if c is not None and isinstance(c, torch.Tensor):
-            coords_batch.append(c)
+        coords_batch.append(align_coords(c, residue_count=len(seq), token_length=L))
 
     tokens = torch.stack(input_ids, dim=0)
     labels = torch.stack(label_ids, dim=0)
-    if len(coords_batch) > 0:
+    if any(item.get("coords") is not None for item in batch):
         return tokens, labels, torch.stack(coords_batch, dim=0)
     else:
         return tokens, labels
@@ -654,6 +648,7 @@ def _build_dataloaders(
                     max_len=max_len,
                     ignore_index=ignore_index,
                     pad_id=pad_id,
+                    num_classes=codebook_size,
                 )
 
             collate_fn = collate
@@ -748,6 +743,8 @@ def _build_dataloaders(
                 pad_id=pad_id,
             )
 
+    train_collate_fn = collate_fn
+
     # configure shuffle depending on dataset type / sampler usage
     is_iterable = isinstance(train_ds, IterableDataset)
     # only meaningful for multi-process loading
@@ -778,9 +775,19 @@ def _build_dataloaders(
                     max_len=max_len,
                     ignore_index=ignore_index,
                     pad_id=pad_id,
+                    num_classes=codebook_size,
                 )
 
             collate_fn = collate
+
+    if max_len < 3:
+        raise ValueError("data.max_len must be >= 3")
+    if tokenizer is not None:
+        if tokenizer.pad_token_id != pad_id or len(tokenizer) != int(cfg.model.encoder.vocab_size):
+            raise ValueError("Model vocabulary and pad_id must match tokenizer")
+        for key in ("bos_id", "eos_id"):
+            OmegaConf.update(cfg, f"model.encoder.{key}",
+                             getattr(tokenizer, key.replace("_id", "_token_id")), force_add=True)
 
     def _make_dl_kwargs(batch_sz: int):
         kwargs = {
@@ -808,6 +815,10 @@ def _build_dataloaders(
             drop_last=True,
             **_make_dl_kwargs(batch_size),
         )
+    train_loader.collate_fn = train_collate_fn or train_loader.collate_fn
+    if isinstance(train_ds, DummySequenceDataset):
+        from torch.utils.data import default_collate
+        train_loader.collate_fn = default_collate
     eval_loaders: dict[str, DataLoader] = {}
     for name, eval_cfg in eval_configs.items():
         eval_path = eval_cfg["path"]
@@ -1255,7 +1266,9 @@ def run_training(cfg: DictConfig):
             ):
                 if coords is not None:
                     pad_id = int(cfg.model.encoder.pad_id)
-                    mask = tokens != pad_id
+                    mask = residue_mask_from_tokens(tokens, pad_id=pad_id,
+                        bos_id=int(cfg.model.encoder.get("bos_id", 0)),
+                        eos_id=int(cfg.model.encoder.get("eos_id", 2)))
                     tau = _anneal_tau(global_step)
                     soft_codes = logits_to_soft_codes_gumbel(
                         outputs["logits"],  # [B, L, C]
@@ -1263,8 +1276,7 @@ def run_training(cfg: DictConfig):
                         tau=float(tau),
                         hard=bool(getattr(cfg.train, "gumbel", {}).get("hard", False)),
                     )
-                    bb = decoder(soft_codes, mask=mask)  # type: ignore[operator]
-                    pred_coords = bb.view(bb.size(0), bb.size(1), 3, 3)
+                    pred_coords = decode_token_aligned_coords(decoder, soft_codes, mask)
                     # metric: fraction of NaNs in predicted coords
                     # can happen when encoder isn't producing coherent outputs (yet!)
                     if log_pred_nan_frac:

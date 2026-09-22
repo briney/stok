@@ -21,6 +21,33 @@ def simple_pad_collate(
     return torch.stack(tokens, dim=0), torch.stack(labels, dim=0)
 
 
+def tokenize_residues(seq: str, tokenizer, max_len: int) -> torch.Tensor:
+    """Encode exactly one token per biological position, plus BOS and EOS."""
+    if max_len < 3:
+        raise ValueError("max_len must be >= 3 (BOS, residue, EOS)")
+    if not isinstance(seq, str) or any(c not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ.-" for c in seq):
+        raise ValueError("Sequence must contain single-character residues, not control tokens")
+    raw = tokenizer(seq, add_special_tokens=False)["input_ids"]
+    if len(raw) != len(seq):
+        raise ValueError("Tokenizer must encode exactly one token per residue")
+    return tokenizer(seq, add_special_tokens=True, truncation=True,
+                     max_length=max_len, padding="max_length", return_tensors="pt")["input_ids"][0]
+
+
+def align_coords(coords: torch.Tensor | None, *, residue_count: int,
+                 token_length: int) -> torch.Tensor:
+    """Shift raw residue coordinates past BOS; preserve missing sample rows."""
+    aligned = torch.full((token_length, 3, 3), float("nan"))
+    if coords is not None:
+        if coords.ndim != 3 or coords.shape[1:] != (3, 3):
+            raise ValueError("Coordinates must have shape [residues,3,3]")
+        n = min(residue_count, token_length - 2)
+        if len(coords) < n:
+            raise ValueError("Coordinate length is shorter than the residue sequence")
+        aligned[1:1+n] = coords[:n]
+    return aligned
+
+
 def mlm_collate(
     batch: list[dict[str, Any]],
     tokenizer,
@@ -71,15 +98,7 @@ def mlm_collate(
     for item in batch:
         seq: str = item["seq"]
 
-        enc = tokenizer(
-            seq,
-            add_special_tokens=True,
-            truncation=True,
-            max_length=max_len,
-            padding="max_length",
-            return_tensors="pt",
-        )
-        ids = enc["input_ids"][0].clone()  # [L]
+        ids = tokenize_residues(seq, tokenizer, max_len).clone()
         labels = torch.full_like(ids, ignore_index)
 
         # Create mask for positions that CAN be masked (not special tokens)
@@ -123,12 +142,11 @@ def mlm_collate(
 
         # Extract optional coordinates tensor
         coords = item.get("coords")
-        if coords is not None and isinstance(coords, torch.Tensor):
-            coords_list.append(coords)
+        coords_list.append(align_coords(coords, residue_count=len(seq), token_length=max_len))
 
     tokens = torch.stack(input_ids_list)
     labels = torch.stack(labels_list)
 
-    if len(coords_list) > 0:
+    if any(item.get("coords") is not None for item in batch):
         return tokens, labels, torch.stack(coords_list)
     return tokens, labels

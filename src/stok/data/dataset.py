@@ -46,7 +46,7 @@ class BaseTokenizedDataset:
             if raw is None or (isinstance(raw, float) and pd.isna(raw)):
                 indices = []
             elif isinstance(raw, (list, tuple, np.ndarray)):
-                indices = [int(i) for i in list(raw) if i is not None]
+                indices = [-1 if i is None or pd.isna(i) else int(i) for i in list(raw)]
             elif isinstance(raw, str):
                 s = raw.strip()
                 indices = [int(i) for i in s.split()] if s else []
@@ -58,6 +58,9 @@ class BaseTokenizedDataset:
                 except Exception:
                     indices = []
 
+            if len(indices) != len(seq):
+                raise ValueError(f"Sample {pid}: indices length {len(indices)} != sequence length {len(seq)}")
+            indices = indices[:max_length]
             idx_length = len(indices)
             pad_length = max(0, max_length - idx_length)
 
@@ -170,6 +173,9 @@ class BaseTokenizedDataset:
                 else:
                     coords_arr = None
 
+            missing_coords = raw_coords is None or (isinstance(raw_coords, float) and pd.isna(raw_coords))
+            if not missing_coords and (coords_arr is None or len(coords_arr) != len(seq)):
+                raise ValueError(f"Sample {pid}: invalid coordinates shape or length")
             if coords_arr is None:
                 coords_arr = np.empty((0, 3, 3), dtype=np.float32)
 
@@ -405,22 +411,23 @@ class IterableTokenizedDataset(IterableDataset, BaseTokenizedDataset):
 
         self._shards: list[Path] = []
         self._rows_per_shard: list[int] = []
+        self._columns_per_shard: list[set[str]] = []
         cols_union: set[str] = set()
         for sp in shard_paths:
             pf = pq.ParquetFile(sp.as_posix())
             self._shards.append(sp)
             self._rows_per_shard.append(int(pf.metadata.num_rows))
-            try:
-                schema = pf.schema_arrow
-                cols_union.update([f.name for f in schema])
-            except Exception:
-                # best-effort
-                pass
+            columns = set(pf.schema_arrow.names)
+            self._columns_per_shard.append(columns)
+            required = {"pid", "protein_sequence"} | ({"indices"} if require_indices else set())
+            if required - columns:
+                raise ValueError(f"Shard {sp}: missing columns {sorted(required - columns)}")
+            cols_union.update(columns)
         self._offsets = np.cumsum([0] + self._rows_per_shard[:-1]).tolist()
         self._total_rows = int(sum(self._rows_per_shard))
 
         # Track whether the directory has coordinates and indices columns
-        self.has_coords = ("coordinates" in cols_union) if len(cols_union) > 0 else True
+        self.has_coords = bool(load_coords) and "coordinates" in cols_union
         self._has_indices_col = (
             ("indices" in cols_union) if len(cols_union) > 0 else True
         )
@@ -499,13 +506,14 @@ class IterableTokenizedDataset(IterableDataset, BaseTokenizedDataset):
             # read only required columns
             want_cols = ["pid", "protein_sequence"]
             # Only include indices if required and present
-            if self._require_indices and self._has_indices_col:
+            has_indices = "indices" in self._columns_per_shard[s_idx]
+            if self._require_indices and has_indices:
                 want_cols.append("indices")
-            elif self._has_indices_col:
+            elif has_indices:
                 # Include indices if present even if not required
                 want_cols.append("indices")
 
-            use_coords = self.has_coords and self._load_coords
+            use_coords = self._load_coords and "coordinates" in self._columns_per_shard[s_idx]
             if use_coords:
                 want_cols.append("coordinates")
             df = pd.read_parquet(spath.as_posix(), columns=want_cols)
