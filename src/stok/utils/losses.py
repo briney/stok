@@ -5,7 +5,8 @@ from .geometry import frames_from_ncac, sanitize_coordinates, fp32_autocast_cont
 
 
 def token_ce_loss(
-    logits: torch.Tensor, labels: torch.Tensor, ignore_index: int = -100
+    logits: torch.Tensor, labels: torch.Tensor, ignore_index: int = -100,
+    *, reduction: str = "mean",
 ) -> torch.Tensor:
     """Compute cross-entropy loss over structure tokens.
 
@@ -17,19 +18,17 @@ def token_ce_loss(
     Returns:
         Scalar loss tensor.
     """
+    if reduction not in {"mean", "sum"}:
+        raise ValueError("reduction must be mean or sum")
     C = int(logits.size(-1))
-    logits_flat = logits.view(-1, C)
-    labels_flat = labels.view(-1)
-    # Treat any label outside [0, C) as ignore_index to avoid device asserts
-    invalid = (labels_flat < 0) | (labels_flat >= C)
-    if invalid.any():
-        labels_flat = labels_flat.clone()
-        labels_flat[invalid] = ignore_index
-    return F.cross_entropy(
-        logits_flat,
-        labels_flat,
-        ignore_index=ignore_index,
-    )
+    labels_flat = labels.reshape(-1)
+    supervised = labels_flat != ignore_index
+    if (supervised & ((labels_flat < 0) | (labels_flat >= C))).any():
+        raise ValueError(f"Target class IDs must be in [0, {C}) or ignore_index")
+    if not supervised.any():
+        return logits.sum() * 0.0
+    return F.cross_entropy(logits.reshape(-1, C), labels_flat,
+                           ignore_index=ignore_index, reduction=reduction)
 
 
 def fape_loss(
