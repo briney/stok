@@ -9,7 +9,7 @@ from typing import Any, Optional
 import numpy as np
 import torch
 import torch.nn as nn
-from accelerate.utils import set_seed
+from accelerate.utils import gather_object, set_seed
 from omegaconf import DictConfig, OmegaConf
 from torch.optim import AdamW
 from torch.utils.data import (
@@ -878,6 +878,14 @@ def _maybe_init_wandb(
 
 
 def run_training(cfg: DictConfig):
+    for name, value, minimum in (
+        ("grad_accum_steps", cfg.train.get("grad_accum_steps", 1), 1),
+        ("log_steps", cfg.train.get("log_steps", 1), 1),
+        ("eval.steps", cfg.train.eval.get("steps", 1), 1),
+        ("num_steps", cfg.train.get("num_steps", 0), 0),
+    ):
+        if value is not None and int(value) < minimum:
+            raise ValueError(f"train.{name} must be >= {minimum}")
     os.environ["DS_LOG_LEVEL"] = "warn"  # set DeepSpeed log level to warn
 
     # set global seed (BEFORE Accelerator init)
@@ -1212,7 +1220,9 @@ def run_training(cfg: DictConfig):
         return t0 + (t1 - t0) * (float(step) / float(T))
 
     while global_step < max_steps:
+        batches_in_pass = 0
         for batch in train_loader:
+            batches_in_pass += 1
             # step/epoch bookkeeping (global_step is zero-based)
             current_step = global_step + 1
             current_epoch: Optional[float] = None
@@ -1478,33 +1488,29 @@ def run_training(cfg: DictConfig):
             # checkpointing
             ckpt_steps = cfg.train.get("checkpoint_steps")
             if (
-                is_main
-                and ckpt_steps is not None
+                ckpt_steps is not None
                 and int(ckpt_steps) > 0
                 and (global_step % int(ckpt_steps) == 0)
             ):
                 step_path = io_dirs["checkpoints"] / f"step_{global_step:08d}.pt"
-                _save_checkpoint(
-                    step_path,
-                    model=model,
-                    optimizer=optimizer,
-                    scheduler=scheduler,
-                    global_step=global_step,
-                    cfg=cfg,
-                    accelerator=accelerator,
-                )
-                # update latest pointer
-                try:
-                    shutil.copyfile(
-                        step_path.as_posix(),
-                        (io_dirs["checkpoints"] / "latest.pt").as_posix(),
-                    )
-                except Exception:
-                    pass
-                if accelerator:
-                    accelerator.wait_for_everyone()
+                checkpoint_error = None
+                if is_main:
+                    try:
+                        _save_checkpoint(
+                            step_path, model=model, optimizer=optimizer,
+                            scheduler=scheduler, global_step=global_step,
+                            cfg=cfg, accelerator=accelerator,
+                        )
+                        shutil.copyfile(step_path, io_dirs["checkpoints"] / "latest.pt")
+                    except Exception as exc:
+                        checkpoint_error = f"{type(exc).__name__}: {exc}"
+                errors = gather_object([checkpoint_error]) if accelerator else [checkpoint_error]
+                if any(errors):
+                    raise RuntimeError(f"Checkpoint failed: {errors}")
             if global_step >= max_steps:
                 break
+        if batches_in_pass == 0:
+            raise RuntimeError("Training loader produced no complete batches")
 
     if is_main:
         # final checkpoint

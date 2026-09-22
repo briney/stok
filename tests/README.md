@@ -417,3 +417,10 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
 - Synthetic utilities live in `tests/utils` and are shared across tests.
 - Real test data (e.g., CAMEO PDB files) live in `tests/test_data/` for integration tests requiring realistic inputs.
 As new tests are added, update this README with a concise description of each test and its purpose.
+
+## Local validation
+
+Install the project with `python -m pip install -e '.[dev]'`. Use
+`OMP_NUM_THREADS=1 ACCELERATE_USE_CPU=true python -m pytest` for CPU checks.
+Distributed regression tests launch two local processes and require loopback
+sockets; their subprocess timeouts prevent hangs from blocking the suite.
