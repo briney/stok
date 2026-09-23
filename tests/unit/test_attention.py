@@ -913,3 +913,16 @@ def test_selected_layers_use_sdpa_elsewhere_and_preserve_contacts(monkeypatch):
                                _extract_attention_contacts(selected, num_layers=2))
     torch.testing.assert_close(_extract_attention_contacts(full, layer=4),
                                _extract_attention_contacts(selected, layer=4))
+
+
+def test_negative_contact_layer_uses_full_encoder_depth():
+    from stok.eval.metrics.contact import PrecisionAtLMetric, _extract_attention_contacts
+    model = STokModel(vocab_size=32, pad_id=1, d_model=32, n_heads=4, n_layers=6,
+                      ffn_mult=1., dropout=0., attn_dropout=0., head_type='mlm').eval()
+    tokens = torch.full((1, 12), 4)
+    metric = PrecisionAtLMetric(attention_layer=-2)
+    full = model(tokens, output_attentions=True)
+    selected = model(tokens, output_attentions=True,
+                     attention_layer_indices=metric.required_attention_layers(6))
+    torch.testing.assert_close(_extract_attention_contacts(full, layer=-2),
+                               _extract_attention_contacts(selected, layer=-2))

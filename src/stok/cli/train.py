@@ -962,6 +962,10 @@ def _raise_rank_errors(error, accelerator, context: str):
 
 
 def run_training(cfg: DictConfig):
+    if str(cfg.train.get("objective", "codebook")).lower() == "mlm":
+        for key in ("train.fape.enabled", "model.decoder.enabled", "train.decoding.eval_enabled"):
+            if OmegaConf.select(cfg, key, default=False):
+                raise ValueError(f"{key}=true is unsupported for MLM; geometry requires the codebook objective")
     for key, supported in (("model.classifier.tie_to_codebook", True),
                            ("model.codebook.trainable", False),
                            ("model.decoder.freeze", True)):

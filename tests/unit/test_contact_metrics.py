@@ -698,6 +698,7 @@ class TestPrecisionAtLLogisticRegression:
             assert "seq_len" in struct
             # Features should be [n_pairs, n_layers * n_heads]
             assert struct["features"].shape[1] == n_layers * H
+            assert len(struct["sample_key"]) == 64
 
     def test_logreg_reset(self):
         """Test that reset clears accumulated structures."""
@@ -979,3 +980,22 @@ def test_logreg_rejects_projected_feature_storage_before_collection():
     with pytest.raises(ValueError, match='logreg_max_feature_bytes'):
         metric.update({'attentions': [torch.ones(1, 2, 8, 8)]}, tokens, None, coords, cfg)
     assert metric._logreg_structures == []
+
+
+def test_fitted_logreg_is_order_invariant_and_preserves_duplicates():
+    generator = torch.Generator().manual_seed(19)
+    structures = []
+    for i in range(8):
+        features = torch.randn(30, 3, generator=generator)
+        structures.append({'features': features, 'labels': (features[:, i % 3] > 0).float(),
+                           'seq_len': 8, 'sample_key': str(i)})
+    results = []
+    for order in (list(range(8)), [0, 2, 4, 6, 1, 3, 5, 7]):
+        metric = PrecisionAtLMetric(use_logistic_regression=True, logreg_n_train=2,
+                                   logreg_n_iterations=5)
+        metric._logreg_structures = [structures[i] for i in order]
+        results.append(metric.compute())
+    assert results[0] == results[1]
+    metric._logreg_structures = structures + structures
+    metric.compute()
+    assert len(metric._logreg_structures) == 16

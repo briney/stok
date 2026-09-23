@@ -59,7 +59,7 @@ diff whitespace checks, and wheel/sdist builds passed.
 - Contact labels use C-alpha distance <8 Å by default. Candidates retain original
   sequence separation >=6, finite C-alpha positions, and the unique upper triangle.
   P@L uses `k=min(observed residues, eligible pairs)` and averages proteins.
-  Logistic splits use local RNG, average each protein's held-out results first,
+  Logistic splits use local RNG and stable content ordering across ranks, average each protein's held-out results first,
   and report unscored proteins separately; insufficient structures use a disclosed
   mean-attention fallback.
 - Independent reference check: first 48 residues of checked-in CAMEO structures
@@ -68,6 +68,23 @@ diff whitespace checks, and wheel/sdist builds passed.
   for RMSD, the defined TM formula, local lDDT, and contacts. Identity and rigid
   transform synthetic checks also pass. No external benchmark-quality or
   all-atom/TM-align equivalence is inferred from these checks.
+
+### Final independent review
+
+A fresh whole-branch review found three additional correctness issues: negative
+contact-layer indices were resolved against collected layers, fitted logistic
+splits depended on rank-major gather order, and explicit geometry options were
+silently ignored under MLM. It also found that the old metrics-only README
+recipe selected no metrics. These are covered by new regressions (all failed
+before fixes): full-depth negative indexing, order-invariant fitted logistic
+scores preserving duplicate proteins, early rejection of three MLM geometry
+flags, and actual execution of the README recipe with a local decoder/source.
+The fitted path is additionally compared between one and two actual processes.
+After these fixes, the final installed CPU suite passed **435 tests**, with two
+GPU-only skips already passed separately on Radeon hardware. Final lint, compilation,
+whitespace checks, and wheel/sdist builds also passed. The
+[implementation completion record](superpowers/plans/2026-09-22-technical-remediation.md#implementation-completion-record--september-22-2026)
+preserves review decisions, their costs, and the branch handoff.
 
 ### Measured capacity and remaining boundaries
 

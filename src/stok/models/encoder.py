@@ -76,6 +76,8 @@ class Encoder(nn.Module):
                 Defaults to None.
             output_attentions: If True, also returns attention weights from
                 all layers. Defaults to False.
+            attention_layer_indices: Ordered, unique encoder layer indices to collect;
+                None returns all layers. Unrequested layers retain the SDPA path.
             output_hidden_states: If True, also returns hidden states from
                 all layers (including initial embeddings). Defaults to False.
 

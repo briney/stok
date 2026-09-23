@@ -155,6 +155,8 @@ class STokModel(nn.Module):
             ignore_index: Index to ignore in loss computation. Defaults to -100.
             output_attentions: If True, also returns attention weights from all
                 encoder layers. Defaults to False.
+            attention_layer_indices: Ordered, unique encoder layer indices to collect;
+                None returns all layers. Unrequested layers retain the SDPA path.
             output_hidden_states: If True, also returns hidden states from all
                 encoder layers (including initial embeddings). Defaults to False.
 
@@ -230,6 +232,7 @@ class STokModel(nn.Module):
 
         if output_attentions:
             result["attentions"] = all_attentions
+            result["num_attention_layers"] = len(self.encoder.layers)
             result["attention_layer_indices"] = (tuple(range(len(self.encoder.layers)))
                 if attention_layer_indices is None else tuple(attention_layer_indices))
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import ClassVar
+import hashlib
 
 import torch
 from omegaconf import DictConfig
@@ -145,7 +146,7 @@ def _extract_attention_contacts(
         if layer == "mean":
             selected = attentions
         elif isinstance(layer, int):
-            original = layer if layer >= 0 else max(indices) + 1 + layer
+            original = layer if layer >= 0 else outputs.get("num_attention_layers", len(attentions)) + layer
             if original not in indices:
                 raise ValueError(f"Missing attention layer {original}")
             selected = [attentions[indices.index(original)]]
@@ -320,8 +321,17 @@ class PrecisionAtLMetric(MetricBase):
                         if not torch.isfinite(features).all():
                             raise ValueError("Nonfinite contact features")
                         self._feature_bytes += features.numel() * features.element_size() + features.shape[0] * 4
+                        # Content identity survives rank/worker traversal order. Keep duplicates.
+                        identity = hashlib.sha256()
+                        biological_tokens = tokens[b][mask[b]].detach().cpu().long().numpy()
+                        biological_coords = coords[b][mask[b]].detach().cpu().float()
+                        identity.update(len(biological_tokens).to_bytes(8, "big"))
+                        identity.update(biological_tokens.tobytes())
+                        identity.update(torch.isfinite(biological_coords).numpy().tobytes())
+                        identity.update(torch.nan_to_num(biological_coords, nan=0., posinf=0., neginf=0.).numpy().tobytes())
                         self._logreg_structures.append({"features": features,
-                            "labels": contacts[b][pairs[b]].float().cpu(), "seq_len": seq_len})
+                            "labels": contacts[b][pairs[b]].float().cpu(), "seq_len": seq_len,
+                            "sample_key": identity.hexdigest()})
                     else:
                         scores = predictions[b][pairs[b]]
                         if not torch.isfinite(scores).all():
@@ -363,6 +373,16 @@ class PrecisionAtLMetric(MetricBase):
         import random
         import warnings
 
+        def order_key(structure):
+            # Tie-break identical inputs without dropping duplicate observations.
+            content = hashlib.sha256()
+            content.update(int(structure["seq_len"]).to_bytes(8, "big"))
+            for key in ("features", "labels"):
+                content.update(structure[key].detach().cpu().float().numpy().tobytes())
+            digest = content.hexdigest()
+            return structure.get("sample_key", digest), digest
+
+        self._logreg_structures.sort(key=order_key)
         n_structures = len(self._logreg_structures)
 
         if n_structures == 0:

@@ -29,7 +29,7 @@ class FixedModel(torch.nn.Module):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--case', choices=['coverage', 'eval-tail', 'empty-labels', 'eval-error', 'eval-empty', 'eval-budget', 'eval-logreg'], required=True)
+    parser.add_argument('--case', choices=['coverage', 'eval-tail', 'empty-labels', 'eval-error', 'eval-empty', 'eval-budget', 'eval-logreg', 'logreg-fit'], required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--source', choices=['map', 'iterable', 'map-mixture', 'mixed-mixture'], default='map')
     parser.add_argument('--workers', type=int, default=0)
@@ -85,6 +85,19 @@ def main():
         accelerator.wait_for_everyone()
         state = torch.load(root/'run/model/final.pt', weights_only=False, map_location='cpu')
         updates = state['global_step']
+
+    if args.case == 'logreg-fit':
+        from stok.eval.metrics.contact import PrecisionAtLMetric
+        metric = PrecisionAtLMetric(use_logistic_regression=True, logreg_n_train=2,
+                                   logreg_n_iterations=5)
+        generator = torch.Generator().manual_seed(19)
+        for i in range(8):
+            features = torch.randn(30, 3, generator=generator)
+            if i % accelerator.num_processes == accelerator.process_index:
+                metric._logreg_structures.append({'features': features,
+                    'labels': (features[:, i % 3] > 0).float(), 'seq_len': 8, 'sample_key': str(i)})
+        Evaluator(cfg, FixedModel(), accelerator)._gather_metric_states([metric])
+        metrics = metric.compute()
 
     if args.case in {'eval-budget', 'eval-logreg'}:
         from torch.utils.data import DataLoader, TensorDataset

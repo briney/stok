@@ -191,3 +191,18 @@ def test_logreg_variable_state_gather_preserves_all_proteins(tmp_path):
         assert metrics['p_at_l'] == 1.
         assert metrics['p_at_l/num_valid'] == 5
         assert metrics['p_at_l/fallback'] == 1.
+
+
+def test_fitted_logreg_single_and_two_rank_scores_match(tmp_path):
+    write_probe_data(tmp_path, eval_n=5)
+    command = [sys.executable, '-m', 'tests.utils.distributed_probe', '--case', 'logreg-fit',
+               '--output', str(tmp_path)]
+    reference = subprocess.run(command, env=training_env(), capture_output=True, text=True, timeout=30)
+    assert reference.returncode == 0, reference.stderr
+    expected = json.loads((tmp_path/'reference.json').read_text())['metrics']
+    assert expected['p_at_l/num_valid'] == 8
+    assert 'p_at_l/fallback' not in expected
+    for result in run_distributed(command):
+        assert result.returncode == 0, result.stderr
+    for rank in range(2):
+        assert json.loads((tmp_path/f'rank_{rank}.json').read_text())['metrics'] == expected

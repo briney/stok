@@ -201,3 +201,17 @@ def test_unsupported_options_fail_before_accelerator(monkeypatch, override, matc
     monkeypatch.setattr(train, '_maybe_get_accelerator', should_not_initialize)
     with pytest.raises(ValueError, match=match):
         train.run_training(cfg)
+
+
+@pytest.mark.parametrize('option', ['train.fape.enabled', 'model.decoder.enabled', 'train.decoding.eval_enabled'])
+def test_mlm_rejects_explicit_geometry_before_initialization(monkeypatch, option):
+    from hydra import compose, initialize_config_dir
+    from pathlib import Path
+    import stok.cli.train as train
+    with initialize_config_dir(config_dir=str(Path(train.__file__).parents[1]/'configs'), version_base=None):
+        cfg = compose(config_name='config', overrides=['train.objective=mlm', f'{option}=true'])
+    def should_not_initialize():
+        raise AssertionError('MLM geometry must be rejected before initialization')
+    monkeypatch.setattr(train, '_maybe_get_accelerator', should_not_initialize)
+    with pytest.raises(ValueError, match='MLM'):
+        train.run_training(cfg)

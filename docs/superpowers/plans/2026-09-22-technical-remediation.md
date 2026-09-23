@@ -529,3 +529,66 @@ The probe accepts `--case coverage|eval-tail`, `--output PATH`, `--workers N`, a
 The remediation is complete only when each finding maps to passing evidence or an explicit supported-policy correction. New capabilities deferred by scope are documented as unsupported; they are not silently marked implemented. Missing hardware or dependencies remain open validation items.
 
 Recommended execution method: native serial implementation with focused commits, because the data/mask/metric interfaces and training loop are shared across most tasks. Review this plan's design decisions and scope before implementation. Delegated execution is an alternative only if selected by the user; the phase/dependency map does not require it.
+
+
+## Implementation completion record — September 22, 2026
+
+All 14 tasks were implemented in the isolated `fix/technical-remediation` branch,
+based on `5e80556`. The original checkout remains on `main`; no implementation
+push or merge was performed. Worktree: `/tmp/stok-remediation`.
+
+Validation after the final review fixes:
+
+- Installed CPU unit/integration suite: **435 passed, 2 skipped** in 182.26 seconds.
+  The skips are the two accelerator-only real-decoder cases; both passed separately
+  under FP16/BF16 autocast on Radeon 8060S Graphics (torch 2.14.0+rocm7.2).
+- Real two-process CPU checks cover checkpoint/loader failures, rank/worker sample
+  ownership, uneven/empty evaluation ranks, weighted accumulation, and both
+  fallback and fitted logistic state aggregation. Fitted one/two-rank scores agree.
+- Ruff E4/E7/E9/F, compileall, whitespace checks, and wheel/sdist builds pass.
+  A separately installed wheel passed package-data checks and loaded both codebooks.
+- One independent whole-branch gpt-6-astra review examined `5e80556..02aa6f2`.
+  Its three Important findings and the regraded broken documentation recipe were
+  fixed with six new RED→GREEN cases, followed by the complete suite. No second
+  review was used in place of verification. No deferred minors remain.
+
+The final fixes preserve full encoder depth for negative attention indices, sort
+logistic structures by stable normalized input content plus a deterministic tie-break
+without deduplicating observations, reject incompatible MLM geometry requests
+before initialization, and verify the actual README metrics-only recipe.
+
+See `docs/TECHNICAL_ANALYSIS.md` for finding-to-commit/test mappings, measured
+attention memory, and explicit scientific/deployment boundaries. Resume, trainable
+CLI decoder/codebook, and sharded backends remain unsupported by approved scope.
+
+### Rulings I made
+
+- Ruling: temporary worktree and system-site-packages venv reuse existing ROCm torch — avoid modifying the user's environment or downloading a second torch build — cost if wrong: interpreter dependency differences, record versions and run full suite.
+- Task 1: Ruling: direct rank subprocess launch replaces torchrun in tests — this host blocks in torchrun socket.getfqdn; native RANK/WORLD_SIZE initialization exercises the same application collectives — cost if wrong: launcher-specific bugs need separate deployment checks.
+- Task 1: Ruling: force GPU visibility off in CPU subprocess tests — Accelerate selected GPU barriers on this ROCm host despite ACCELERATE_USE_CPU — cost if wrong: CPU regressions do not validate GPU DDP.
+- Task 2: Ruling: preserve dataset-level raw residue-coordinate padding; align only at collation — avoids double offsets and preserves existing dataset consumers — cost if wrong: consumers bypassing collators must still align tokens themselves.
+- Task 2: Ruling: fixed dummy-training collator overwritten by eval construction while touching shared collation — otherwise dummy train plus real eval fails before alignment can be exercised — cost if wrong: tuple dummy collation compatibility.
+- Task 3: Ruling: use the actual decoder with a monkeypatched tiny preset in orchestration tests — tests real decoding/backprop without writing ~GB random checkpoints; real preset loader tests remain separate — cost if wrong: capacity/preset compatibility still needs its separate checks.
+- Task 5: Ruling: partition deterministic unsharded child streams at their outer owner — removes nested rank/worker partitioning; each rank currently scans/parses its source stream — cost if wrong: extra CPU parsing; indexed skipping can optimize later without changing ownership.
+- Task 5: Ruling: retain native evaluation loader length estimates and count yielded batches in tests — PyTorch iterable loaders with multiple workers have partial batches per worker; training lengths are exact through complete-worker truncation — cost if wrong: callers must not use eval len(loader) as a population or batch-count measurement.
+- Task 6: Ruling: coordinate rank-local loader errors and verify equal window sizes before denominator collectives — malformed data otherwise makes a peer fail inside Gloo, losing the useful error context — cost if wrong: one small status exchange per window.
+- Task 6: Ruling: micro_step counts consumed input batches, including skipped unsupervised windows — distinguishes data traversal from optimizer progress — cost if wrong: do not interpret micro_step as a forward-pass count when supervision is absent.
+- Task 7: Ruling: actual supplied capabilities are authoritative in build_metrics; removed its filesystem/config availability guesses — guessing could claim unloaded coordinates existed — cost if wrong: direct callers must pass actual capability flags and explicit unavailable requests now raise.
+- Task 7: Ruling: structure datasets accept load_coords=false by omitting coordinates from returned items — respects explicit false while retaining sequence parsing from the structure file — cost if wrong: structure parsing still reads atoms to derive the sequence; this is not a promise of coordinate-free file IO.
+- Task 8: Ruling: exchange local traversal errors before state collection and compute errors afterward — prevents either update or final-compute failures stranding peers; one flat tensor gather still combines all fixed metric state — cost if wrong: two small error-status collectives per dataset instead of one.
+- Task 8: Ruling: share the structural population accumulator among existing structure metric classes and masked accuracy via AccuracyMetric — removes repeated counting/error logic while retaining registry names/score aliases — cost if wrong: private accumulator fields changed; these are not public checkpoint state.
+- Task 9: Ruling: attention mode now errors when attention is absent; similarity remains available through use_attention=false — silent fallback changes the estimator without disclosure — cost if wrong: direct callers relying on implicit fallback must select similarity explicitly.
+- Task 12: Ruling: project the entire incoming batch's retained features before extraction — stricter than checking each structure individually, preserves the same limit without partial batch storage — cost if wrong: ranks cannot borrow each other's unused allowance and evaluation fails before any partial batch is retained.
+- Task 13: Ruling: reject explicitly reintroduced model.init.std rather than merely deleting its default — prevents +model.init.std from remaining a misleading no-op — cost if wrong: old override scripts must remove this unsupported option.
+- Task 14: Ruling: use Biopython SVDSuperimposer plus independent NumPy distance formulas as the fixed-subset reference — validates the exact documented Kabsch/C-alpha protocols without substituting a different algorithm — cost if wrong: no assertion of external TM-align, all-atom lDDT, or benchmark-quality equivalence; those remain explicitly unvalidated.
+- Final: Ruling: regrade the advertised metrics-only recipe as Important — a user following the documented command gets no requested evaluation, reproducing the F10 activation failure at the documentation boundary — cost if wrong: one actual recipe integration case and documentation correction, no new runtime feature.
+- Final: Ruling: identical global enabled=true overrides lack provenance — keep default auto eligibility and explicit per-dataset/whitelist requests per the approved plan — cost if wrong: callers needing a hard requirement must use per-dataset enabled=true or metrics.only.
+- Final: Ruling: retain source scanning and estimated iterable evaluation lengths — accepted coverage-correct native partitioning remains — cost if wrong: CPU parsing overhead and misleading length estimates if callers ignore actual traversal counts.
+- Final: Ruling: full-capacity pretrained scientific quality, downloaded weights, multi-GPU/NCCL, actual distributed overflow and power-loss recovery remain unvalidated — recorded evidence supports narrower tested paths only — cost if wrong: those deployment/scientific settings need separate validation before relying on them.
+- Final: Ruling: external TM-align/all-atom equivalence and custom codebook semantics are not inferred — use documented Kabsch/C-alpha protocols and require known compatible custom assets — cost if wrong: numerical/dimensional agreement cannot validate another scientific protocol or embedding basis.
+- Final: Ruling: temporary attention/gather/sklearn copies stay outside retained-feature cap — preserve the explicit memory contract — cost if wrong: peak host/device memory can exceed the configured retained-byte allowance.
+- Final: Ruling: resume, trainable codebook/CLI decoder and sharded training stay unsupported — user explicitly deferred new capabilities — cost if wrong: those workflows require later design and implementation.
+
+### Deferred minors
+
+None. The advertised metrics-only recipe was regraded by its effect on users and fixed.

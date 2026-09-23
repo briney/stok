@@ -235,7 +235,7 @@ When training from Parquet, you can optionally include a `coordinates` column co
 - If present, the dataset yields an additional tensor `coords` with shape `[max_len, 3, 3]`, padded/truncated to `data.max_len` with `NaN`s.
 - If absent, the dataset omits the `coords` key; CSV inputs never include `coords`.
 
-When FAPE is enabled, the geometric decoder is auto‑enabled and the training loop decodes predicted structure tokens into coordinates to compute a FAPE loss against the provided `coords`. When eval‑time decoding is enabled, the decoder is also auto‑enabled to produce coordinates for structure metrics (lDDT/TM/RMSD). If neither FAPE nor eval‑time decoding is enabled, the decoder remains disabled.
+When FAPE is enabled, the geometric decoder is auto‑enabled and the training loop decodes predicted structure tokens into coordinates to compute a FAPE loss against the provided `coords`. When eval‑time decoding is enabled, the decoder is also auto‑enabled to produce coordinates for structure metrics (lDDT/TM/RMSD). With neither feature requested, the decoder stays disabled unless explicitly enabled with `model.decoder.enabled=true`; loading it alone does not select metrics.
 
 ### learning rate schedule
 
@@ -300,11 +300,11 @@ Notes:
 
 ## using the pre-trained decoder (FAPE and eval metrics)
 
-The decoder is optional and is auto‑enabled whenever you enable FAPE or eval‑time decoding. You can also enable it explicitly if you want eval‑time structure metrics without FAPE:
+The decoder is optional and is auto‑enabled whenever you enable FAPE or eval‑time decoding. For eval‑time structure metrics without FAPE, enable evaluation decoding and provide a coordinate-capable evaluation source:
 
 ```bash
 # enable decoder but metrics-only (no FAPE)
-stok train model.decoder.enabled=true train.fape.enabled=false
+stok train train.decoding.eval_enabled=true train.fape.enabled=false data.eval=/abs/path/eval.parquet
 
 # two-stage training: start with token CE only, then add FAPE
 stok train \
@@ -627,6 +627,7 @@ not be compared by step number. A final partial accumulation window is flushed;
 empty supervision never advances the optimizer or scheduler. A completely empty
 or unsupervised training pass fails clearly.
 
+MLM rejects enabled FAPE or decoder/structure-decoding options.
 Only AdamW, a frozen codebook with its tied classifier, and a frozen training
 CLI decoder are supported. Unsupported option values raise before initialization.
 The standalone decoder loader still supports `freeze=False` for external callers.
@@ -663,7 +664,7 @@ biological positions, original sequence separation, and unique upper-triangle
 pairs. Its top-k size is the smaller of observed residues and eligible pairs.
 Attention mode requires attention; similarity is selected explicitly with
 `use_attention: false`. Logistic mode averages held-out scores within each protein
-before averaging proteins; insufficient structures use a disclosed mean-attention
+before averaging proteins, using a stable content ordering across ranks; insufficient structures use a disclosed mean-attention
 fallback. The retained feature/label limit defaults to 1 GiB across ranks
 (`train.eval.metrics.p_at_l.logreg_max_feature_bytes`), divided evenly without
 borrowing. It does **not** bound model or attention peak memory.

@@ -59,7 +59,7 @@ def _make_decoder_ckpt(tmp_path: Path, preset: str = "lite") -> Path:
     return ckpt_path
 
 
-@pytest.mark.parametrize("activation", ["auto", "whitelist", "decoder_only", "label_free", "label_free_mmcif"])
+@pytest.mark.parametrize("activation", ["auto", "whitelist", "decoder_only", "label_free", "label_free_mmcif", "metrics_example"])
 def test_eval_decoding_auto_enables_decoder(tmp_path, monkeypatch, activation):
     from stok.eval import Evaluator
     import importlib
@@ -134,6 +134,15 @@ def test_eval_decoding_auto_enables_decoder(tmp_path, monkeypatch, activation):
         # write artifacts to temp dir
         f"train.project_path={tmp_path.as_posix()}",
     ]
+
+    if activation == "metrics_example":
+        import re
+        import shlex
+        readme = (Path(__file__).parents[2] / 'README.md').read_text()
+        recipe = re.search(r'# enable decoder but metrics-only \(no FAPE\)\n(.*?)\n\n', readme, re.S).group(1)
+        recipe = recipe.replace("\\\n", " ").replace('/abs/path/eval.parquet', str(eval_pq))
+        overrides = [x for x in overrides if not x.startswith(('data.eval=', 'train.decoding.eval_enabled='))]
+        overrides += shlex.split(recipe)[2:]
 
     if activation == "whitelist":
         overrides = [x for x in overrides if not x.startswith("data.eval=")]
