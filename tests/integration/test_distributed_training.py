@@ -101,6 +101,8 @@ def test_native_eval_has_no_duplicates_or_dropped_tail(tmp_path, eval_n, source)
     for rank in range(2):
         metrics = json.loads((tmp_path/f'rank_{rank}.json').read_text())['metrics']
         assert metrics['acc'] == pytest.approx(1/eval_n)
+        assert metrics['acc/num_valid'] == 3 * eval_n
+        assert metrics['ppl/num_valid'] == 3 * eval_n
 
 
 def test_two_rank_undersized_worker_stream_fails_promptly(tmp_path):
@@ -150,3 +152,18 @@ def test_two_rank_globally_empty_pass_does_not_checkpoint(tmp_path):
         assert result.returncode != 0
         assert 'no successful optimizer update' in result.stderr
     assert not list((tmp_path/'run/checkpoints').glob('step_*.pt'))
+
+
+@pytest.mark.parametrize('case', ['eval-error', 'eval-empty'])
+def test_evaluation_failure_reaches_every_rank(tmp_path, case):
+    write_probe_data(tmp_path)
+    if case == 'eval-empty':
+        frame = pd.read_csv(tmp_path/'eval.csv')
+        frame['indices'] = '-1 -1 -1'
+        frame.to_csv(tmp_path/'eval.csv', index=False)
+    command = [sys.executable, '-m', 'tests.utils.distributed_probe', '--case', case,
+               '--output', str(tmp_path)]
+    for result in run_distributed(command):
+        assert result.returncode != 0
+        expected = 'injected rank-local evaluation failure' if case == 'eval-error' else 'num_valid=0'
+        assert expected in result.stderr

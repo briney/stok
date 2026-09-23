@@ -11,13 +11,16 @@ from stok.utils.losses import token_ce_loss
 
 
 class FixedModel(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, fail_on_label=None):
         super().__init__()
+        self.fail_on_label = fail_on_label
         self.anchor = torch.nn.Parameter(torch.zeros(()))
         self.register_buffer("calls", torch.zeros((), dtype=torch.long))
 
     def forward(self, tokens, labels=None, ignore_index=-100, **kwargs):
         self.calls += 1
+        if self.fail_on_label is not None and (labels == self.fail_on_label).any():
+            raise ValueError("injected rank-local evaluation failure")
         logits = torch.zeros((*tokens.shape, 128), device=tokens.device) + self.anchor
         loss = token_ce_loss(logits, labels, ignore_index)
         return {"logits": logits, "classification_loss": loss, "loss": loss}
@@ -25,7 +28,7 @@ class FixedModel(torch.nn.Module):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--case', choices=['coverage', 'eval-tail', 'empty-labels'], required=True)
+    parser.add_argument('--case', choices=['coverage', 'eval-tail', 'empty-labels', 'eval-error', 'eval-empty'], required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--source', choices=['map', 'iterable', 'map-mixture', 'mixed-mixture'], default='map')
     parser.add_argument('--workers', type=int, default=0)
@@ -47,8 +50,10 @@ def main():
     cfg.data.eval = str(root / ('eval_shards' if args.source == 'iterable' else 'eval.csv'))
     if args.case == "empty-labels":
         cfg.train.seed = 1337
+    if args.case == "eval-empty":
+        cfg.data.eval = {"default": {"path": str(root/'eval.csv'), "metrics": {"only": ["accuracy"]}}}
     train, evaluations = _build_dataloaders(cfg, codebook_size=128, pad_id=1)
-    loader = train if args.case != 'eval-tail' else evaluations['default']
+    loader = train if args.case in {'coverage', 'empty-labels'} else evaluations['default']
     ids = []
     batches = 0
     supervised_tokens = 0
@@ -80,8 +85,8 @@ def main():
         state = torch.load(root/'run/model/final.pt', weights_only=False, map_location='cpu')
         updates = state['global_step']
 
-    if args.case == 'eval-tail':
-        model = accelerator.prepare(FixedModel())
+    if args.case in {'eval-tail', 'eval-error', 'eval-empty'}:
+        model = accelerator.prepare(FixedModel(fail_on_label=1 if args.case == 'eval-error' else None))
         model.eval()
         metrics = Evaluator(cfg, model, accelerator).evaluate(loader, 'default')
         assert not model.training
