@@ -487,7 +487,7 @@ class TestGatherMetricStatesRegression:
                 """Set the values each process would contribute."""
                 self._process_values = values
 
-            def gather_for_metrics(self, tensor: torch.Tensor) -> torch.Tensor:
+            def gather(self, tensor: torch.Tensor) -> torch.Tensor:
                 """Simulate Accelerate's gather_for_metrics (concatenates tensors)."""
                 if not self._process_values:
                     # Default: just duplicate the tensor N times
@@ -579,3 +579,13 @@ class TestGatherMetricStatesRegression:
         assert metric_combined._correct_sum == 300.0  # 100 + 150 + 50
         assert metric_combined._total_sum == 1500.0   # 500 + 600 + 400
 
+
+
+def test_evaluation_preserves_incoming_mode():
+    model = MockModel()
+    model.eval()
+    evaluator = Evaluator(_make_cfg(), model, None)
+    loader = DataLoader(TensorDataset(torch.tensor([[0, 4, 5, 2]]),
+                                    torch.tensor([[-100, 0, 1, -100]])))
+    evaluator.evaluate(loader, 'validation')
+    assert not model.training

@@ -18,6 +18,7 @@ from torch.utils.data import (
     Dataset,
     IterableDataset,
     Sampler,
+    DistributedSampler,
 )
 
 from stok.data.collate import align_coords, mlm_collate, tokenize_residues
@@ -28,6 +29,8 @@ from stok.data.dataset import (
     IterableTokenizedDataset,
     MapAsIterableDataset,
     TokenizedDataset,
+    distributed_rank,
+    _usable_samples,
 )
 from stok.eval import Evaluator, MetricLogger
 from stok.models.decoder import load_pretrained_decoder
@@ -42,12 +45,11 @@ from stok.utils.tokenizer import Tokenizer
 
 
 def _maybe_get_accelerator():
-    try:
-        from accelerate import Accelerator
-
-        return Accelerator()
-    except Exception:
-        return None
+    from accelerate import Accelerator
+    accelerator = Accelerator()
+    if accelerator.distributed_type.name not in {"NO", "MULTI_CPU", "MULTI_GPU"}:
+        raise ValueError(f"Unsupported distributed backend: {accelerator.distributed_type}; use replicated DDP")
+    return accelerator
 
 
 def _get_model_device(model: nn.Module, accelerator) -> torch.device:
@@ -487,6 +489,8 @@ class MixtureSampler(Sampler[int]):
         fractions: list[float],
         seed: int = 0,
         num_samples: Optional[int] = None,
+        rank: int = 0,
+        world_size: int = 1,
     ):
         if len(lengths) == 0:
             raise ValueError("MixtureSampler requires at least one dataset length")
@@ -501,6 +505,7 @@ class MixtureSampler(Sampler[int]):
             )
         fr = fr / float(fr.sum())
 
+        self.rank, self.world_size = rank, world_size
         self.lengths = [int(L) for L in lengths]
         self.fractions = fr.tolist()
         self.seed = int(seed)
@@ -511,16 +516,21 @@ class MixtureSampler(Sampler[int]):
         )
 
     def __len__(self) -> int:
-        return int(self.num_samples)
+        return self.num_samples // self.world_size
+
+    def set_epoch(self, epoch: int):
+        self._epoch = epoch
 
     def __iter__(self):
         rng = np.random.RandomState((self.seed + (self._epoch * 1009)) & 0xFFFFFFFF)
         self._epoch += 1
         fr = np.asarray(self.fractions, dtype=np.float64)
-        for _ in range(int(self.num_samples)):
+        usable = len(self) * self.world_size
+        for position in range(usable):
             ds_idx = int(rng.choice(len(self.lengths), p=fr))
             j = int(rng.randint(0, self.lengths[ds_idx]))
-            yield int(self.offsets[ds_idx] + j)
+            if position % self.world_size == self.rank:
+                yield int(self.offsets[ds_idx] + j)
 
 
 def _build_dataloaders(
@@ -530,6 +540,7 @@ def _build_dataloaders(
     pad_id: int,
     is_mlm: bool = False,
 ) -> tuple[DataLoader, dict[str, DataLoader]]:
+    rank, world_size = distributed_rank()
     batch_size: int = cfg.data.batch_size
     max_len: int = cfg.data.max_len
     num_workers: int = cfg.data.num_workers
@@ -690,7 +701,7 @@ def _build_dataloaders(
                     iterables.append(itds)
                     fracs.append(float(frac))
                     try:
-                        total_samples += int(len(itds))  # type: ignore[arg-type]
+                        total_samples += itds.num_samples
                     except Exception:
                         total_samples = 0
                 train_ds = InterleavedIterableDataset(
@@ -707,6 +718,7 @@ def _build_dataloaders(
                 concat = ConcatDataset(map_datasets)
                 sampler = MixtureSampler(
                     lengths=lengths,
+                    rank=rank, world_size=world_size,
                     fractions=fracs,
                     seed=int(cfg.train.get("seed", 1337)),
                 )
@@ -801,6 +813,15 @@ def _build_dataloaders(
             kwargs["prefetch_factor"] = prefetch_factor
         return kwargs
 
+    if is_iterable:
+        train_ds.training_batch_size = batch_size
+        train_ds.num_workers = num_workers
+        dropped = train_ds.num_samples - _usable_samples(train_ds)
+        if rank == 0 and dropped:
+            print(f"Training stream drops {dropped} samples per pass for complete rank/worker batches")
+    elif train_sampler is None:
+        train_sampler = DistributedSampler(train_ds, num_replicas=world_size, rank=rank,
+            shuffle=True, seed=int(cfg.train.get("seed", 1337)), drop_last=True)
     if train_sampler is not None:
         train_loader = DataLoader(
             train_ds,  # type: ignore[arg-type]
@@ -839,8 +860,15 @@ def _build_dataloaders(
             chain_id=eval_chain_id,
             recursive=eval_recursive,
         )
+        if isinstance(ds, IterableDataset):
+            ds.shuffle_shards = False
+            ds.shuffle_rows = False
+            eval_sampler = None
+        else:
+            eval_sampler = range(rank, len(ds), world_size)
         eval_loaders[name] = DataLoader(
             ds,
+            sampler=eval_sampler,
             shuffle=False,
             drop_last=False,
             **_make_dl_kwargs(eval_batch_size),
@@ -1141,15 +1169,7 @@ def run_training(cfg: DictConfig):
 
     # prepare with Accelerate (if available)
     if accelerator:
-        to_prepare = [model, optimizer, train_loader]
-        to_prepare.extend(eval_loaders.values())
-        prepared = accelerator.prepare(*to_prepare)
-        # Unpack prepared components in order
-        model = prepared[0]
-        optimizer = prepared[1]
-        train_loader = prepared[2]
-        eval_names = list(eval_loaders.keys())
-        eval_loaders = {name: prepared[3 + i] for i, name in enumerate(eval_names)}
+        model, optimizer = accelerator.prepare(model, optimizer)
     else:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model.to(device)
@@ -1230,7 +1250,11 @@ def run_training(cfg: DictConfig):
         # linear
         return t0 + (t1 - t0) * (float(step) / float(T))
 
+    epoch = 0
     while global_step < max_steps:
+        if hasattr(train_loader.sampler, "set_epoch"):
+            train_loader.sampler.set_epoch(epoch)
+        epoch += 1
         batches_in_pass = 0
         for batch in train_loader:
             batches_in_pass += 1
@@ -1246,12 +1270,11 @@ def run_training(cfg: DictConfig):
             else:
                 tokens, labels = batch  # type: ignore[misc]
                 coords = None
-            if accelerator is None:
-                _dev = _get_model_device(model, accelerator)
-                tokens = tokens.to(_dev)
-                labels = labels.to(_dev)
-                if coords is not None:
-                    coords = coords.to(_dev)
+            _dev = _get_model_device(model, accelerator)
+            tokens = tokens.to(_dev)
+            labels = labels.to(_dev)
+            if coords is not None:
+                coords = coords.to(_dev)
 
             # base model forward (token classification only)
             outputs = model(tokens=tokens, labels=labels, ignore_index=ignore_index)

@@ -126,3 +126,13 @@ def test_parse_eval_configs_rejects_invalid_type():
         _parse_eval_configs(cfg)
 
 
+
+
+def test_accelerator_initialization_failure_is_not_hidden(monkeypatch):
+    import accelerate
+    from stok.cli.train import _maybe_get_accelerator
+    def fail():
+        raise RuntimeError('initialization failed')
+    monkeypatch.setattr(accelerate, 'Accelerator', fail)
+    with pytest.raises(RuntimeError, match='initialization failed'):
+        _maybe_get_accelerator()

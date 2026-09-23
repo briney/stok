@@ -180,7 +180,7 @@ class Evaluator:
 
         Supports two gathering modes:
         1. Tensor-based gathering (default): For metrics with fixed-size state.
-           Uses accelerator.gather_for_metrics() which requires identical shapes.
+           Uses accelerator.gather() which requires identical shapes.
         2. Object-based gathering: For metrics with variable-length state.
            Uses accelerator.gather_object() which handles arbitrary Python objects.
 
@@ -214,10 +214,10 @@ class Evaluator:
             gathered_tensors = []
             for t in state_tensors:
                 t_device = t.to(device)
-                gathered = self.accelerator.gather_for_metrics(t_device)
+                gathered = self.accelerator.gather(t_device)
 
                 # Sum across processes
-                # Accelerate's gather_for_metrics concatenates tensors along dim=0,
+                # Accelerate's gather concatenates tensors along dim=0,
                 # so a tensor of shape [2] becomes [N*2] with N processes (flattened).
                 # We need to reshape back to [N, *original_shape] before summing.
                 original_size = t_device.numel()
@@ -266,7 +266,9 @@ class Evaluator:
         # Check if any metrics need attention weights (e.g., p_at_l)
         needs_attentions = self._needs_attentions(eval_name)
 
+        incoming_training = self.model.training
         self.model.eval()
+        eval_model = _unwrap_model(self.model, self.accelerator)
         ignore_index = int(self.cfg.model.classifier.get("ignore_index", -100))
 
         with torch.no_grad():
@@ -278,16 +280,14 @@ class Evaluator:
                     tokens, labels = batch
                     coords = None
 
-                # Move to device if not using accelerator
-                if self.accelerator is None:
-                    device = _get_model_device(self.model, self.accelerator)
-                    tokens = tokens.to(device)
-                    labels = labels.to(device)
-                    if coords is not None:
-                        coords = coords.to(device)
+                device = _get_model_device(self.model, self.accelerator)
+                tokens = tokens.to(device)
+                labels = labels.to(device)
+                if coords is not None:
+                    coords = coords.to(device)
 
                 # Forward pass (request attention weights if needed for metrics like p_at_l)
-                outputs = self.model(
+                outputs = eval_model(
                     tokens=tokens,
                     labels=labels,
                     ignore_index=ignore_index,
@@ -328,7 +328,7 @@ class Evaluator:
             except Exception as e:
                 warnings.warn(f"Metric '{metric.name}' compute failed: {e}")
 
-        self.model.train()
+        self.model.train(incoming_training)
         return results
 
     def evaluate_all(
