@@ -20,9 +20,6 @@ classifier:
   projector_dim: null
   ignore_index: -100
 
-init:
-  std: 0.02
-
 codebook:
   preset: "base"  # "base" or "lite"
   path: null

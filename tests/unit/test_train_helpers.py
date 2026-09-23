@@ -182,3 +182,22 @@ def test_coordinate_alias_conflict_and_missing_source(tmp_path):
     cfg.data.eval = {'val': {'path': str(source), 'has_coords': True}}
     with pytest.raises(ValueError, match='coordinate-capable'):
         _build_dataloaders(cfg, codebook_size=128, pad_id=1)
+
+
+@pytest.mark.parametrize('override,match', [
+    ('model.classifier.tie_to_codebook=false', 'tie_to_codebook'),
+    ('model.codebook.trainable=true', 'codebook.trainable'),
+    ('model.decoder.freeze=false', 'decoder.freeze'),
+    ('train.optimizer.name=sgd', 'optimizer.name'),
+])
+def test_unsupported_options_fail_before_accelerator(monkeypatch, override, match):
+    from hydra import compose, initialize_config_dir
+    from pathlib import Path
+    import stok.cli.train as train
+    with initialize_config_dir(config_dir=str(Path(train.__file__).parents[1]/'configs'), version_base=None):
+        cfg = compose(config_name='config', overrides=[override])
+    def should_not_initialize():
+        raise AssertionError('Validation must precede accelerator/downloads')
+    monkeypatch.setattr(train, '_maybe_get_accelerator', should_not_initialize)
+    with pytest.raises(ValueError, match=match):
+        train.run_training(cfg)

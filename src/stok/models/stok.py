@@ -150,9 +150,8 @@ class STokModel(nn.Module):
                 padding positions. If None, inferred from pad_id. Defaults to None.
             labels: Target labels of shape [B, L]. Use ignore_index for
                 ignored positions. Defaults to None.
-            coords: Coordinates of shape [B, L, 3, 3] for N, CA, C atoms per residue.
-                If None, the structure-based FAPE loss is not computed. Defaults to None.
-            coords_loss_weight: Weight for the structure-based FAPE loss. Defaults to 0.1.
+            coords: Deprecated; supplying coordinates raises. The training loop owns FAPE.
+            coords_loss_weight: Deprecated compatibility argument; unused here.
             ignore_index: Index to ignore in loss computation. Defaults to -100.
             output_attentions: If True, also returns attention weights from all
                 encoder layers. Defaults to False.
@@ -170,6 +169,8 @@ class STokModel(nn.Module):
                     (including initial embeddings), each of shape [B, L, d_model].
                     Only present if output_hidden_states=True.
         """
+        if coords is not None:
+            raise ValueError("Coordinate/FAPE supervision belongs to the training loop, not STokModel.forward")
         # embedding
         h = self.embed(tokens)  # [B, L, d_model]
 

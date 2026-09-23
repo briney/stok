@@ -1,11 +1,12 @@
 from functools import partial
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from itertools import islice
 import math
 import os
 import random
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Optional
 
@@ -180,29 +181,17 @@ def _collect_rng_state() -> dict[str, Any]:
     return state
 
 
-def _restore_rng_state(state: dict[str, Any]):
+@contextmanager
+def _atomic_destination(path: Path):
+    """Replace a destination only after its complete sibling file is written."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    os.close(fd)
     try:
-        if "python" in state:
-            random.setstate(state["python"])
-        if "numpy" in state:
-            np_state = state["numpy"]
-            # accept both raw numpy state and "listified" variant
-            if isinstance(np_state, (list, tuple)) and len(np_state) >= 5:
-                key = np_state[1]
-                if isinstance(key, list):
-                    try:
-                        key = np.array(key, dtype=np.uint32)
-                    except Exception:
-                        key = np.array(key)
-                np_state = (np_state[0], key, np_state[2], np_state[3], np_state[4])
-            np.random.set_state(np_state)
-        if "torch" in state:
-            torch.set_rng_state(state["torch"])
-        if "cuda" in state and torch.cuda.is_available():
-            torch.cuda.set_rng_state_all(state["cuda"])
-    except Exception:
-        # best-effort restore; ignore incompatibilities
-        pass
+        yield temporary
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
 def _save_checkpoint(
@@ -227,35 +216,8 @@ def _save_checkpoint(
         "config": OmegaConf.to_container(cfg, resolve=True),
         "rng_state": _collect_rng_state(),
     }
-    torch.save(payload, path.as_posix())
-
-
-def _try_load_latest_checkpoint(
-    ckpt_dir: Path,
-    *,
-    model: nn.Module,
-    optimizer: torch.optim.Optimizer,
-    scheduler: torch.optim.lr_scheduler._LRScheduler,
-    accelerator,
-) -> int:
-    """
-    Returns restored global_step if a checkpoint is loaded; otherwise 0.
-    """
-    latest = ckpt_dir / "latest.pt"
-    if not latest.exists():
-        return 0
-    # all processes load to keep state in sync under DDP
-    try:
-        ckpt = torch.load(latest.as_posix(), map_location="cpu")
-        _unwrap_model(model, accelerator).load_state_dict(ckpt["model"])
-        optimizer.load_state_dict(ckpt["optimizer"])
-        scheduler.load_state_dict(ckpt["scheduler"])
-        if "rng_state" in ckpt:
-            _restore_rng_state(ckpt["rng_state"])
-        return int(ckpt.get("global_step", 0))
-    except Exception:
-        # if anything goes wrong, start from scratch
-        return 0
+    with _atomic_destination(path) as temporary:
+        torch.save(payload, temporary)
 
 
 def _load_pretrained_encoder(
@@ -1000,6 +962,15 @@ def _raise_rank_errors(error, accelerator, context: str):
 
 
 def run_training(cfg: DictConfig):
+    for key, supported in (("model.classifier.tie_to_codebook", True),
+                           ("model.codebook.trainable", False),
+                           ("model.decoder.freeze", True)):
+        if OmegaConf.select(cfg, key, default=supported) != supported:
+            raise ValueError(f"{key} only supports {supported} in the training CLI")
+    if str(cfg.train.optimizer.get("name", "adamw")).lower() != "adamw":
+        raise ValueError("train.optimizer.name only supports adamw")
+    if OmegaConf.select(cfg, "model.init.std") is not None:
+        raise ValueError("model.init.std is unsupported; initialization follows module defaults")
     for name, value, minimum in (
         ("grad_accum_steps", cfg.train.get("grad_accum_steps", 1), 1),
         ("log_steps", cfg.train.get("log_steps", 1), 1),
@@ -1596,7 +1567,8 @@ def run_training(cfg: DictConfig):
                             scheduler=scheduler, global_step=global_step,
                             cfg=cfg, accelerator=accelerator, micro_step=micro_step,
                         )
-                        shutil.copyfile(step_path, io_dirs["checkpoints"] / "latest.pt")
+                        with _atomic_destination(io_dirs["checkpoints"] / "latest.pt") as temporary:
+                            shutil.copyfile(step_path, temporary)
                     except Exception as exc:
                         checkpoint_error = f"{type(exc).__name__}: {exc}"
                 errors = gather_object([checkpoint_error]) if accelerator else [checkpoint_error]
@@ -1609,19 +1581,18 @@ def run_training(cfg: DictConfig):
         if global_step == updates_before_pass:
             raise RuntimeError("Training pass made no successful optimizer update")
 
+    checkpoint_error = None
     if is_main:
-        # final checkpoint
-        final_path = io_dirs["model"] / "final.pt"
-        _save_checkpoint(
-            final_path,
-            model=model,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            global_step=global_step,
-            micro_step=micro_step,
-            cfg=cfg,
-            accelerator=accelerator,
-        )
+        try:
+            _save_checkpoint(io_dirs["model"] / "final.pt", model=model, optimizer=optimizer,
+                scheduler=scheduler, global_step=global_step, micro_step=micro_step,
+                cfg=cfg, accelerator=accelerator)
+        except Exception as exc:
+            checkpoint_error = f"{type(exc).__name__}: {exc}"
+    errors = gather_object([checkpoint_error]) if accelerator else [checkpoint_error]
+    if any(errors):
+        raise RuntimeError(f"Final checkpoint failed: {errors}")
+    if is_main:
         console.close()
         console.print("Training complete.")
         if log_file_handle is not None:
