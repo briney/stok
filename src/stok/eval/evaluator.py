@@ -110,7 +110,8 @@ class Evaluator:
 
             # Check if any metric needs attention weights (e.g., p_at_l)
             self._needs_attentions_cache[cache_key] = any(
-                getattr(m, "name", "") == "p_at_l" for m in metrics
+                getattr(m, "name", "") == "p_at_l" and
+                (m.use_attention or m.use_logistic_regression) for m in metrics
             )
 
         return self._metrics_cache[cache_key]
@@ -186,6 +187,11 @@ class Evaluator:
         for metric in metrics:
             objects = metric.state_objects()
             if objects is not None:
+                size = sum(s["features"].numel() * s["features"].element_size() +
+                           s["labels"].numel() * s["labels"].element_size() for s in objects)
+                total = self.accelerator.gather(torch.tensor([size], device=self.accelerator.device)).sum().item()
+                if total > metric.logreg_max_feature_bytes:
+                    raise ValueError(f"P@L total feature bytes {total} exceed logreg_max_feature_bytes")
                 metric.load_state_objects(gather_object(objects))
             tensors = metric.state_tensors()
             if tensors:
@@ -240,6 +246,9 @@ class Evaluator:
             metric.reset()
         needs_decoding = any(metric.requires_decoder for metric in metrics)
         needs_attentions = self._needs_attentions(eval_name)
+        n_layers = int(self.cfg.model.encoder.get("n_layers", 12))
+        attention_indices = tuple(sorted({i for m in metrics if m.name == "p_at_l"
+            for i in m.required_attention_layers(n_layers)}))
         incoming_training = self.model.training
         self.model.eval()
         eval_model = _unwrap_model(self.model, self.accelerator)
@@ -255,7 +264,8 @@ class Evaluator:
                         tokens, labels = (t.to(device) for t in batch[:2])
                         coords = batch[2].to(device) if len(batch) == 3 else None
                         outputs = eval_model(tokens=tokens, labels=labels if has_labels else None,
-                            ignore_index=ignore_index, output_attentions=needs_attentions)
+                            ignore_index=ignore_index, output_attentions=needs_attentions,
+                            **({"attention_layer_indices": attention_indices} if needs_attentions else {}))
                         outputs["residue_mask"] = residue_mask_from_tokens(tokens,
                             pad_id=int(self.cfg.model.encoder.pad_id),
                             bos_id=int(self.cfg.model.encoder.get("bos_id", 0)),

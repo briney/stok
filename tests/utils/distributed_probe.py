@@ -23,12 +23,13 @@ class FixedModel(torch.nn.Module):
             raise ValueError("injected rank-local evaluation failure")
         logits = torch.zeros((*tokens.shape, 128), device=tokens.device) + self.anchor
         loss = token_ce_loss(logits, labels, ignore_index)
-        return {"logits": logits, "classification_loss": loss, "loss": loss}
+        return {"logits": logits, "classification_loss": loss, "loss": loss,
+                "attentions": [torch.ones(tokens.size(0), 2, tokens.size(1), tokens.size(1))]}
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--case', choices=['coverage', 'eval-tail', 'empty-labels', 'eval-error', 'eval-empty'], required=True)
+    parser.add_argument('--case', choices=['coverage', 'eval-tail', 'empty-labels', 'eval-error', 'eval-empty', 'eval-budget'], required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--source', choices=['map', 'iterable', 'map-mixture', 'mixed-mixture'], default='map')
     parser.add_argument('--workers', type=int, default=0)
@@ -85,7 +86,21 @@ def main():
         state = torch.load(root/'run/model/final.pt', weights_only=False, map_location='cpu')
         updates = state['global_step']
 
-    if args.case in {'eval-tail', 'eval-error', 'eval-empty'}:
+    if args.case == 'eval-budget':
+        from torch.utils.data import DataLoader, TensorDataset
+        cfg.train.objective = 'mlm'
+        cfg.data.eval = {'default': {'metrics': {'only': ['p_at_l']}}}
+        cfg.train.eval.metrics.p_at_l.use_logistic_regression = True
+        cfg.train.eval.metrics.p_at_l.min_seq_sep = 1
+        cfg.train.eval.metrics.p_at_l.logreg_max_feature_bytes = 32
+        sample = next(iter(loader))
+        coords = torch.zeros(*sample[0].shape, 3, 3)
+        if accelerator.process_index == 1:
+            coords[:] = float('nan')
+        dataset = TensorDataset(*sample[:2], coords)
+        dataset.has_coords = True
+        loader = DataLoader(dataset, batch_size=2)
+    if args.case in {'eval-tail', 'eval-error', 'eval-empty', 'eval-budget'}:
         model = accelerator.prepare(FixedModel(fail_on_label=1 if args.case == 'eval-error' else None))
         model.eval()
         metrics = Evaluator(cfg, model, accelerator).evaluate(loader, 'default')

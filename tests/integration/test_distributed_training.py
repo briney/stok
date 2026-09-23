@@ -167,3 +167,13 @@ def test_evaluation_failure_reaches_every_rank(tmp_path, case):
         assert result.returncode != 0
         expected = 'injected rank-local evaluation failure' if case == 'eval-error' else 'num_valid=0'
         assert expected in result.stderr
+
+
+def test_logreg_budget_failure_reaches_every_rank(tmp_path):
+    write_probe_data(tmp_path, eval_n=5)
+    command = [sys.executable, '-m', 'tests.utils.distributed_probe', '--case', 'eval-budget',
+               '--output', str(tmp_path)]
+    for result in run_distributed(command):
+        assert result.returncode != 0
+        assert 'logreg_max_feature_bytes' in result.stderr
+        assert 'Evaluation dataset default' in result.stderr

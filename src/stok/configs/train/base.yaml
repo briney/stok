@@ -134,6 +134,7 @@ eval:
       num_layers: null  # null = 10% of encoder layers (rounded up); or set explicit int
       # logistic regression mode
       use_logistic_regression: false
+      logreg_max_feature_bytes: 1073741824  # retained features+labels across ranks, not attention peak
       logreg_n_train: 20       # number of structures for training per iteration
       logreg_lambda: 0.15      # L1 regularization strength (sklearn C = 1/lambda)
       logreg_n_iterations: 5   # number of random train/test sampling iterations

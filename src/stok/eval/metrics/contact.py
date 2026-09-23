@@ -140,24 +140,21 @@ def _extract_attention_contacts(
     if attentions is None:
         return None
 
-    # attentions should be a tuple/list of [B, H, L, L] tensors, one per layer
     if isinstance(attentions, (list, tuple)):
+        indices = outputs.get("attention_layer_indices", tuple(range(len(attentions))))
         if layer == "mean":
-            # Average all layers
-            attn = torch.stack(attentions, dim=0).mean(dim=0)
+            selected = attentions
         elif isinstance(layer, int):
-            # Use specific layer by index
-            attn = attentions[layer]
+            original = layer if layer >= 0 else max(indices) + 1 + layer
+            if original not in indices:
+                raise ValueError(f"Missing attention layer {original}")
+            selected = [attentions[indices.index(original)]]
         elif layer == "last":
-            # Use final num_layers layers
-            n = min(num_layers, len(attentions))
-            if n <= 1:
-                attn = attentions[-1]
-            else:
-                # Stack and average the final n layers
-                attn = torch.stack(attentions[-n:], dim=0).mean(dim=0)
+            ordered = sorted(zip(indices, attentions), key=lambda pair: pair[0])
+            selected = [value for _, value in ordered[-num_layers:]]
         else:
-            attn = attentions[-1]
+            raise ValueError(f"Unknown attention_layer: {layer}")
+        attn = selected[0] if len(selected) == 1 else torch.stack(selected).mean(0)
     else:
         attn = attentions
 
@@ -211,6 +208,7 @@ class PrecisionAtLMetric(MetricBase):
         logreg_n_train: int = 20,
         logreg_lambda: float = 0.15,
         logreg_n_iterations: int = 5,
+        logreg_max_feature_bytes: int = 1024**3,
         **kwargs,
     ):
         """Initialize Precision@L metric.
@@ -249,6 +247,10 @@ class PrecisionAtLMetric(MetricBase):
         self.logreg_n_train = logreg_n_train
         self.logreg_lambda = logreg_lambda
         self.logreg_n_iterations = logreg_n_iterations
+        self.logreg_max_feature_bytes = int(logreg_max_feature_bytes)
+        if self.logreg_max_feature_bytes <= 0:
+            raise ValueError("logreg_max_feature_bytes must be positive")
+        self._feature_bytes = 0
 
         # Standard mode accumulators
         self._correct_sum: float = 0.0
@@ -288,6 +290,15 @@ class PrecisionAtLMetric(MetricBase):
             masked_outputs = dict(outputs, residue_mask=valid)
             try:
                 if self.use_logistic_regression:
+                    attentions = outputs.get("attentions")
+                    if attentions:
+                        feature_count = sum(a.shape[1] for a in attentions)
+                        projected = self._feature_bytes + int(pairs.sum()) * (feature_count + 1) * 4
+                        world = torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
+                        if projected > self.logreg_max_feature_bytes // world:
+                            raise ValueError(f"P@L projected feature bytes {projected} exceed rank budget "
+                                f"{self.logreg_max_feature_bytes // world}; increase logreg_max_feature_bytes "
+                                "or evaluate fewer/shorter structures")
                     predictions = _extract_per_layer_head_attention(masked_outputs)
                 elif self.use_attention:
                     predictions = _extract_attention_contacts(masked_outputs,
@@ -308,6 +319,7 @@ class PrecisionAtLMetric(MetricBase):
                         features = predictions[b, :, :, pairs[b]].flatten(0, 1).T.float().cpu()
                         if not torch.isfinite(features).all():
                             raise ValueError("Nonfinite contact features")
+                        self._feature_bytes += features.numel() * features.element_size() + features.shape[0] * 4
                         self._logreg_structures.append({"features": features,
                             "labels": contacts[b][pairs[b]].float().cpu(), "seq_len": seq_len})
                     else:
@@ -488,9 +500,24 @@ class PrecisionAtLMetric(MetricBase):
     def reset(self) -> None:
         """Reset accumulated state."""
         self.reset_population()
+        self._feature_bytes = 0
         self._correct_sum = 0.0
         self._total_sum = 0.0
         self._logreg_structures = []
+
+    def required_attention_layers(self, n_layers: int) -> tuple[int, ...]:
+        if self.use_logistic_regression or self.attention_layer == "mean":
+            return tuple(range(n_layers))
+        if not self.use_attention:
+            return ()
+        if isinstance(self.attention_layer, int):
+            index = self.attention_layer if self.attention_layer >= 0 else n_layers + self.attention_layer
+            if not 0 <= index < n_layers:
+                raise ValueError("attention_layer outside encoder")
+            return (index,)
+        if self.attention_layer != "last" or self.num_layers <= 0:
+            raise ValueError("Invalid attention layer selection")
+        return tuple(range(max(0, n_layers - self.num_layers), n_layers))
 
     def state_tensors(self) -> list[torch.Tensor]:
         return [torch.tensor([self._correct_sum, self._total_sum, *self.population_values()],

@@ -140,6 +140,7 @@ class STokModel(nn.Module):
         ignore_index: int = -100,
         output_attentions: bool = False,
         output_hidden_states: bool = False,
+        attention_layer_indices: tuple[int, ...] | None = None,
     ):
         """Forward pass through STOK model.
 
@@ -183,6 +184,7 @@ class STokModel(nn.Module):
             attn_mask=None,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
+            attention_layer_indices=attention_layer_indices,
         )
 
         # Unpack encoder output based on flags
@@ -227,6 +229,8 @@ class STokModel(nn.Module):
 
         if output_attentions:
             result["attentions"] = all_attentions
+            result["attention_layer_indices"] = (tuple(range(len(self.encoder.layers)))
+                if attention_layer_indices is None else tuple(attention_layer_indices))
 
         if output_hidden_states:
             result["hidden_states"] = all_hidden_states

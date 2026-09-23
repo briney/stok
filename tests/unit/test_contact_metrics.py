@@ -969,3 +969,14 @@ def test_logreg_fallback_is_protein_weighted():
         result = metric.compute()
     assert result['p_at_l'] == .5
     assert result['p_at_l/num_valid'] == 2
+
+
+def test_logreg_rejects_projected_feature_storage_before_collection():
+    metric = PrecisionAtLMetric(use_logistic_regression=True, min_seq_sep=1,
+                               logreg_max_feature_bytes=100)
+    tokens = torch.full((1, 8), 4)
+    coords = torch.zeros(1, 8, 3, 3)
+    cfg = OmegaConf.create({'model': {'encoder': {'pad_id': 1}}})
+    with pytest.raises(ValueError, match='logreg_max_feature_bytes'):
+        metric.update({'attentions': [torch.ones(1, 2, 8, 8)]}, tokens, None, coords, cfg)
+    assert metric._logreg_structures == []
