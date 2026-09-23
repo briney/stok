@@ -764,7 +764,7 @@ class TestPrecisionAtLLogisticRegression:
         # With correlated features, should get reasonable precision
         assert result["p_at_l"] >= 0.0
 
-    def test_logreg_state_tensors_returns_empty(self):
+    def test_logreg_state_tensors_includes_population(self):
         """Test that state_tensors returns empty list for logreg mode (uses objects)."""
         metric = PrecisionAtLMetric(use_logistic_regression=True)
         
@@ -776,7 +776,8 @@ class TestPrecisionAtLLogisticRegression:
         tensors = metric.state_tensors()
         
         # Logreg mode uses object gathering, not tensor gathering
-        assert len(tensors) == 0
+        assert len(tensors) == 1
+        assert tensors[0].numel() == 5
 
     def test_logreg_state_objects_returns_structures(self):
         """Test that state_objects returns the accumulated structures."""
@@ -922,3 +923,49 @@ class TestPrecisionAtLLogisticRegressionConfig:
         assert p_at_l.logreg_lambda == 0.15
         assert p_at_l.logreg_n_iterations == 5
 
+
+
+def test_contact_population_ignores_specials_missing_coords_and_keeps_gaps():
+    from omegaconf import OmegaConf
+    cfg = OmegaConf.create({'model': {'encoder': {'pad_id': 1}}})
+    # Two observed residues separated by three original positions: one evaluable pair.
+    tokens = torch.tensor([[0, 4, 4, 4, 4, 2, 1]])
+    coords = torch.full((1, 7, 3, 3), float('nan'))
+    coords[0, 1] = 0.
+    coords[0, 4] = 1.
+    attention = torch.ones(1, 1, 7, 7)
+    metric = PrecisionAtLMetric(min_seq_sep=3)
+    metric.update({'attentions': [attention], 'residue_mask': (tokens == 4)}, tokens, None, coords, cfg)
+    result = metric.compute()
+    assert result['p_at_l'] == 1.
+    assert result['p_at_l/num_valid'] == 1
+    # All specials and no eligible residue pair is unavailable, not precision zero.
+    metric.reset()
+    metric.update({'attentions': [attention], 'residue_mask': (tokens == 4)}, tokens, None,
+                  torch.full_like(coords, float('nan')), cfg)
+    assert 'p_at_l' not in metric.compute()
+    assert metric.compute()['p_at_l/num_skipped'] == 1
+
+
+def test_contact_attention_apc_excludes_boundary_values():
+    from stok.eval.metrics.contact import _extract_attention_contacts
+    raw = torch.tensor([[[[0., 9., 2.], [9., 0., 1.], [2., 1., 0.]]]])
+    base = _extract_attention_contacts({'attentions': [raw], 'residue_mask': torch.ones(1, 3, dtype=torch.bool)})
+    padded = torch.full((1, 1, 6, 6), 1000.)
+    padded[:, :, 1:4, 1:4] = raw
+    mask = torch.tensor([[False, True, True, True, False, False]])
+    actual = _extract_attention_contacts({'attentions': [padded], 'residue_mask': mask})
+    torch.testing.assert_close(actual[:, 1:4, 1:4], base)
+
+
+def test_logreg_fallback_is_protein_weighted():
+    import pytest
+    metric = PrecisionAtLMetric(use_logistic_regression=True)
+    metric._logreg_structures = [
+        {'features': torch.tensor([[10.], [1.]]), 'labels': torch.tensor([1., 0.]), 'seq_len': 1},
+        {'features': torch.tensor([[10.], [9.], [8.], [1.]]), 'labels': torch.zeros(4), 'seq_len': 3},
+    ]
+    with pytest.warns(UserWarning, match='Not enough structures'):
+        result = metric.compute()
+    assert result['p_at_l'] == .5
+    assert result['p_at_l/num_valid'] == 2
