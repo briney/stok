@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
+import random
+
+import numpy as np
 
 import torch
 import torch.nn as nn
@@ -206,6 +209,27 @@ class Evaluator:
             raise RuntimeError(f"Evaluation dataset {eval_name}: {errors}")
 
     def evaluate(self, eval_loader: DataLoader, eval_name: str) -> dict[str, float]:
+        """Isolate all evaluation randomness, including DataLoader iteration.
+
+        Stochastic decoding is repeatable at a fixed configuration; changing
+        batching can change top-p draws. MLM masking is per-sample invariant.
+        """
+        python_state, numpy_state = random.getstate(), np.random.get_state()
+        devices = list(range(torch.cuda.device_count())) if torch.cuda.is_initialized() else []
+        seed = int(self.cfg.train.get("eval", {}).get("seed", self.cfg.train.get("seed", 1337)))
+        try:
+            with torch.random.fork_rng(devices=devices):
+                torch.default_generator.manual_seed(seed)
+                if devices:
+                    torch.cuda.manual_seed_all(seed)
+                random.seed(seed)
+                np.random.seed(seed % (2**32))
+                return self._evaluate(eval_loader, eval_name)
+        finally:
+            random.setstate(python_state)
+            np.random.set_state(numpy_state)
+
+    def _evaluate(self, eval_loader: DataLoader, eval_name: str) -> dict[str, float]:
         dataset = eval_loader.dataset
         has_labels = self.objective == "mlm" or getattr(dataset, "has_labels", True)
         self._capabilities[eval_name] = (getattr(dataset, "has_coords", self.has_coords), has_labels,

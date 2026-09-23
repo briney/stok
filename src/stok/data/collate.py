@@ -1,3 +1,6 @@
+import hashlib
+import json
+
 import torch
 from typing import Any
 
@@ -56,10 +59,13 @@ def mlm_collate(
     mask_prob: float = 0.15,
     mask_token_prob: float = 0.8,
     random_token_prob: float = 0.1,
-    pad_id: int = 1,
-    mask_id: int = 31,
+    pad_id: int | None = None,
+    mask_id: int | None = None,
     ignore_index: int = -100,
     special_token_ids: set[int] | None = None,
+    generator: torch.Generator | None = None,
+    eval_seed: int | None = None,
+    dataset_name: str = "",
 ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Collate batch for masked language modeling.
 
@@ -87,9 +93,25 @@ def mlm_collate(
         Tuple of (input_ids, labels) tensors with shape [B, L], or
         (input_ids, labels, coords) if coordinates are present in batch items.
     """
-    if special_token_ids is None:
-        # Default special tokens: <cls>=0, <pad>=1, <eos>=2, <unk>=3
-        special_token_ids = {0, 1, 2, 3}
+    if any(not 0 <= p <= 1 for p in (mask_prob, mask_token_prob, random_token_prob)):
+        raise ValueError("MLM probabilities must be in [0, 1]")
+    if mask_token_prob + random_token_prob > 1:
+        raise ValueError("mask_token_prob + random_token_prob must be <= 1")
+    if pad_id is not None and pad_id != tokenizer.pad_token_id:
+        raise ValueError("pad_id must match tokenizer")
+    if mask_id is not None and mask_id != tokenizer.mask_token_id:
+        raise ValueError("mask_id must match tokenizer")
+    pad_id, mask_id = tokenizer.pad_token_id, tokenizer.mask_token_id
+    if pad_id is None or mask_id is None:
+        raise ValueError("Tokenizer requires pad and mask tokens")
+    special_token_ids = set(tokenizer.all_special_ids) | (special_token_ids or set())
+    aa_ids = []
+    for aa in "ACDEFGHIKLMNPQRSTVWY":
+        encoded = tokenizer(aa, add_special_tokens=False)["input_ids"]
+        if len(encoded) != 1 or encoded[0] in special_token_ids:
+            raise ValueError(f"Tokenizer must encode amino acid {aa} as one known token")
+        aa_ids.append(encoded[0])
+    aa_ids = torch.tensor(aa_ids)
 
     input_ids_list = []
     labels_list = []
@@ -97,6 +119,12 @@ def mlm_collate(
 
     for item in batch:
         seq: str = item["seq"]
+        sample_generator = generator
+        if eval_seed is not None:
+            identity = json.dumps([eval_seed, dataset_name, item.get("pid"), seq],
+                                  ensure_ascii=False, separators=(",", ":")).encode()
+            seed = int.from_bytes(hashlib.blake2b(identity, digest_size=8).digest(), "big")
+            sample_generator = torch.Generator().manual_seed(seed)
 
         ids = tokenize_residues(seq, tokenizer, max_len).clone()
         labels = torch.full_like(ids, ignore_index)
@@ -107,7 +135,7 @@ def mlm_collate(
             maskable &= ids != special_id
 
         # Randomly select positions to mask
-        probs = torch.rand_like(ids, dtype=torch.float)
+        probs = torch.rand(ids.shape, generator=sample_generator)
         mask_positions = (probs < mask_prob) & maskable
 
         # Store original tokens as labels for masked positions
@@ -118,11 +146,11 @@ def mlm_collate(
         num_masked = len(mask_indices)
 
         if num_masked > 0:
-            rand = torch.rand(num_masked)
+            rand = torch.rand(num_masked, generator=sample_generator)
 
             # 80% -> <mask> token
             mask_token_mask = rand < mask_token_prob
-            # 10% -> random token (amino acids only: indices 4-23 in DEFAULT_VOCAB)
+            # 10% -> random canonical amino-acid token
             random_token_mask = (rand >= mask_token_prob) & (
                 rand < mask_token_prob + random_token_prob
             )
@@ -134,7 +162,7 @@ def mlm_collate(
             # Apply random tokens (sample from amino acid range)
             num_random = random_token_mask.sum().item()
             if num_random > 0:
-                random_tokens = torch.randint(4, 24, (num_random,))  # AA tokens
+                random_tokens = aa_ids[torch.randint(len(aa_ids), (num_random,), generator=sample_generator)]
                 ids[mask_indices[random_token_mask]] = random_tokens
 
         input_ids_list.append(ids)

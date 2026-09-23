@@ -1,3 +1,4 @@
+from functools import partial
 from contextlib import nullcontext
 from itertools import islice
 import math
@@ -909,12 +910,20 @@ def _build_dataloaders(
             eval_sampler = None
         else:
             eval_sampler = range(rank, len(ds), world_size)
+        eval_kwargs = _make_dl_kwargs(eval_batch_size)
+        eval_seed = int(cfg.train.get("eval", {}).get("seed", cfg.train.get("seed", 1337)))
+        eval_kwargs["generator"] = torch.Generator().manual_seed(eval_seed)
+        if is_mlm:
+            eval_kwargs["collate_fn"] = partial(mlm_collate, tokenizer=tokenizer,
+                max_len=max_len, mask_prob=mask_prob, mask_token_prob=mask_token_prob,
+                random_token_prob=random_token_prob, pad_id=pad_id,
+                ignore_index=ignore_index, eval_seed=eval_seed, dataset_name=name)
         eval_loaders[name] = DataLoader(
             ds,
             sampler=eval_sampler,
             shuffle=False,
             drop_last=False,
-            **_make_dl_kwargs(eval_batch_size),
+            **eval_kwargs,
         )
         eval_loaders[name].metric_configs = resolved
     cfg.data.eval = OmegaConf.create(eval_configs)

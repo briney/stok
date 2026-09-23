@@ -563,10 +563,10 @@ class TestGatherMetricStatesRegression:
         metric._total_sum = 500.0
 
         state = metric.state_tensors()[0]
-        assert state.shape == torch.Size([2])
+        assert state.shape == torch.Size([5])
 
         # Simulate 3-process gather
-        gathered = torch.tensor([100.0, 500.0, 150.0, 600.0, 50.0, 400.0])
+        gathered = torch.tensor([100., 500., 500., 0., 0., 150., 600., 600., 0., 0., 50., 400., 400., 0., 0.])
 
         original_size = state.numel()
         gathered_size = gathered.numel()
@@ -613,3 +613,25 @@ def test_explicit_metric_without_supervision_is_unavailable():
                                     torch.full((1, 4), -100)))
     with pytest.raises(RuntimeError, match='val.*acc.*num_valid=0'):
         Evaluator(cfg, MockModel(), None).evaluate(loader, 'val')
+
+
+def test_evaluation_restores_all_training_rngs():
+    import random
+    import numpy as np
+    class RandomModel(MockModel):
+        def forward(self, *args, **kwargs):
+            random.random()
+            np.random.rand()
+            return super().forward(*args, **kwargs)
+    cfg = _make_cfg()
+    cfg.train.eval.metrics.pop('masked_accuracy')
+    evaluator = Evaluator(cfg, RandomModel(), None)
+    loader = _make_eval_loader()
+    torch_state = torch.get_rng_state()
+    py_state = random.getstate()
+    np_state = np.random.get_state()
+    one = evaluator.evaluate(loader, "validation")
+    assert torch.equal(torch_state, torch.get_rng_state())
+    assert py_state == random.getstate()
+    assert np.array_equal(np_state[1], np.random.get_state()[1])
+    assert one == evaluator.evaluate(loader, "validation")
