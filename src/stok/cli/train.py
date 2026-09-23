@@ -1,3 +1,5 @@
+from contextlib import nullcontext
+from itertools import islice
 import math
 import os
 import random
@@ -40,7 +42,7 @@ from stok.utils.console import ConsoleLogger
 from stok.utils.decoding import decode_token_aligned_coords, logits_to_soft_codes_gumbel
 from stok.utils.masking import residue_mask_from_tokens
 from stok.utils.flops import compute_flops_6n, count_parameters, format_flops_scientific
-from stok.utils.losses import fape_loss
+from stok.utils.losses import fape_loss, token_ce_loss
 from stok.utils.tokenizer import Tokenizer
 
 
@@ -210,6 +212,7 @@ def _save_checkpoint(
     global_step: int,
     cfg: DictConfig,
     accelerator,
+    micro_step: int = 0,
 ):
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -217,6 +220,8 @@ def _save_checkpoint(
         "optimizer": optimizer.state_dict(),
         "scheduler": scheduler.state_dict(),
         "global_step": int(global_step),
+        "micro_step": int(micro_step),
+        "step_unit": "optimizer_update",
         "config": OmegaConf.to_container(cfg, resolve=True),
         "rng_state": _collect_rng_state(),
     }
@@ -916,12 +921,42 @@ def _maybe_init_wandb(
     return wb
 
 
+def iter_windows(loader, size: int, accelerator=None):
+    if size < 1:
+        raise ValueError("Accumulation window size must be positive")
+    iterator = None
+    while True:
+        error = None
+        window = []
+        try:
+            if iterator is None:
+                iterator = iter(loader)
+            window = list(islice(iterator, size))
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+        _raise_rank_errors(error, accelerator, "Loading training window failed")
+        if accelerator:
+            sizes = gather_object([len(window)])
+            if len(set(sizes)) != 1:
+                raise RuntimeError(f"Unequal accumulation window lengths across ranks: {sizes}")
+        if not window:
+            return
+        yield window
+
+
+def _raise_rank_errors(error, accelerator, context: str):
+    errors = gather_object([error]) if accelerator else [error]
+    if any(errors):
+        raise RuntimeError(f"{context}: {errors}")
+
+
 def run_training(cfg: DictConfig):
     for name, value, minimum in (
         ("grad_accum_steps", cfg.train.get("grad_accum_steps", 1), 1),
         ("log_steps", cfg.train.get("log_steps", 1), 1),
         ("eval.steps", cfg.train.eval.get("steps", 1), 1),
         ("num_steps", cfg.train.get("num_steps", 0), 0),
+        ("epochs", cfg.train.get("epochs"), 0),
     ):
         if value is not None and int(value) < minimum:
             raise ValueError(f"train.{name} must be >= {minimum}")
@@ -1120,7 +1155,7 @@ def run_training(cfg: DictConfig):
     # derive steps_per_epoch when possible (used for both max_steps and logging)
     steps_per_epoch: Optional[int] = None
     try:
-        steps_per_epoch = math.ceil(len(train_loader))  # type: ignore[arg-type]
+        steps_per_epoch = math.ceil(len(train_loader) / grad_accum_steps)  # type: ignore[arg-type]
         if steps_per_epoch <= 0:
             steps_per_epoch = None
     except TypeError:
@@ -1180,6 +1215,7 @@ def run_training(cfg: DictConfig):
     # train loop
     model.train()
     global_step = 0
+    micro_step = 0
     running_loss = 0.0
     log_interval = int(cfg.train.get("log_steps", 50))
     eval_interval = int(cfg.train.get("eval", {}).get("steps", 1000))
@@ -1251,127 +1287,111 @@ def run_training(cfg: DictConfig):
         return t0 + (t1 - t0) * (float(step) / float(T))
 
     epoch = 0
-    while global_step < max_steps:
+    epoch_limit = cfg.train.get("epochs")
+    device = _get_model_device(model, accelerator)
+    world_size = accelerator.num_processes if accelerator else 1
+    optimizer.zero_grad(set_to_none=True)
+    while global_step < max_steps and (epoch_limit is None or epoch < int(epoch_limit)):
         if hasattr(train_loader.sampler, "set_epoch"):
             train_loader.sampler.set_epoch(epoch)
         epoch += 1
         batches_in_pass = 0
-        for batch in train_loader:
-            batches_in_pass += 1
-            # step/epoch bookkeeping (global_step is zero-based)
+        updates_before_pass = global_step
+        for window in iter_windows(train_loader, grad_accum_steps, accelerator):
+            batches_in_pass += len(window)
             current_step = global_step + 1
-            current_epoch: Optional[float] = None
-            if steps_per_epoch is not None:
-                current_epoch = float(current_step) / float(steps_per_epoch)
-
-            # batch can be (tokens, labels) or (tokens, labels, coords)
-            if isinstance(batch, (list, tuple)) and len(batch) == 3:
-                tokens, labels, coords = batch
-            else:
-                tokens, labels = batch  # type: ignore[misc]
-                coords = None
-            _dev = _get_model_device(model, accelerator)
-            tokens = tokens.to(_dev)
-            labels = labels.to(_dev)
-            if coords is not None:
-                coords = coords.to(_dev)
-
-            # base model forward (token classification only)
-            outputs = model(tokens=tokens, labels=labels, ignore_index=ignore_index)
-            loss: torch.Tensor = outputs["loss"]
-
-            # optional FAPE loss using frozen decoder (codebook objective only)
-            if (
-                not is_mlm
-                and decoder is not None
-                and want_fape
-                and (global_step >= int(cfg.train.fape.start_step))
-            ):
-                if coords is not None:
-                    pad_id = int(cfg.model.encoder.pad_id)
-                    mask = residue_mask_from_tokens(tokens, pad_id=pad_id,
-                        bos_id=int(cfg.model.encoder.get("bos_id", 0)),
-                        eos_id=int(cfg.model.encoder.get("eos_id", 2)))
-                    tau = _anneal_tau(global_step)
-                    soft_codes = logits_to_soft_codes_gumbel(
-                        outputs["logits"],  # [B, L, C]
-                        _unwrap_model(model, accelerator).classifier.E,  # [C, d_code]
-                        tau=float(tau),
-                        hard=bool(getattr(cfg.train, "gumbel", {}).get("hard", False)),
-                    )
-                    pred_coords = decode_token_aligned_coords(decoder, soft_codes, mask)
-                    # metric: fraction of NaNs in predicted coords
-                    # can happen when encoder isn't producing coherent outputs (yet!)
-                    if log_pred_nan_frac:
-                        pred_nan_frac_t = torch.isnan(pred_coords).float().mean()
-                        outputs["pred_nan_frac"] = float(
-                            pred_nan_frac_t.detach().item()
-                        )
-                    fape = fape_loss(pred_coords=pred_coords, true_coords=coords,
-                                     residue_mask=mask)
-                    outputs["pred_coords"] = pred_coords
-                    outputs["structure_loss"] = fape
-                    loss = loss + float(cfg.train.fape.weight) * fape
-                elif is_main and (global_step == 0):
-                    printer(
-                        "FAPE enabled but no coords in dataset; skipping FAPE term."
-                    )
-
-            # normalize by grad accumulation
-            loss_to_backprop = loss / grad_accum_steps
+            current_epoch = (epoch - 1) + batches_in_pass / max(1, len(train_loader))
+            active_fape = decoder is not None and want_fape and global_step >= int(cfg.train.fape.start_step)
+            # Denominators precede forwards; only input batches are buffered.
+            n_tokens = sum(int((batch[1] != ignore_index).sum()) for batch in window)
+            n_structures = 0
+            processed_tokens = 0
+            for batch in window:
+                tokens = batch[0]
+                processed_tokens += int((tokens != int(cfg.model.encoder.pad_id)).sum())
+                if active_fape and len(batch) == 3:
+                    mask = residue_mask_from_tokens(tokens, pad_id=int(cfg.model.encoder.pad_id),
+                        bos_id=int(cfg.model.encoder.get("bos_id", 0)), eos_id=int(cfg.model.encoder.get("eos_id", 2)))
+                    n_structures += int((mask & torch.isfinite(batch[2]).all((-2, -1))).any(1).sum())
+            counts = torch.tensor([n_tokens, n_structures, processed_tokens], device=device, dtype=torch.long)
             if accelerator:
-                accelerator.backward(loss_to_backprop)
-            else:
-                loss_to_backprop.backward()
-
-            if (global_step + 1) % grad_accum_steps == 0:
-                if grad_clip is not None and grad_clip > 0:
+                counts = accelerator.reduce(counts, reduction="sum")
+            global_tokens, global_structures, processed_tokens = counts.tolist()
+            total_tokens += processed_tokens
+            micro_step += len(window)
+            if global_tokens == 0 and (global_structures == 0 or float(cfg.train.fape.weight) == 0):
+                continue
+            window_ce = 0.0
+            window_fape = 0.0
+            window_correct = 0
+            for micro_index, batch in enumerate(window):
+                sync = accelerator.no_sync(model) if accelerator and micro_index < len(window)-1 else nullcontext()
+                with sync:
+                    tokens, labels = (t.to(device) for t in batch[:2])
+                    coords = batch[2].to(device) if len(batch) == 3 else None
+                    error = None
+                    try:
+                        outputs = model(tokens=tokens)
+                        ce_sum = token_ce_loss(outputs["logits"], labels, ignore_index, reduction="sum")
+                        fape_sum = ce_sum * 0.0
+                        if active_fape and coords is not None:
+                            mask = residue_mask_from_tokens(tokens, pad_id=int(cfg.model.encoder.pad_id),
+                                bos_id=int(cfg.model.encoder.get("bos_id", 0)), eos_id=int(cfg.model.encoder.get("eos_id", 2)))
+                            eligible = (mask & torch.isfinite(coords).all((-2, -1))).any(1)
+                            if eligible.any():
+                                soft_codes = logits_to_soft_codes_gumbel(outputs["logits"],
+                                    _unwrap_model(model, accelerator).classifier.E,
+                                    tau=_anneal_tau(global_step), hard=bool(cfg.train.gumbel.get("hard", False)))
+                                pred_coords = decode_token_aligned_coords(decoder, soft_codes, mask)
+                                fape_sum = fape_loss(pred_coords, coords, mask) * eligible.sum()
+                                if log_pred_nan_frac:
+                                    running_pred_nan_frac_sum += float(torch.isnan(pred_coords[mask]).float().mean())
+                                    running_pred_nan_frac_count += 1
+                        loss = ce_sum * (world_size / global_tokens if global_tokens else 0.)
+                        loss = loss + float(cfg.train.fape.weight) * fape_sum * (world_size / global_structures if global_structures else 0.)
+                        if not torch.isfinite(loss):
+                            raise FloatingPointError("Nonfinite training loss")
+                    except Exception as exc:
+                        error = f"{type(exc).__name__}: {exc}"
+                    _raise_rank_errors(error, accelerator, "Training forward failed")
                     if accelerator:
-                        accelerator.clip_grad_norm_(model.parameters(), grad_clip)
+                        accelerator.backward(loss)
                     else:
-                        nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-                optimizer.step()
-                scheduler.step()
-                optimizer.zero_grad(set_to_none=True)
-
-            running_loss += float(loss.detach().item())
-
-            # Accumulate tokens for FLOPs tracking (non-padding tokens)
-            pad_id_for_count = int(cfg.model.encoder.pad_id)
-            batch_tokens = int((tokens != pad_id_for_count).sum().item())
-            total_tokens += batch_tokens
-
-            # accumulate loss components
-            cls_loss_tensor = outputs.get("classification_loss")
-            if cls_loss_tensor is not None:
-                running_cls_loss += float(cls_loss_tensor.detach().item())
-                running_cls_count += 1
-
-            # For MLM, compute masked token accuracy
-            if is_mlm:
-                with torch.no_grad():
-                    masked_acc = _compute_accuracy(
-                        outputs["logits"], labels, ignore_index
-                    )
-                    running_masked_acc_sum += masked_acc
-                    running_masked_acc_count += 1
-
-            # Codebook-specific accumulations
-            if not is_mlm:
-                fape_loss_tensor = outputs.get("structure_loss")
-                if fape_loss_tensor is not None:
-                    running_fape_loss += float(fape_loss_tensor.detach().item())
-                    running_fape_count += 1
-                if log_pred_nan_frac:
-                    _pnan = outputs.get("pred_nan_frac")
-                    if _pnan is not None:
-                        running_pred_nan_frac_sum += float(_pnan)
-                        running_pred_nan_frac_count += 1
+                        loss.backward()
+                    window_ce += float(ce_sum.detach())
+                    window_fape += float(fape_sum.detach())
+                    with torch.no_grad():
+                        valid = labels != ignore_index
+                        window_correct += int(((outputs["logits"].argmax(-1) == labels) & valid).sum())
+            if grad_clip > 0:
+                if accelerator:
+                    accelerator.clip_grad_norm_(model.parameters(), grad_clip)
+                else:
+                    nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            optimizer.step()
+            skipped = bool(accelerator and accelerator.optimizer_step_was_skipped)
+            optimizer.zero_grad(set_to_none=True)
+            if skipped:
+                continue
+            scheduler.step()
+            sums = torch.tensor([window_ce, window_fape, window_correct], device=device, dtype=torch.float64)
+            if accelerator:
+                sums = accelerator.reduce(sums, reduction="sum")
+            cls_mean = float(sums[0]) / max(1, global_tokens)
+            fape_mean = float(sums[1]) / max(1, global_structures)
+            running_loss += cls_mean + float(cfg.train.fape.weight) * fape_mean
+            if global_tokens:
+                running_cls_loss += float(sums[0])
+                running_cls_count += global_tokens
+                running_masked_acc_sum += float(sums[2])
+                running_masked_acc_count += global_tokens
+            if global_structures:
+                running_fape_loss += float(sums[1])
+                running_fape_count += global_structures
 
             # logging
             if current_step % log_interval == 0 and is_main:
-                with torch.no_grad():
-                    acc = _compute_accuracy(outputs["logits"], labels, ignore_index)
+                acc = running_masked_acc_sum / max(1, running_masked_acc_count)
                 lr = scheduler.get_last_lr()[0]
 
                 # compute averages over the current log interval
@@ -1387,7 +1407,7 @@ def run_training(cfg: DictConfig):
                 cumulative_flops = compute_flops_6n(num_params, total_tokens)
 
                 # build console log message
-                msg = f"step {current_step}/{max_steps}"
+                msg = f"step {current_step}/{max_steps} | micro_step {micro_step}"
                 if current_epoch is not None:
                     msg += f" | epoch {current_epoch:.3f}"
                 # add FLOPs (scientific notation for console)
@@ -1439,6 +1459,7 @@ def run_training(cfg: DictConfig):
                     payload: dict[str, float] = {
                         "train/loss": float(avg_total_loss),
                         "lr": float(lr),
+                        "train/micro_step": float(micro_step),
                     }
 
                     if is_mlm:
@@ -1523,7 +1544,7 @@ def run_training(cfg: DictConfig):
                         _save_checkpoint(
                             step_path, model=model, optimizer=optimizer,
                             scheduler=scheduler, global_step=global_step,
-                            cfg=cfg, accelerator=accelerator,
+                            cfg=cfg, accelerator=accelerator, micro_step=micro_step,
                         )
                         shutil.copyfile(step_path, io_dirs["checkpoints"] / "latest.pt")
                     except Exception as exc:
@@ -1535,6 +1556,8 @@ def run_training(cfg: DictConfig):
                 break
         if batches_in_pass == 0:
             raise RuntimeError("Training loader produced no complete batches")
+        if global_step == updates_before_pass:
+            raise RuntimeError("Training pass made no successful optimizer update")
 
     if is_main:
         # final checkpoint
@@ -1545,6 +1568,7 @@ def run_training(cfg: DictConfig):
             optimizer=optimizer,
             scheduler=scheduler,
             global_step=global_step,
+            micro_step=micro_step,
             cfg=cfg,
             accelerator=accelerator,
         )

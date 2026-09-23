@@ -12,11 +12,13 @@ scheduler:
 
 seed: 1337
 
+# All step budgets/cadences count successful optimizer updates.
+# epochs, when set, governs passes; final partial accumulation windows are flushed.
 # step/epoch governance
 num_steps: 10000
 epochs: null
 
-# intervals (in steps)
+# intervals (in successful optimizer updates)
 log_steps: 50
 checkpoint_steps: null
 

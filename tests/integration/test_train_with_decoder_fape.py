@@ -122,3 +122,31 @@ def test_training_with_decoder_and_fape(tmp_path, monkeypatch):
         states.append(state)
     assert any(not torch.equal(states[0][key], states[1][key]) for key in states[0])
 
+
+
+def test_fape_only_missing_coordinates_produces_finite_update(tmp_path, monkeypatch):
+    from hydra import compose, initialize_config_dir
+    from stok.cli.train import run_training
+    from stok.models.decoder import _DECODER_ARCH
+    from tests.integration.test_training_progress import training_command
+    monkeypatch.setitem(_DECODER_ARCH, 'lite', dict(d_model=32, ffn_mult=1.,
+        n_layers=1, n_heads=2, attn_kv_heads=1, num_memory_tokens=0, max_length=32))
+    decoder_path = _make_decoder_ckpt(tmp_path)
+    source = tmp_path/'structure.parquet'
+    coords = np.asarray(_make_coords(4))
+    coords[2] = np.nan
+    pd.DataFrame([{'pid': str(i), 'protein_sequence': 'LAGV', 'indices': [-1]*4,
+                   'coordinates': coords.tolist()} for i in range(4)]).to_parquet(source)
+    overrides = training_command(tmp_path/'run', f'data.train={source}', 'data.load_coords=true',
+        f'model.decoder.path={decoder_path}', 'train.fape.enabled=true',
+        'train.grad_accum_steps=2', 'train.scheduler.warmup_steps=0')[3:]
+    states = []
+    for updates in (0, 1):
+        with initialize_config_dir(config_dir=str(Path(__file__).resolve().parents[2]/'src/stok/configs'), version_base=None):
+            cfg = compose(config_name='config', overrides=[*overrides, f'train.num_steps={updates}'])
+        run_training(cfg)
+        checkpoint = torch.load(tmp_path/'run/model/final.pt', weights_only=False, map_location='cpu')
+        assert checkpoint['global_step'] == updates
+        states.append(checkpoint['model'])
+    assert all(torch.isfinite(value).all() for value in states[1].values())
+    assert any(not torch.equal(states[0][name], states[1][name]) for name in states[0])

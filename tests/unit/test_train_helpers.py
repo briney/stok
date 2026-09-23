@@ -136,3 +136,11 @@ def test_accelerator_initialization_failure_is_not_hidden(monkeypatch):
     monkeypatch.setattr(accelerate, 'Accelerator', fail)
     with pytest.raises(RuntimeError, match='initialization failed'):
         _maybe_get_accelerator()
+
+
+def test_accumulation_windows_keep_partial_tail():
+    from stok.cli.train import iter_windows
+    assert list(iter_windows(range(5), 4)) == [[0, 1, 2, 3], [4]]
+    assert list(iter_windows([], 4)) == []
+    with pytest.raises(ValueError):
+        list(iter_windows([], 0))

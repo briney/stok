@@ -5,7 +5,7 @@ from pathlib import Path
 
 import torch
 from hydra import compose, initialize_config_dir
-from stok.cli.train import _build_dataloaders, _maybe_get_accelerator
+from stok.cli.train import _build_dataloaders, _maybe_get_accelerator, run_training
 from stok.eval import Evaluator
 from stok.utils.losses import token_ce_loss
 
@@ -25,7 +25,7 @@ class FixedModel(torch.nn.Module):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--case', choices=['coverage', 'eval-tail'], required=True)
+    parser.add_argument('--case', choices=['coverage', 'eval-tail', 'empty-labels'], required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--source', choices=['map', 'iterable', 'map-mixture', 'mixed-mixture'], default='map')
     parser.add_argument('--workers', type=int, default=0)
@@ -45,14 +45,41 @@ def main():
     else:
         cfg.data.train = train_path
     cfg.data.eval = str(root / ('eval_shards' if args.source == 'iterable' else 'eval.csv'))
+    if args.case == "empty-labels":
+        cfg.train.seed = 1337
     train, evaluations = _build_dataloaders(cfg, codebook_size=128, pad_id=1)
-    loader = train if args.case == 'coverage' else evaluations['default']
+    loader = train if args.case != 'eval-tail' else evaluations['default']
     ids = []
     batches = 0
+    supervised_tokens = 0
     for batch in loader:
         batches += 1
+        supervised_tokens += int((batch[1] != -100).sum())
         ids.extend(batch[1][:, 1].tolist())
     metrics = {}
+    updates = 0
+    if args.case == 'empty-labels':
+        cfg.model.encoder.d_model = 16
+        cfg.model.encoder.n_heads = 2
+        cfg.model.encoder.n_layers = 1
+        cfg.model.encoder.ffn_mult = 1.
+        cfg.model.encoder.dropout = 0.
+        cfg.model.codebook.preset = 'lite'
+        cfg.data.batch_size = 1 if accelerator.num_processes > 1 else 2
+        cfg.train.seed = 1337
+        cfg.train.num_steps = 2
+        cfg.train.grad_accum_steps = args.accum
+        cfg.train.optimizer.lr = .001
+        cfg.train.scheduler.warmup_steps = 0
+        cfg.train.wandb.enabled = False
+        cfg.train.console.enabled = False
+        cfg.train.project_path = str(root/'run')
+        cfg.data.eval = {}
+        run_training(cfg)
+        accelerator.wait_for_everyone()
+        state = torch.load(root/'run/model/final.pt', weights_only=False, map_location='cpu')
+        updates = state['global_step']
+
     if args.case == 'eval-tail':
         model = accelerator.prepare(FixedModel())
         model.eval()
@@ -62,7 +89,7 @@ def main():
     rank = accelerator.process_index if accelerator else 0
     suffix = f'rank_{rank}' if accelerator.num_processes > 1 else 'reference'
     (root / f'{suffix}.json').write_text(json.dumps({'ids': ids,
-        'micro_steps': batches, 'optimizer_steps': 0, 'metrics': metrics}))
+        'micro_steps': batches, 'optimizer_steps': updates, 'metrics': metrics, 'supervised_tokens': supervised_tokens}))
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
 

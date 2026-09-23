@@ -110,3 +110,43 @@ def test_two_rank_undersized_worker_stream_fails_promptly(tmp_path):
     for result in results:
         assert result.returncode != 0
         assert 'complete batches' in result.stderr
+
+
+def test_empty_label_rank_matches_global_reference(tmp_path):
+    import torch
+    write_probe_data(tmp_path, n=8)
+    order = torch.randperm(8, generator=torch.Generator().manual_seed(1337)).tolist()
+    frame = pd.read_csv(tmp_path/'train.csv')
+    frame['indices'] = ['-1 -1 -1' if i in order[::2] else '0 1 2' for i in range(8)]
+    frame.to_csv(tmp_path/'train.csv', index=False)
+    command = [sys.executable, '-m', 'tests.utils.distributed_probe', '--case', 'empty-labels',
+               '--output', str(tmp_path), '--accum', '2']
+    result = subprocess.run(command, env=training_env(), capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    reference = torch.load(tmp_path/'run/model/final.pt', weights_only=False, map_location='cpu')
+    for result in run_distributed(command):
+        assert result.returncode == 0, result.stderr
+    distributed = torch.load(tmp_path/'run/model/final.pt', weights_only=False, map_location='cpu')
+    assert distributed['global_step'] == 2 and distributed['micro_step'] == 4
+    assert json.loads((tmp_path/'rank_0.json').read_text())['supervised_tokens'] == 0
+    assert json.loads((tmp_path/'rank_1.json').read_text())['supervised_tokens'] > 0
+    for name in reference['model']:
+        torch.testing.assert_close(distributed['model'][name], reference['model'][name], atol=3e-6, rtol=3e-5)
+
+
+def test_rank_local_bad_input_exits_all_ranks(tmp_path):
+    source = tmp_path/'bad.csv'
+    source.write_text('pid,protein_sequence,indices\na,LAG,9999 0 1\nb,LAG,0 1 2\n')
+    for result in run_distributed(training_command(tmp_path/'run', f'data.train={source}',
+                                  'data.batch_size=1'), timeout=15):
+        assert result.returncode != 0
+        assert 'Loading training window failed' in result.stderr
+
+
+def test_two_rank_globally_empty_pass_does_not_checkpoint(tmp_path):
+    source = tmp_path/'empty.csv'
+    source.write_text('pid,protein_sequence,indices\na,LAG,-1 -1 -1\nb,LAG,-1 -1 -1\n')
+    for result in run_distributed(training_command(tmp_path/'run', f'data.train={source}', 'data.batch_size=1')):
+        assert result.returncode != 0
+        assert 'no successful optimizer update' in result.stderr
+    assert not list((tmp_path/'run/checkpoints').glob('step_*.pt'))
