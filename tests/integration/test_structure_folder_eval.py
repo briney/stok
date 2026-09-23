@@ -1,8 +1,6 @@
 """Integration tests for structure folder evaluation datasets."""
 
-import numpy as np
 import pandas as pd
-import pytest
 from click.testing import CliRunner
 from pathlib import Path
 

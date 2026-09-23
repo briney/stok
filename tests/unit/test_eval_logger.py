@@ -1,6 +1,5 @@
 """Unit tests for the MetricLogger class."""
 
-import pytest
 
 from stok.eval.logger import MetricLogger
 

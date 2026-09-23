@@ -1,11 +1,8 @@
 """Tests for dataset support for MLM training (without indices column)."""
 
-import tempfile
-from pathlib import Path
 
 import pandas as pd
 import pytest
-import torch
 
 from stok.data.dataset import DummyMLMDataset, TokenizedDataset
 

@@ -523,7 +523,7 @@ class TestGatherMetricStatesRegression:
     def test_structure_metrics_state_tensors_work(self):
         """Test that structure metrics can also handle gathered state tensors."""
         try:
-            from stok.eval.metrics.structure import LDDTMetric, RMSDMetric
+            from stok.eval.metrics.structure import LDDTMetric
         except ImportError:
             pytest.skip("Structure metrics not available")
 

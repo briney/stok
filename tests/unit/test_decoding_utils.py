@@ -1,4 +1,3 @@
-import os
 
 import pytest
 import torch
@@ -32,8 +31,8 @@ def test_indices_to_codes_gathers_correct_rows():
     gathered = indices_to_codes(E, idx)
     assert gathered.shape == (2, 3, d)
     for b in range(2):
-        for l in range(3):
-            assert torch.allclose(gathered[b, l], E[idx[b, l]])
+        for position in range(3):
+            assert torch.allclose(gathered[b, position], E[idx[b, position]])
 
 
 def test_sample_indices_top_p_deterministic_mass_one():

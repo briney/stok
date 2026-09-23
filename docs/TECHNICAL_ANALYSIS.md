@@ -1,8 +1,110 @@
 # STok Technical Analysis
 
-## Assessment and scope
+## Remediation status — September 22, 2026
 
-Reviewed against commit `e63029a`, updated September 22, 2026. This document consolidates the original review and its subsequent critical assessment. It is an evidence-based input to remediation planning, not a claim that every execution mode has been validated. No implementation fixes accompany this analysis.
+The approved remediation corrects existing behavior and rejects unsupported
+options. It does not add resume, trainable decoder/codebook support, sharded
+training, or a new architecture. The findings below remain as the historical
+record; this section and the [migration notes](../README.md#remediation-compatibility-notes)
+describe the implemented behavior.
+
+| Findings | Implemented correction | Commit evidence and regression modules |
+|---|---|---|
+| F01, F02, F14 | One residue/token alignment, positional missing labels, per-sample NaN coordinate rows, residue-only decoder adapter, strict source validation | `1d8b7d1`; `test_tokenize_and_align.py`, `test_mlm_collate.py`, `test_vqindices_coords.py` |
+| F03, F07 | Sanitize excluded geometric operands before differentiation/SVD; finite valid predictions required; underspecified alignment unavailable | `0f4abb8`; `test_fape_loss.py`, `test_metrics.py`, `test_train_with_decoder_fape.py` |
+| F04, F15 | Coordinated checkpoint errors and empty-loader termination | `9e97fbb`, `a232dee`; `test_distributed_training.py`, `test_training_progress.py` |
+| F05 | Successful optimizer updates govern budgets/schedules/cadence; partial windows flush; independent global CE/FAPE populations | `813aedd`; `test_training_progress.py`, `test_distributed_training.py` |
+| F06 | Native sampler/iterable ownership only; deterministic rank/worker streams and complete training batches; exact evaluation tails | `dd13fde`; `test_distributed_training.py`, `test_iterable_vqindices_dataset.py` |
+| F08 | Connected zero for empty CE; bounds-check all nonignored labels | `c504354`, `3998dc2`; `test_token_ce_loss.py`, `test_mlm_model.py` |
+| F09 | Valid/skipped/failed populations, omitted unavailable scores, explicit-empty errors, synchronized evaluation failures | `7cc3857`; `test_eval_evaluator.py`, `test_eval_structure_metrics.py`, `test_distributed_training.py` |
+| F10, F11 | Resolve requested metrics before resource loading; actual capability checks; activate decoder/coordinates; omit unlabeled classification | `6a9810c`; `test_eval_registry.py`, `test_eval_decoding_auto_enable.py`, `test_structure_folder_eval.py` |
+| F12 | Token-weighted CE/accuracy, protein-weighted structure/contact scores; exact fixed-state aggregation; isolated evaluation RNG | `7cc3857`, `257f101`, `1446b99`; `test_eval_classification_metrics.py`, `test_eval_harness_regression.py`, `test_eval_evaluator.py` |
+| F13 | Finite C-alpha biological candidates, original sequence gaps, masked APC, unique pairs and per-protein precision | `257f101`; `test_contact_metrics.py`, `test_mlm_p_at_l_structure_eval.py` |
+| F16 | Safe additive/padding mask composition; fully blocked manual attention rows are zero | `8954713`; `test_attention.py` |
+| F17 | Collect required attention layers only; bounded logistic feature/label storage with coordinated limit errors | `7b6841b`; `test_attention.py`, `test_contact_metrics.py`, `test_distributed_training.py` |
+| F18 | Tokenizer-derived IDs and canonical replacement vocabulary; stable sample-identity masking for evaluation | `1446b99`; `test_mlm_collate.py`, `test_cli_train_mlm.py` |
+| F19 | Early unsupported-option errors, deprecated geometry input rejection, unused helpers removed, atomic artifact replacement, documented no-resume policy | `a232dee`; `test_train_helpers.py`, `test_mlm_model.py`, `test_checkpointing_and_resume.py` |
+
+Regression modules are under `tests/unit/` or `tests/integration/`; the
+[coverage matrix](../tests/README.md#remediation-coverage-and-limits-2026-09-22)
+links behavior to the relevant paths. The implementation baseline had 274
+passing unit tests. The first combined acceptance run had 422 passes and three
+outdated test fixtures: truncated raw label arrays, unsupported CSV coordinates,
+and an incomplete fake Accelerator. These were corrected without relaxing the
+new input or capability contracts. The installed CPU suite then passed **427 tests**, with two accelerator-only
+cases skipped. A subsequently added two-rank logistic-state regression also
+passed (both success and memory-limit cases). Both skipped accelerator cases
+passed separately on Radeon hardware. Correctness lint (E4/E7/E9/F), compileall,
+diff whitespace checks, and wheel/sdist builds passed.
+
+### Current validation and scientific definitions
+
+- Installed editable checkout: Python 3.12.14, torch `2.14.0+rocm7.2`, Accelerate
+  1.14.0, Hydra 1.3.7, OmegaConf 2.3.1, x-transformers 2.30.4. Unit/integration
+  tests include real two-process CPU collectives with workers 0/2, unequal
+  evaluation tails, an empty rank, rank-local failures, and checkpoint failures.
+- Real decoder FAPE backward and optimizer updates passed on Radeon 8060S
+  Graphics in both FP16 and BF16 autocast. CPU manual/SDPA attention outputs and
+  gradients agree in FP32/BF16/FP16. Simulated Accelerate overflow verifies that
+  skipped optimizer steps do not advance progress or schedules.
+- RMSD uses a C-alpha Kabsch fit. `tm` is the mean of
+  `1 / (1 + (distance/d0)^2)` after that same fit, with
+  `d0=max(0.5, 1.24*max(N_valid-15,1)^(1/3)-1.8)`. This is **Kabsch-aligned TM**,
+  not a claim of equivalence to TM-align's optimized alignment/search protocol.
+  Aligned metrics require at least three noncollinear valid target C-alpha atoms.
+- C-alpha lDDT uses true distances <=15 Å, excludes self-pairs, and tests absolute
+  distance error against 0.5/1/2/4 Å with strict `<` thresholds. It averages
+  neighbor/threshold fractions within each residue, then residues with neighbors,
+  then eligible proteins. It is not an all-atom lDDT protocol.
+- Contact labels use C-alpha distance <8 Å by default. Candidates retain original
+  sequence separation >=6, finite C-alpha positions, and the unique upper triangle.
+  P@L uses `k=min(observed residues, eligible pairs)` and averages proteins.
+  Logistic splits use local RNG, average each protein's held-out results first,
+  and report unscored proteins separately; insufficient structures use a disclosed
+  mean-attention fallback.
+- Independent reference check: first 48 residues of checked-in CAMEO structures
+  `7YPD_B` and `8JVC_A`, with an internal missing row and a deterministic deformation,
+  agree with Biopython `SVDSuperimposer` and separate NumPy distance calculations
+  for RMSD, the defined TM formula, local lDDT, and contacts. Identity and rigid
+  transform synthetic checks also pass. No external benchmark-quality or
+  all-atom/TM-align equivalence is inferred from these checks.
+
+### Measured capacity and remaining boundaries
+
+For FP32, B=1, H=8, L=512, six encoder layers and d_model=256 on Radeon 8060S,
+all-layer attention retained 50,331,648 bytes (48 MiB); selecting the last two
+retained 16,777,216 bytes (16 MiB). Measured peak GPU allocations were respectively
+130,490,368 and 96,935,936 bytes; host peak RSS was 1,542,980 and 1,374,384 KiB.
+Separate process measurements include model/runtime overhead. These measurements
+do not establish that default B=8/L=1280 or a large preset fits a given device.
+The default 1 GiB logistic budget bounds retained FP32 features plus labels across
+ranks; it does not bound temporary attention, concatenation, sklearn, serialization,
+or gather copies. Uneven ranks cannot borrow unused budget.
+
+Remaining validation limits are explicit:
+
+- Multi-GPU/NCCL and real distributed AMP overflow have not been exercised.
+  Replicated CPU DDP is tested; FSDP/DeepSpeed are rejected.
+- Full-size decoder loader tests validate strict architecture/checkpoint loading,
+  cache reuse and freezing with generated weights. Training/backprop tests use a
+  real decoder at reduced capacity. They do not validate the scientific quality
+  of downloaded pretrained weights or reproduce an upstream benchmark.
+- Select matching built-in codebook/decoder presets. A custom codebook requires
+  a documented decoder trained for that exact code assignment and embedding
+  basis; matching dimensions alone is insufficient. This semantic compatibility
+  cannot be inferred automatically from the current checkpoint format.
+- Atomic checkpoint replacement is tested against interrupted writes and rank-local
+  failures. Resume, data/RNG restoration across restart, and power-loss durability
+  remain unsupported, as approved. Existing output directories start fresh runs.
+- Iterable partitioning currently scans/parses the unsharded source stream on each
+  rank/worker before selecting records. Coverage is correct; indexed skipping is
+  a possible future throughput optimization.
+- CI workflow configuration and Python 3.10 compatibility are retained, but remote
+  CI and every dependency/Python/platform combination have not been run locally.
+
+## Original assessment and scope
+
+Reviewed against commit `e63029a`, updated September 22, 2026. This document consolidates the original review and its subsequent critical assessment. It is an evidence-based input to remediation planning, not a claim that every execution mode has been validated. The original assessment preceded implementation; its line references and present-tense defect descriptions below describe that reviewed revision. See the remediation status above for the current implementation.
 
 The main risks are incorrect residue supervision, nonfinite gradients, distributed execution failures, and misleading evaluation results. These take precedence over module organization, naming, and lint cleanup. Several failures share a cause: token positions, residue positions, coordinate validity, and dataset capabilities are not consistently represented across the data/model/evaluation boundary.
 
@@ -25,7 +127,7 @@ There are useful foundations to retain: the encoder separates attention, blocks,
 
 **P1** findings can corrupt learning or reported results, prevent an advertised feature from running, or stop training. **P2** findings affect narrower API paths, measurement quality, or operational capacity. **P3** findings concern compatibility and maintenance. Priorities assume the affected feature is in use; they are not implementation estimates.
 
-### Validation performed and limits
+### Original review validation performed and limits
 
 - Review environment: Python 3.12.14, PyTorch `2.14.0+rocm7.2`, Accelerate 1.14.0. Targeted numerical checks ran on CPU.
 - The following existing subset passed: **88 tests**.
@@ -360,7 +462,7 @@ Decisions to record in the remediation plan:
 4. Metric selection precedence, unavailable/failed-result reporting, prediction failure policy, aggregation weights, and deterministic evaluation requirements.
 5. Supported public options and target evaluation memory budget.
 
-### Remaining verification boundaries
+### Original review verification boundaries
 
 The following need targeted investigation before claiming comprehensive runtime or scientific validation; they are not additional confirmed defects:
 

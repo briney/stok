@@ -29,7 +29,7 @@ class FixedModel(torch.nn.Module):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--case', choices=['coverage', 'eval-tail', 'empty-labels', 'eval-error', 'eval-empty', 'eval-budget'], required=True)
+    parser.add_argument('--case', choices=['coverage', 'eval-tail', 'empty-labels', 'eval-error', 'eval-empty', 'eval-budget', 'eval-logreg'], required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--source', choices=['map', 'iterable', 'map-mixture', 'mixed-mixture'], default='map')
     parser.add_argument('--workers', type=int, default=0)
@@ -86,26 +86,28 @@ def main():
         state = torch.load(root/'run/model/final.pt', weights_only=False, map_location='cpu')
         updates = state['global_step']
 
-    if args.case == 'eval-budget':
+    if args.case in {'eval-budget', 'eval-logreg'}:
         from torch.utils.data import DataLoader, TensorDataset
         cfg.train.objective = 'mlm'
         cfg.data.eval = {'default': {'metrics': {'only': ['p_at_l']}}}
         cfg.train.eval.metrics.p_at_l.use_logistic_regression = True
         cfg.train.eval.metrics.p_at_l.min_seq_sep = 1
-        cfg.train.eval.metrics.p_at_l.logreg_max_feature_bytes = 32
-        sample = next(iter(loader))
+        cfg.train.eval.metrics.p_at_l.logreg_max_feature_bytes = 32 if args.case == 'eval-budget' else 10000
+        rows = list(loader)
+        sample = tuple(torch.cat([row[i] for row in rows]) for i in range(2))
         coords = torch.zeros(*sample[0].shape, 3, 3)
-        if accelerator.process_index == 1:
+        if args.case == 'eval-budget' and accelerator.process_index == 1:
             coords[:] = float('nan')
         dataset = TensorDataset(*sample[:2], coords)
         dataset.has_coords = True
         loader = DataLoader(dataset, batch_size=2)
-    if args.case in {'eval-tail', 'eval-error', 'eval-empty', 'eval-budget'}:
+    if args.case in {'eval-tail', 'eval-error', 'eval-empty', 'eval-budget', 'eval-logreg'}:
         model = accelerator.prepare(FixedModel(fail_on_label=1 if args.case == 'eval-error' else None))
         model.eval()
         metrics = Evaluator(cfg, model, accelerator).evaluate(loader, 'default')
         assert not model.training
-        assert accelerator.unwrap_model(model).calls.item() == batches
+        if args.case != 'eval-logreg':
+            assert accelerator.unwrap_model(model).calls.item() == batches
     rank = accelerator.process_index if accelerator else 0
     suffix = f'rank_{rank}' if accelerator.num_processes > 1 else 'reference'
     (root / f'{suffix}.json').write_text(json.dumps({'ids': ids,

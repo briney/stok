@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 
 import numpy as np
@@ -150,3 +149,27 @@ def test_fape_only_missing_coordinates_produces_finite_update(tmp_path, monkeypa
         states.append(checkpoint['model'])
     assert all(torch.isfinite(value).all() for value in states[1].values())
     assert any(not torch.equal(states[0][name], states[1][name]) for name in states[0])
+
+
+@pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])
+@pytest.mark.skipif(not torch.cuda.is_available(), reason='CUDA/ROCm accelerator required')
+def test_real_decoder_autocast_finite_gradients(dtype):
+    from stok.models.decoder import GeometricDecoder
+    from stok.utils.decoding import decode_token_aligned_coords
+    from stok.utils.losses import fape_loss
+    decoder = GeometricDecoder(d_model=32, n_heads=2, n_layers=1, ffn_mult=1.,
+        max_length=16, d_code=8, num_memory_tokens=0, attn_kv_heads=1).cuda().eval()
+    decoder.requires_grad_(False)
+    codes = torch.nn.Parameter(torch.randn(1, 6, 8, device='cuda'))
+    optimizer = torch.optim.AdamW([codes], lr=.01)
+    mask = torch.tensor([[False, True, True, True, True, False]], device='cuda')
+    true = torch.tensor(_make_coords(6), device='cuda')[None]
+    true[:, 2] = float('nan')
+    before = codes.detach().clone()
+    with torch.autocast('cuda', dtype=dtype):
+        pred = decode_token_aligned_coords(decoder, codes, mask)
+        loss = fape_loss(pred, true, residue_mask=mask)
+    loss.backward()
+    assert torch.isfinite(codes.grad).all() and codes.grad.abs().sum() > 0
+    optimizer.step()
+    assert torch.isfinite(codes).all() and not torch.equal(codes, before)

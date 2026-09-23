@@ -1,3 +1,8 @@
+import json
+import sys
+import pandas as pd
+import pytest
+
 import os
 import signal
 import socket
@@ -50,10 +55,6 @@ def test_two_rank_checkpoint_write_failure_exits(tmp_path):
         assert 'Checkpoint failed' in result.stderr
 
 
-import json
-import sys
-import pandas as pd
-import pytest
 
 
 def write_probe_data(root, n=17, eval_n=5):
@@ -177,3 +178,16 @@ def test_logreg_budget_failure_reaches_every_rank(tmp_path):
         assert result.returncode != 0
         assert 'logreg_max_feature_bytes' in result.stderr
         assert 'Evaluation dataset default' in result.stderr
+
+
+def test_logreg_variable_state_gather_preserves_all_proteins(tmp_path):
+    write_probe_data(tmp_path, eval_n=5)
+    command = [sys.executable, '-m', 'tests.utils.distributed_probe', '--case', 'eval-logreg',
+               '--output', str(tmp_path)]
+    for result in run_distributed(command):
+        assert result.returncode == 0, result.stderr
+    for rank in range(2):
+        metrics = json.loads((tmp_path/f'rank_{rank}.json').read_text())['metrics']
+        assert metrics['p_at_l'] == 1.
+        assert metrics['p_at_l/num_valid'] == 5
+        assert metrics['p_at_l/fallback'] == 1.

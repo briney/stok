@@ -210,7 +210,6 @@ def test_mlm_collate_returns_coords_when_present():
     """Test that MLM collate returns coordinates when present in batch items."""
     tokenizer = Tokenizer()
     max_len = 16
-    seq_len = 10  # Sequence length (coords should be [max_len, 3, 3])
 
     # Create batch with coordinates
     batch = [

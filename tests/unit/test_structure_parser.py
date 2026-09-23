@@ -2,7 +2,6 @@
 
 import numpy as np
 import pytest
-from pathlib import Path
 
 from stok.utils.structure_parser import parse_structure, StructureData, AA3TO1
 

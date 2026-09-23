@@ -52,7 +52,6 @@ class TestApplyAPC:
 
     def test_apc_formula_correctness(self):
         """Test that APC formula is correctly implemented."""
-        B, L = 1, 4
         matrix = torch.tensor([[[1.0, 2.0, 3.0, 4.0],
                                  [2.0, 3.0, 4.0, 5.0],
                                  [3.0, 4.0, 5.0, 6.0],

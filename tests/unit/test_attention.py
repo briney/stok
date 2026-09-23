@@ -85,7 +85,6 @@ class TestNeedWeightsEquivalence:
         attn = attention_module
         x = sample_input
         B, L, _ = x.shape
-        n_heads = attn.n_heads
 
         # Create an additive mask (simulate some blocked attention patterns)
         attn_mask = torch.zeros(B, 1, L, L)

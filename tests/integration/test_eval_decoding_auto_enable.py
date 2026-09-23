@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 
 import numpy as np
@@ -60,7 +59,7 @@ def _make_decoder_ckpt(tmp_path: Path, preset: str = "lite") -> Path:
     return ckpt_path
 
 
-@pytest.mark.parametrize("activation", ["auto", "whitelist", "decoder_only", "label_free"])
+@pytest.mark.parametrize("activation", ["auto", "whitelist", "decoder_only", "label_free", "label_free_mmcif"])
 def test_eval_decoding_auto_enables_decoder(tmp_path, monkeypatch, activation):
     from stok.eval import Evaluator
     import importlib
@@ -92,9 +91,16 @@ def test_eval_decoding_auto_enables_decoder(tmp_path, monkeypatch, activation):
     _write_parquet_with_coords(train_pq, n_rows=4, seq_min_len=12, seq_max_len=18, indices_len=indices_len)
     _write_parquet_with_coords(eval_pq, n_rows=2, seq_min_len=12, seq_max_len=18, indices_len=indices_len)
 
-    if activation == "label_free":
+    if activation.startswith("label_free"):
         from tests.integration.test_structure_folder_eval import _create_structure_folder
         eval_pq = _create_structure_folder(tmp_path, n_files=2)
+        if activation == "label_free_mmcif":
+            from Bio.PDB import PDBParser, MMCIFIO
+            for pdb in eval_pq.glob('*.pdb'):
+                writer = MMCIFIO()
+                writer.set_structure(PDBParser(QUIET=True).get_structure('test', pdb))
+                writer.save(str(pdb.with_suffix('.cif')))
+                pdb.unlink()
     ckpt_path = _make_decoder_ckpt(tmp_path, preset="lite")
 
     overrides = [
@@ -150,5 +156,5 @@ def test_eval_decoding_auto_enables_decoder(tmp_path, monkeypatch, activation):
         assert 'load_coords: true' in snapshot
         assert 0 < evaluated[0]["lddt"] <= 1
 
-    if activation == "label_free":
+    if activation.startswith("label_free"):
         assert "acc" not in evaluated[0] and "ppl" not in evaluated[0]

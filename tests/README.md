@@ -1,6 +1,6 @@
 # STōk Test Suite
 
-This directory contains tests for the Stagger project, organized for fast, CPU-only execution in CI. Tests aim to exercise real components (tokenizer, models, and data flow) end-to-end with tiny configurations suitable for continuous runs.
+This directory contains tests for the STōk project, organized for fast, CPU-only execution in CI. Tests aim to exercise real components (tokenizer, models, and data flow) end-to-end with tiny configurations suitable for continuous runs.
 
 ## Integration Tests
 
@@ -27,7 +27,7 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
 - Training with decoder + FAPE (`integration/test_train_with_decoder_fape.py`)
   - Purpose: Ensure the optional pre-trained geometric decoder can be loaded and used during training to compute FAPE and during eval to produce structure metrics.
   - Scope: Generates Parquet datasets with coordinates; creates a temporary decoder checkpoint matching the selected codebook preset; enables `model.decoder.enabled=true` and `train.fape.enabled=true` (stage-gated) and runs a short training/eval loop.
-  - Pass criteria: CLI exits with code 0 and prints `Training complete.`; decoding and FAPE do not crash even when metrics may be numerically ill-conditioned on tiny synthetic data (guarded internally).
+  - Pass criteria: Real decoder loading is observed, structure loss changes finite parameter updates, and internal missing coordinates preserve finite gradients.
   - Notes: Skips if `x_transformers` or a Parquet engine is unavailable.
 
 - CLI training smoke (`integration/test_cli_train_smoke.py`)
@@ -412,7 +412,7 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
 
 ## Conventions
 
-- Tests are CPU-only to ensure CI reliability and speed.
+- Most tests are CPU-only; explicitly marked accelerator cases skip when no device is available.
 - Tiny model sizes and small codebooks keep runtime to a few seconds.
 - Synthetic utilities live in `tests/utils` and are shared across tests.
 - Real test data (e.g., CAMEO PDB files) live in `tests/test_data/` for integration tests requiring realistic inputs.
@@ -424,3 +424,57 @@ Install the project with `python -m pip install -e '.[dev]'`. Use
 `OMP_NUM_THREADS=1 ACCELERATE_USE_CPU=true python -m pytest` for CPU checks.
 Distributed regression tests launch two local processes and require loopback
 sockets; their subprocess timeouts prevent hangs from blocking the suite.
+
+## Remediation coverage and limits (2026-09-22)
+
+The current acceptance matrix adds assertions beyond CLI exit status:
+
+| Path | Evidence |
+|---|---|
+| Residue labels, coordinates, truncation, mixed availability | `unit/test_tokenize_and_align.py`, `unit/test_mlm_collate.py`, `unit/test_vqindices_coords.py` |
+| Missing coordinates and real FAPE learning | `unit/test_fape_loss.py`, `integration/test_train_with_decoder_fape.py` |
+| Update budgets, partial accumulation, empty supervision, AMP skip | `integration/test_training_progress.py` |
+| Native two-rank map/iterable/mixture coverage and uneven eval | `integration/test_distributed_training.py` (workers 0/2, empty ranks, bounded subprocesses) |
+| Actual decoder activation and label-free PDB/mmCIF evaluation | `integration/test_eval_decoding_auto_enable.py` |
+| Stable MLM masks and unaffected training randomness | `unit/test_mlm_collate.py`, `unit/test_eval_evaluator.py` |
+| Contact candidates, protein weighting, feature budget | `unit/test_contact_metrics.py`, `integration/test_mlm_p_at_l_structure_eval.py` |
+| Selective attention, combined masks, manual/SDPA parity | `unit/test_attention.py` |
+| Unsupported options and checkpoint durability | `unit/test_train_helpers.py`, `integration/test_checkpointing_and_resume.py` |
+
+`unit/test_metrics.py::test_fixed_cameo_subset_matches_independent_ca_references`
+uses the first 48 residues of checked-in `7YPD_B.pdb` and `8JVC_A.pdb`, removes
+one internal coordinate row, and compares against Biopython `SVDSuperimposer`
+plus separate NumPy distance calculations. This checks C-alpha RMSD, the exact
+Kabsch-aligned TM formula, local lDDT averaging, and C-alpha contact distances.
+It does not establish equality with TM-align's optimized alignment or an
+all-atom lDDT implementation. Synthetic identity/rigid-transform cases remain.
+
+The CPU suite skips the two accelerator-only real-decoder autocast cases. Run
+those explicitly on CUDA/ROCm with device visibility enabled:
+
+```bash
+OMP_NUM_THREADS=1 python -m pytest tests/integration/test_train_with_decoder_fape.py \
+  -q -k real_decoder_autocast
+```
+
+They passed in FP16 and BF16 on Radeon 8060S Graphics with torch
+`2.14.0+rocm7.2`. CPU attention forward/backward parity also passed in FP32,
+BF16, and FP16. Actual overflow under distributed GPU training and multi-GPU
+collectives are still unvalidated; optimizer-skip governance is tested with
+Accelerate's overflow flag. Resume, sharded training backends, and a trainable
+CLI decoder/codebook are unsupported.
+
+The full installed suite should be run with local IPC allowed:
+
+```bash
+TOKENIZERS_PARALLELISM=false OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+  ACCELERATE_USE_CPU=true CUDA_VISIBLE_DEVICES='' HIP_VISIBLE_DEVICES='' \
+  ROCR_VISIBLE_DEVICES='' python -m pytest tests/unit tests/integration -q
+python -m ruff check src tests
+python -m compileall -q src
+python -m build
+```
+
+The existing CI matrix retains Python 3.10–3.13 and package checks. Native
+multi-process tests run in one dedicated CPU job with per-subprocess deadlines
+and a job timeout. No CI result is claimed merely from editing the workflow.

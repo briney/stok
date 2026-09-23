@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from typing import Iterable, Tuple
 
 import torch
@@ -300,7 +299,6 @@ def true_aligned_error(
         if pred.shape != true.shape or pred.ndim != 4 or pred.shape[-2:] != (3, 3):
             raise ValueError("coords must be shaped [B, L, 3, 3] with atoms (N, CA, C)")
         B, L = pred.shape[:2]
-        device = pred.device
 
         pred, true, res_mask = sanitize_coordinates(pred, true, residue_mask, ca_only=False)
 
