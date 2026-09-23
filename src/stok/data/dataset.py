@@ -78,7 +78,7 @@ class BaseTokenizedDataset:
         if require_indices or "indices" in row.index:
             raw = row.get("indices")
             if raw is None or (isinstance(raw, float) and pd.isna(raw)):
-                indices = []
+                indices = [] if require_indices else [-1] * len(seq)
             elif isinstance(raw, (list, tuple, np.ndarray)):
                 indices = [-1 if i is None or pd.isna(i) else int(i) for i in list(raw)]
             elif isinstance(raw, str):
@@ -267,6 +267,7 @@ class TokenizedDataset(Dataset, BaseTokenizedDataset):
 
         self.max_length = max_length
         self.require_indices = require_indices
+        self.has_labels = "indices" in self.data.columns
 
         # Validate required columns
         required_cols = {"pid", "protein_sequence"}
@@ -321,6 +322,8 @@ class DummySequenceDataset(Dataset):
         self.seq_len = seq_len
         self.vocab_size = vocab_size
         self.num_classes = num_classes
+        self.has_labels = True
+        self.has_coords = False
         self.pad_id = pad_id
 
     def __len__(self) -> int:
@@ -464,6 +467,7 @@ class IterableTokenizedDataset(IterableDataset, BaseTokenizedDataset):
 
         # Track whether the directory has coordinates and indices columns
         self.has_coords = bool(load_coords) and "coordinates" in cols_union
+        self.has_labels = "indices" in cols_union
         self._has_indices_col = (
             ("indices" in cols_union) if len(cols_union) > 0 else True
         )
@@ -518,6 +522,8 @@ class MapAsIterableDataset(IterableDataset):
     ):
         super().__init__()
         self.dataset = dataset
+        self.has_labels = getattr(dataset, "has_labels", True)
+        self.has_coords = getattr(dataset, "has_coords", False)
         self.num_samples = int(num_samples) if num_samples is not None else len(dataset)
         self.seed = int(seed)
         self._epoch = -1
@@ -573,6 +579,8 @@ class InterleavedIterableDataset(IterableDataset):
         fr = fr / float(fr.sum())
 
         self.datasets = datasets
+        self.has_labels = any(getattr(ds, "has_labels", True) for ds in datasets)
+        self.has_coords = any(getattr(ds, "has_coords", False) for ds in datasets)
         self.fractions = fr.tolist()
         self.seed = int(seed)
         self._epoch = -1

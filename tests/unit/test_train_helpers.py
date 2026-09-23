@@ -144,3 +144,41 @@ def test_accumulation_windows_keep_partial_tail():
     assert list(iter_windows([], 4)) == []
     with pytest.raises(ValueError):
         list(iter_windows([], 0))
+
+
+@pytest.mark.parametrize('load_coords', [None, False, True])
+def test_required_coordinate_loading_policy(tmp_path, load_coords):
+    from pathlib import Path
+    import pandas as pd
+    from hydra import compose, initialize_config_dir
+    from stok.cli.train import _build_dataloaders
+    source = tmp_path/'train.parquet'
+    pd.DataFrame([{'pid': 'p', 'protein_sequence': 'LAG', 'indices': [0, 1, 2],
+        'coordinates': [[[0., 0., 0.], [1., 0., 0.], [1., 1., 0.]]]*3}]*2).to_parquet(source)
+    with initialize_config_dir(config_dir=str(Path(__file__).resolve().parents[2]/'src/stok/configs'), version_base=None):
+        cfg = compose(config_name='config', overrides=['data.batch_size=2', 'data.max_len=6',
+            'data.num_workers=0', f'data.train={source}', 'train.fape.enabled=true'])
+    cfg.data.load_coords = load_coords
+    if load_coords is False:
+        with pytest.raises(ValueError, match='load_coords'):
+            _build_dataloaders(cfg, codebook_size=128, pad_id=1)
+    else:
+        loader, _ = _build_dataloaders(cfg, codebook_size=128, pad_id=1)
+        batch = next(iter(loader))
+        assert len(batch) == 3 and torch.isfinite(batch[2][:, 1:4]).all()
+
+
+def test_coordinate_alias_conflict_and_missing_source(tmp_path):
+    from pathlib import Path
+    from hydra import compose, initialize_config_dir
+    from stok.cli.train import _build_dataloaders
+    source = tmp_path/'seq.csv'
+    source.write_text('pid,protein_sequence,indices\np,LAG,0 1 2\np,LAG,0 1 2\n')
+    with initialize_config_dir(config_dir=str(Path(__file__).resolve().parents[2]/'src/stok/configs'), version_base=None):
+        cfg = compose(config_name='config', overrides=[f'data.train={source}', 'data.num_workers=0'])
+    cfg.data.eval = {'val': {'path': str(source), 'has_coords': True, 'load_coords': False}}
+    with pytest.raises(ValueError, match='Conflicting'):
+        _build_dataloaders(cfg, codebook_size=128, pad_id=1)
+    cfg.data.eval = {'val': {'path': str(source), 'has_coords': True}}
+    with pytest.raises(ValueError, match='coordinate-capable'):
+        _build_dataloaders(cfg, codebook_size=128, pad_id=1)

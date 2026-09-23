@@ -190,3 +190,14 @@ class TestIterableDatasetMLM:
             # indices should not be present since we set require_indices=False
             # and the parquet files don't have an indices column
 
+
+
+def test_optional_missing_label_array_preserves_all_positions(tmp_path):
+    from stok.data.dataset import TokenizedDataset
+    source = tmp_path/'mixed.parquet'
+    pd.DataFrame([{'pid': 'unlabeled', 'protein_sequence': 'LAG', 'indices': None},
+                  {'pid': 'labeled', 'protein_sequence': 'LAG', 'indices': [0, 1, 2]}]).to_parquet(source)
+    dataset = TokenizedDataset(str(source), max_length=6, require_indices=False)
+    assert dataset.has_labels
+    assert dataset[0]['indices'].tolist() == [-1]*6
+    assert dataset[1]['indices'][:3].tolist() == [0, 1, 2]

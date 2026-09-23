@@ -35,6 +35,7 @@ from stok.data.dataset import (
     _usable_samples,
 )
 from stok.eval import Evaluator, MetricLogger
+from stok.eval.registry import METRIC_REGISTRY, resolve_eval_metrics
 from stok.models.decoder import load_pretrained_decoder
 from stok.models.stok import STokModel
 from stok.utils.codebook import load_codebook
@@ -560,6 +561,19 @@ def _build_dataloaders(
 
     eval_configs = _parse_eval_configs(cfg)
     train_configs = _parse_train_configs(cfg)
+    objective = "mlm" if is_mlm else "codebook"
+    fape_required = not is_mlm and bool(cfg.train.get("fape", {}).get("enabled", False))
+    def coordinate_setting(options, needed, required=False):
+        value = options.get("load_coords", user_load_coords)
+        alias = options.get("has_coords")
+        if alias is not None:
+            if "load_coords" in options and value is not None and bool(value) != bool(alias):
+                raise ValueError("Conflicting has_coords and load_coords settings")
+            value = alias
+        if value is False and required:
+            raise ValueError("load_coords=false conflicts with requested structure supervision/metrics")
+        return bool(needed) if value is None else bool(value), value is True
+
 
     tokenizer: Optional[Tokenizer] = None
     collate_fn = None
@@ -591,12 +605,13 @@ def _build_dataloaders(
         if dataset_format == "structure":
             from stok.data.structure_dataset import StructureFolderDataset
 
-            return StructureFolderDataset(
+            ds = StructureFolderDataset(
                 folder_path=str(p),
                 max_length=max_len,
                 chain_id=chain_id,
-                recursive=recursive,
+                recursive=recursive, load_coords=load_coords,
             )
+            return ds
 
         # heuristic: directory containing parquet shards -> Iterable; else map-style
         if p.is_dir():
@@ -626,7 +641,7 @@ def _build_dataloaders(
                     folder_path=str(p),
                     max_length=max_len,
                     chain_id=chain_id,
-                    recursive=recursive,
+                    recursive=recursive, load_coords=load_coords,
                 )
 
         return TokenizedDataset(
@@ -671,21 +686,26 @@ def _build_dataloaders(
 
         if len(train_configs) == 1:
             # Single dataset (backwards compatible)
+            train_load, force_coords = coordinate_setting(train_configs[0], fape_required, fape_required)
             train_ds = _pick_dataset(
                 str(train_configs[0]["path"]),
-                bool(user_load_coords) if not is_mlm else False,
+                train_load,
                 require_indices=not is_mlm,
             )
+            if force_coords and not train_ds.has_coords:
+                raise ValueError("load_coords=true requires a coordinate-capable training source")
         else:
             # Multiple datasets with fractions
             ds_pairs: list[tuple[Dataset | IterableDataset, float]] = []
             for tcfg in train_configs:
-                t_load_coords = tcfg.get("load_coords", user_load_coords)
+                t_load_coords, force_coords = coordinate_setting(tcfg, fape_required, fape_required)
                 ds = _pick_dataset(
                     str(tcfg["path"]),
-                    bool(t_load_coords) if not is_mlm else False,
+                    t_load_coords,
                     require_indices=not is_mlm,
                 )
+                if force_coords and not ds.has_coords:
+                    raise ValueError(f"load_coords=true requires coordinates: {tcfg['path']}")
                 ds_pairs.append((ds, float(tcfg["fraction"])))
 
             any_iterable = any(isinstance(ds, IterableDataset) for ds, _ in ds_pairs)
@@ -727,6 +747,8 @@ def _build_dataloaders(
                     fractions=fracs,
                     seed=int(cfg.train.get("seed", 1337)),
                 )
+                concat.has_coords = any(getattr(ds, "has_coords", False) for ds in map_datasets)
+                concat.has_labels = any(getattr(ds, "has_labels", True) for ds in map_datasets)
                 train_ds = concat
                 train_sampler = sampler
     else:
@@ -760,6 +782,9 @@ def _build_dataloaders(
                 pad_id=pad_id,
             )
 
+    if fape_required and not getattr(train_ds, "has_coords", False):
+        raise ValueError("FAPE requires a training source with coordinates")
+    cfg.data.load_coords = bool(getattr(train_ds, "has_coords", False))
     train_collate_fn = collate_fn
 
     # configure shuffle depending on dataset type / sampler usage
@@ -849,22 +874,35 @@ def _build_dataloaders(
     for name, eval_cfg in eval_configs.items():
         eval_path = eval_cfg["path"]
         eval_batch_size = int(eval_cfg.get("batch_size", batch_size))
-        eval_load_coords = eval_cfg.get("load_coords", user_load_coords)
+        resolved = resolve_eval_metrics(cfg, name, objective=objective)
+        needs_coords = any(METRIC_REGISTRY[key].requires_coords for key in resolved)
+        requires_coords = any(settings["explicit"] and METRIC_REGISTRY[key].requires_coords
+                              for key, settings in resolved.items())
+        eval_load_coords, force_coords = coordinate_setting(eval_cfg, needs_coords, requires_coords)
         # Extract structure folder format options
         eval_format = eval_cfg.get("format")
         eval_chain_id = eval_cfg.get("chain_id")
         eval_recursive = bool(eval_cfg.get("recursive", False))
 
         # Structure folders always have coords, don't require indices
-        is_structure_format = eval_format == "structure"
         ds = _pick_dataset(
             eval_path,
-            bool(eval_load_coords) if not is_mlm and not is_structure_format else True,
-            require_indices=not is_mlm and not is_structure_format,
+            eval_load_coords,
+            require_indices=False,
             dataset_format=eval_format,
             chain_id=eval_chain_id,
             recursive=eval_recursive,
         )
+        if force_coords and not ds.has_coords:
+            raise ValueError(f"Dataset {name}: load_coords=true requires a coordinate-capable source")
+        for metric_name, settings in resolved.items():
+            if not settings["explicit"]:
+                continue
+            if METRIC_REGISTRY[metric_name].requires_coords and not ds.has_coords:
+                raise ValueError(f"Dataset {name}, metric {metric_name}: missing coordinates")
+            if not is_mlm and metric_name in {"accuracy", "perplexity"} and not ds.has_labels:
+                raise ValueError(f"Dataset {name}, metric {metric_name}: missing labels")
+        eval_cfg["load_coords"] = bool(ds.has_coords)
         if isinstance(ds, IterableDataset):
             ds.shuffle_shards = False
             ds.shuffle_rows = False
@@ -878,6 +916,8 @@ def _build_dataloaders(
             drop_last=False,
             **_make_dl_kwargs(eval_batch_size),
         )
+        eval_loaders[name].metric_configs = resolved
+    cfg.data.eval = OmegaConf.create(eval_configs)
     return train_loader, eval_loaders
 
 
@@ -1017,7 +1057,6 @@ def run_training(cfg: DictConfig):
                 io_dirs["configs"],
             ]
         )
-        _save_config_snapshot(cfg, io_dirs["configs"] / "run.yaml")
     if accelerator:
         accelerator.wait_for_everyone()
 
@@ -1074,6 +1113,14 @@ def run_training(cfg: DictConfig):
     if is_main:
         printer(f"Trainable parameters: {num_params:,}")
 
+    # data
+    train_loader, eval_loaders = _build_dataloaders(
+        cfg,
+        codebook_size=codebook_size,
+        pad_id=cfg.model.encoder.pad_id,
+        is_mlm=is_mlm,
+    )
+
     # load frozen geometric decoder for FAPE loss and/or eval metrics (optional)
     # Skip decoder setup for MLM objective
     decoder = None
@@ -1084,9 +1131,8 @@ def run_training(cfg: DictConfig):
     if not is_mlm:
         want_fape = bool(getattr(cfg.train, "fape", {}).get("enabled", False))
         # default to False; eval-time decoding is opt-in via config/override
-        want_eval_decode = bool(
-            getattr(cfg.train, "decoding", {}).get("eval_enabled", False)
-        )
+        want_eval_decode = any(METRIC_REGISTRY[name].requires_decoder
+            for loader in eval_loaders.values() for name in loader.metric_configs)
         # FAPE behavior toggles (with safe defaults)
         log_pred_nan_frac = bool(
             getattr(cfg.train, "fape", {}).get("log_pred_nan_frac", True)
@@ -1108,7 +1154,7 @@ def run_training(cfg: DictConfig):
                 pass
             decoder_enabled = True
 
-        if decoder_enabled and (want_fape or want_eval_decode):
+        if decoder_enabled:
             # resolve preset/path
             dec_preset = getattr(
                 cfg.model.decoder, "preset", None
@@ -1134,13 +1180,8 @@ def run_training(cfg: DictConfig):
                         f"{int(E.shape[1])}"
                     )
 
-    # data
-    train_loader, eval_loaders = _build_dataloaders(
-        cfg,
-        codebook_size=codebook_size,
-        pad_id=cfg.model.encoder.pad_id,
-        is_mlm=is_mlm,
-    )
+    if is_main:
+        _save_config_snapshot(cfg, io_dirs["configs"] / "run.yaml")
 
     # optimizer
     optimizer = AdamW(

@@ -107,14 +107,14 @@ eval:
 
     # structure metrics (require decoder and coordinates)
     lddt:
-      enabled: false  # Enable via decoding.eval_enabled or per-dataset override
+      enabled: null  # Auto-enable with decoding.eval_enabled; explicit bool wins
       # objectives: [codebook]
       # requires_decoder: true
       # requires_coords: true
     tm_score:
-      enabled: false
+      enabled: null
     rmsd:
-      enabled: false
+      enabled: null
     fape:
       enabled: false
 

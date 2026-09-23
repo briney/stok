@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 
 from stok.utils.masking import residue_mask_from_tokens
 from stok.eval.base import Metric
-from stok.eval.registry import build_metrics
+from stok.eval.registry import build_metrics, resolve_eval_metrics
 
 if TYPE_CHECKING:
     pass
@@ -77,6 +77,7 @@ class Evaluator:
 
         # Cache for metrics per eval dataset
         self._metrics_cache: dict[str, list[Metric]] = {}
+        self._capabilities: dict[str, tuple[bool, bool, dict]] = {}
 
         # Cache for whether attention weights are needed per eval dataset
         self._needs_attentions_cache: dict[str, bool] = {}
@@ -92,11 +93,15 @@ class Evaluator:
         """
         cache_key = eval_name or "__default__"
         if cache_key not in self._metrics_cache:
+            has_coords, has_labels, resolved = self._capabilities.get(cache_key,
+                (self.has_coords, True, resolve_eval_metrics(self.cfg, eval_name, objective=self.objective)))
             metrics = build_metrics(
                 cfg=self.cfg,
                 objective=self.objective,
                 decoder=self.decoder,
-                has_coords=self.has_coords,
+                has_coords=has_coords,
+                has_labels=has_labels,
+                resolved=resolved,
                 eval_name=eval_name,
             )
             self._metrics_cache[cache_key] = metrics
@@ -138,9 +143,6 @@ class Evaluator:
             Predicted coordinates [B, L, 3, 3] or None.
         """
         if self.decoder is None:
-            return None
-
-        if not self.eval_decode_enabled:
             return None
 
         # Import decoding utilities
@@ -250,6 +252,11 @@ class Evaluator:
         Returns:
             Dictionary mapping metric names to values.
         """
+        dataset = eval_loader.dataset
+        has_labels = self.objective == "mlm" or getattr(dataset, "has_labels", True)
+        self._capabilities[eval_name] = (getattr(dataset, "has_coords", self.has_coords), has_labels,
+            getattr(eval_loader, "metric_configs", resolve_eval_metrics(self.cfg, eval_name, objective=self.objective)))
+        self._metrics_cache.pop(eval_name, None)
         metrics = self._get_metrics(eval_name)
 
         # Reset all metrics
@@ -259,7 +266,6 @@ class Evaluator:
         # Check if any metrics require decoding
         needs_decoding = any(
             getattr(m, "requires_decoder", False)
-            or getattr(m, "requires_coords", False)
             for m in metrics
         )
 
@@ -289,7 +295,7 @@ class Evaluator:
                 # Forward pass (request attention weights if needed for metrics like p_at_l)
                 outputs = eval_model(
                     tokens=tokens,
-                    labels=labels,
+                    labels=labels if has_labels else None,
                     ignore_index=ignore_index,
                     output_attentions=needs_attentions,
                 )

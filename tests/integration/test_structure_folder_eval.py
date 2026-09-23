@@ -257,8 +257,8 @@ class TestStructureFolderMetricWhitelist:
         ]
 
         result = runner.invoke(cli, ["train", *overrides])
-        assert result.exit_code == 0, result.output
-        assert "Training complete." in result.output
+        assert result.exit_code != 0
+        assert "missing labels" in str(result.exception)
 
 
 class TestStructureFolderChainId:
