@@ -332,10 +332,10 @@ The probe accepts `--case coverage|eval-tail`, `--output PATH`, `--workers N`, a
 
 **Interfaces:** add local `iter_windows(loader, size: int)` using `itertools.islice`, yielding a list of up to size batches. Checkpoint fields become `global_step` (successful update count), `micro_step`, and `step_unit='optimizer_update'`; keep model/optimizer/scheduler payload keys. `num_steps`, FAPE/Gumbel schedules, and interval names retain names but change to documented update units.
 
-- [ ] Add real optimizer-state assertions: num_steps=3, accumulation=4 must perform three updates and twelve forwards when full windows are available. For epochs=1 with five batches/K=4, require two updates with a correctly normalized final single-batch window. Compare gradients/parameters to equivalent large batches with dropout disabled and unequal labeled lengths.
-- [ ] Add the distributed `empty-labels` case: rank zero has no labels while rank one does; both complete and match the globally normalized reference. A globally empty window must not advance AdamW state or scheduler; a fully unsupervised pass must terminate. Test FAPE-only supervised windows and AMP skipped updates where supported.
-- [ ] Run `pytest tests/integration/test_training_progress.py tests/integration/test_distributed_training.py -q`; confirm update counts differ before changing the loop.
-- [ ] Buffer only the input window, derive global CE/FAPE denominators, and implement this loss scaling per micro-batch:
+- [x] Add real optimizer-state assertions: num_steps=3, accumulation=4 must perform three updates and twelve forwards when full windows are available. For epochs=1 with five batches/K=4, require two updates with a correctly normalized final single-batch window. Compare gradients/parameters to equivalent large batches with dropout disabled and unequal labeled lengths.
+- [x] Add the distributed `empty-labels` case: rank zero has no labels while rank one does; both complete and match the globally normalized reference. A globally empty window must not advance AdamW state or scheduler; a fully unsupervised pass must terminate. Test FAPE-only supervised windows and AMP skipped updates where supported.
+- [x] Run `pytest tests/integration/test_training_progress.py tests/integration/test_distributed_training.py -q`; confirm update counts differ before changing the loop.
+- [x] Buffer only the input window, derive global CE/FAPE denominators, and implement this loss scaling per micro-batch:
 
   ```python
   ce_term = ce_sum * (world_size / global_token_count) if global_token_count else ce_sum * 0
@@ -345,7 +345,7 @@ The probe accepts `--case coverage|eval-tail`, `--output PATH`, `--workers N`, a
   ```
 
   `ce_sum` uses Task 4; `fape_sum` is the sum of per-protein losses on eligible examples (select valid rows before using the existing batch-mean function and multiply by that row count). `global_structure_count` excludes no-ground-truth rows and is zero before the configured FAPE start. Do not divide these terms by K again. Check nonfinite outcomes collectively before backward; use DDP no-sync for nonfinal micro-batches only when every rank has the same window length.
-- [ ] Clip/step/clear once, update the scheduler only on an actual step, and trigger log/eval/checkpoint cadence from successful updates. Count all processed tokens independently and sum across ranks for global token/FLOPs reporting. Run all progress/scheduler/checkpoint tests. Commit: `fix: govern training by normalized optimizer updates`.
+- [x] Clip/step/clear once, update the scheduler only on an actual step, and trigger log/eval/checkpoint cadence from successful updates. Count all processed tokens independently and sum across ranks for global token/FLOPs reporting. Run all progress/scheduler/checkpoint tests. Commit: `fix: govern training by normalized optimizer updates`.
 
 ## Task 7 — Resolve requested metrics, capabilities, and resources together
 
@@ -710,3 +710,4 @@ verification is recorded below and committed separately.
 | 3 | Verified sanitized geometric operands, finite masked gradients, connected empty FAPE, valid-only protein means, and unavailable underdetermined alignment. Existing implementation retained. | FAPE, structural metrics/independent references, and decoder/FAPE integration: **19 passed, 2 accelerator-only skipped**. Fresh accelerator checks belong to Task 14. |
 | 4 | Retained connected zero loss/gradients for empty supervision, class bounds, and mean/sum CE. Added the explicitly requested finite-FP16 reduction-overflow regression for both reductions; it passes the existing multiply-before-sum implementation. | CE, MLM model, and Parquet modules: **94 passed**. |
 | 5 | Verified native sampler/stream ownership, rank/worker batching, mixture streams, persistent-worker epoch shuffling, unpadded evaluation, supported backends, and restored model mode. Existing implementation retained. | Task 1's real distributed checks cover ownership and uneven/empty evaluation ranks; iterable and multi-train/multi-eval modules: **6 passed**. |
+| 6 | Verified globally normalized accumulation, independent CE/FAPE counts, partial windows, empty-rank participation, skipped-update handling, and optimizer-update budgets/artifacts. Existing update implementation retained. | Task 1 progress/distributed/checkpoint evidence and Task 3 FAPE-only updates; scheduler/window/config helper module: **21 passed**. |
