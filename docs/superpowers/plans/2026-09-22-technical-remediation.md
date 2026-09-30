@@ -207,7 +207,7 @@ Execute the listed order for a simple serial workflow. Tasks 4, 5, and 11 are in
 **Interfaces:** implement the mask/decoder signatures in the file map. Dataset constructors use `require_structure_tokens: bool = True`; set false for sequence-only MLM or label-free evaluation. Collators consume `sequence_id`, `sequence`, optional `structure_tokens`, and optional `coords`. Add optional `num_classes: int | None = None` to `_tokenize_and_align` for class-boundary validation; CLI supplies the actual codebook size. Retain existing positional arguments and tuple returns. Add one shared coordinate-alignment function in `collate.py`: `align_coords(coords: Tensor | None, *, residue_count: int, token_length: int) -> Tensor[token_length,3,3]`.
 
 - [x] **Completed follow-up — September 29 plan review:** enforce coordinate Arrow-type validation in the shared `_parquet_columns` helper. The reviewed baseline accepted nested string coordinates and silently converted them to floats in both dataset classes. Extended `test_parquet_dataset.py` to reject nested strings (including numeric-looking strings), booleans, and malformed nesting for single files and a malformed later shard; retained acceptance tests for numeric coordinates and missing optional coordinates. Validate only selected coordinate columns so `load_coords=false` continues to omit them. Report the source path and column in schema errors.
-- [ ] Add the failing alignment test and mixed-coordinate batches for both collators. Reuse `test_parquet_dataset.py` for null-element alignment and truncation, typed integer lists, sequence-only MLM, negative-ID/whole-null-list/length/type rejection, legacy-header/CSV rejection, required columns in every shard, and shards with missing optional coordinates. Update synthetic integration datasets whose label lengths currently disagree with their sequence lengths; do not relax the validation to accommodate those fixtures. The collator-level example below uses the loader's internal `-1` sentinel; the source Parquet list is `[7, null, 9]`.
+- [x] Add the failing alignment test and mixed-coordinate batches for both collators. Reuse `test_parquet_dataset.py` for null-element alignment and truncation, typed integer lists, sequence-only MLM, negative-ID/whole-null-list/length/type rejection, legacy-header/CSV rejection, required columns in every shard, and shards with missing optional coordinates. Update synthetic integration datasets whose label lengths currently disagree with their sequence lengths; do not relax the validation to accommodate those fixtures. The collator-level example below uses the loader's internal `-1` sentinel; the source Parquet list is `[7, null, 9]`.
 
   ```python
   def test_internal_gap_and_coordinates_stay_on_same_residue(tokenizer):
@@ -223,9 +223,9 @@ Execute the listed order for a simple serial workflow. Tasks 4, 5, and 11 are in
       assert torch.isnan(aligned[0, [0, 4, 5]]).all()
   ```
 
-- [ ] Run `pytest tests/unit/test_parquet_dataset.py tests/unit/test_tokenize_and_align.py tests/unit/test_mlm_collate.py tests/unit/test_vqindices_coords.py tests/unit/test_decoding_utils.py -q`; confirm the positional/mixed cases fail on the historical baseline and pass with the current contracts.
-- [ ] Replace filtering with positional masking. Validate raw lengths before dataset padding/truncation; convert null token elements to positional internal `-1` sentinels and reject negative source IDs. For mixed batches, align or create NaN coordinates for every item before stacking. Validate required columns/types and inspect optional columns per Parquet shard; include source path and `sequence_id` where available in schema/shape failures. Validate one-character residue tokenization before copying arrays.
-- [ ] Implement the shared structural mask and decoder adapter. Use mask IDs from resolved tokenizer metadata, not CE labels. Decoder adapter indexing must remain differentiable:
+- [x] Run `pytest tests/unit/test_parquet_dataset.py tests/unit/test_tokenize_and_align.py tests/unit/test_mlm_collate.py tests/unit/test_vqindices_coords.py tests/unit/test_decoding_utils.py -q`; confirm the positional/mixed cases fail on the historical baseline and pass with the current contracts.
+- [x] Replace filtering with positional masking. Validate raw lengths before dataset padding/truncation; convert null token elements to positional internal `-1` sentinels and reject negative source IDs. For mixed batches, align or create NaN coordinates for every item before stacking. Validate required columns/types and inspect optional columns per Parquet shard; include source path and `sequence_id` where available in schema/shape failures. Validate one-character residue tokenization before copying arrays.
+- [x] Implement the shared structural mask and decoder adapter. Use mask IDs from resolved tokenizer metadata, not CE labels. Decoder adapter indexing must remain differentiable:
 
   ```python
   result = codes.new_full((*codes.shape[:2], 3, 3), float("nan"))
@@ -239,7 +239,7 @@ Execute the listed order for a simple serial workflow. Tasks 4, 5, and 11 are in
   ```
 
   Switch both FAPE training and evaluator decoding to this adapter. Supply `outputs['residue_mask']` to metrics. A capture decoder test must see only residue slots and receive no all-masked rows; a gradient test must reach input codes. Add right-truncation and empty-row cases.
-- [ ] Run the listed tests plus structure-folder and mixed-shard integration tests. Assert every returned batch has matching B and T dimensions. Commit: `fix: align residue labels coordinates and decoder inputs`.
+- [x] Run the listed tests plus structure-folder and mixed-shard integration tests. Assert every returned batch has matching B and T dimensions. Commit: `fix: align residue labels coordinates and decoder inputs`.
 
 ## Task 3 — Make geometric losses and scores safe in forward and backward
 
@@ -706,3 +706,4 @@ verification is recorded below and committed separately.
 | Task | Current acceptance and follow-up | Verification |
 |---|---|---|
 | 1 | Propagate main-rank directory, configuration, and log-opening failures before peers continue. Existing checkpoint and empty-loader safeguards retained. | Three new two-rank cases failed before the fix. Distributed, progress, checkpoint, programmatic, and wrapped-model modules: **40 passed**. |
+| 2 | Coordinate schema validation plus strict collator label lengths before truncation; updated stale short-label fixtures. Positional gaps, mixed coordinates, biological masks, and differentiable residue-only decoding retained. | Two new label-length cases failed before the fix. Named alignment/Parquet/decoder/structure/mixed-shard modules: **128 passed**. |

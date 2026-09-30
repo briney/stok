@@ -301,9 +301,13 @@ def _tokenize_and_align(
         indices_raw = item.get("structure_tokens")
         if indices_raw is not None:
             indices: torch.Tensor = indices_raw.long()
+            if indices.numel() != len(seq):
+                raise ValueError(
+                    f"Sample {item.get('sequence_id', '?')}: structure_tokens length must match sequence length"
+                )
             if num_classes is not None and (indices >= num_classes).any():
                 raise ValueError(f"Sample {item.get('sequence_id', '?')}: class ID out of range")
-            copy_len = min(len(seq), int(indices.numel()), L - 2)
+            copy_len = min(len(seq), L - 2)
             values = indices[:copy_len]
             labels[1:1+copy_len] = values.masked_fill(values < 0, ignore_index)
 
