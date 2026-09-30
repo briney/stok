@@ -385,7 +385,7 @@ def generate(args):
 
     torch.set_num_threads(1)
     torch.manual_seed(0)
-    torch.use_deterministic_algorithms(True)
+    torch.use_deterministic_algorithms(True, warn_only=args.device != "cpu")
     args.output.mkdir(parents=True)
     inputs = args.output / "inputs"
     shutil.copytree(args.inputs, inputs)
@@ -396,12 +396,20 @@ def generate(args):
         "environment": {
             "dependencies": versions,
             "python": platform.python_version(),
-            "device": "cpu",
+            "device": args.device,
             "dtype": "float32",
             "attention": "torch SDPA",
             "machine": platform.machine(),
             "threads": 1,
             "seed": 0,
+            **(
+                {
+                    "accelerator": torch.cuda.get_device_name(),
+                    "runtime": torch.version.hip or torch.version.cuda,
+                }
+                if args.device != "cpu"
+                else {}
+            ),
         },
         "configuration": {
             "max_length": args.max_length,
@@ -421,6 +429,7 @@ def generate(args):
             "OUTPUT_DIR",
             "--max-length",
             str(args.max_length),
+            *(["--device", args.device] if args.device != "cpu" else []),
             *(["--preparation-only"] if args.preparation_only else []),
         ],
         "inputs": {
@@ -446,6 +455,7 @@ def generate(args):
         model = None
         if not args.preparation_only:
             model, excluded = _load_model(folder, args.max_length)
+            model = model.to(args.device)
             manifest["excluded_checkpoint_keys"][preset] = excluded
         items = [dataset[i] for i in range(len(dataset))]
         groups = [
@@ -541,6 +551,11 @@ def generate(args):
                 batch = custom_collate_pretrained_gcp(
                     selected, featuriser=dataset.pretrained_featuriser
                 )
+                if args.device != "cpu":
+                    batch = {
+                        key: value.to(args.device) if hasattr(value, "to") else value
+                        for key, value in batch.items()
+                    }
                 graph = batch["graph"]
                 for key in (
                     "edge_index",
@@ -643,7 +658,10 @@ def generate(args):
                 )
         if model is not None:
             for mode in ("holes", "prefix"):
-                indices = torch.arange(args.max_length).repeat(2, 1) % 4096
+                indices = (
+                    torch.arange(args.max_length, device=args.device).repeat(2, 1)
+                    % 4096
+                )
                 mask = torch.ones_like(indices, dtype=torch.bool)
                 mask[1, args.max_length // 2 :] = False
                 mask[0, 5:8] = False
@@ -653,7 +671,7 @@ def generate(args):
                         indices
                     )
                     kwargs = (
-                        {"true_lengths": torch.tensor([25, 17])}
+                        {"true_lengths": torch.tensor([25, 17], device=args.device)}
                         if mode == "prefix"
                         else {}
                     )
@@ -711,6 +729,12 @@ def main():
     parser.add_argument("--inputs", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--max-length", type=int, default=1280)
+    parser.add_argument(
+        "--device",
+        choices=("cpu", "cuda"),
+        default="cpu",
+        help="Backend for a separate FP32 reference capture (cuda also selects ROCm)",
+    )
     parser.add_argument("--preparation-only", action="store_true")
     args = parser.parse_args()
     if args.verify:

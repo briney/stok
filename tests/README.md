@@ -575,3 +575,68 @@ python -m build
 The existing CI matrix retains Python 3.10–3.13 and package checks. Native
 multi-process tests run in one dedicated CPU job with per-subprocess deadlines
 and a job timeout. No CI result is claimed merely from editing the workflow.
+
+### Complete GCP-VQVAE inference verification
+
+The full check uses local immutable release archives; no upstream package is
+imported by STok inference:
+
+```bash
+STOK_GCP_WEIGHTS=/path/to/release-directories \
+STOK_GCP_REFERENCE_FIXTURES=/path/to/full-oracle \
+OMP_NUM_THREADS=1 python -m pytest \
+  tests/unit/test_gcp_vqvae.py tests/unit/test_structure_encoding.py \
+  tests/unit/test_decoding_utils.py tests/integration/test_decoder_loader.py \
+  tests/integration/test_gcp_vqvae_parity.py -q
+```
+
+Use `--device cuda` during reference generation and `STOK_GCP_DEVICE=cuda`
+during verification for a separate accelerator capture. This spelling also
+selects ROCm. Graph construction runs on CPU in both paths; model computation
+uses the selected backend. Record the backend rather than comparing an
+accelerator run against CPU expectations. The generator records accelerator
+identity/runtime and retains FP32 as the only oracle dtype.
+
+September 30, 2026 evidence covers both releases, all seven accepted singleton
+files, the unequal batch, rejected files, and decoder holes/prefix lengths.
+CPU and Radeon 8060S (gfx1151, PyTorch 2.14.0+rocm7.2, ROCm 7.2.53211) use
+PyTorch SDPA. Captures exercise both 64- and released 1280-position padding;
+the coordinate input chains are 32–40 residues. This does not establish quality
+on a representative 1280-residue corpus or support for other accelerators.
+
+CPU stages use `rtol=atol=1e-5`. An initial ROCm 1280-position run missed this
+bound at one of 1,310,720 Lite transformer values: absolute error
+`1.1049211e-5` at `(0, 26, 396)` for the incomplete mmCIF case. Per-stage
+measurement across both releases gave these largest absolute differences:
+
+| Stage | Largest absolute difference |
+|---|---:|
+| GCP embedding | 2.8610e-6 |
+| Encoder projection | 3.3379e-6 |
+| Encoder transformer | 2.5272e-5 |
+| Encoder latent | 2.7418e-6 |
+| Quantized code | 0 |
+
+Native accelerator reductions and reference torch-scatter reductions produce
+small rounding differences that the transformer amplifies. ROCm transformer
+comparisons therefore use `rtol=1e-5, atol=2e-5`; other stages retain `1e-5`.
+Every token ID must still agree exactly. Two independent upstream ROCm captures
+were identical. STok quantizer buffers remain unchanged during inference.
+
+Two upstream behaviors need explicit interpretation:
+
+- In the 64-position oracle, batching the shorter chain changes five Lite and
+  two Large IDs relative to singleton encoding. Its padded terminal angle
+  features change. STok's explicit reference path reproduces the corresponding
+  batch, including these differences; production chain context must be explicit.
+- The pinned quantizer's direct `get_output_from_indices` uses Python negative
+  indexing, so `-1` selects the final embedding. Low-level decoder parity tests
+  retain captured reference code inputs. STok's `indices_to_codes` is strict by
+  default; `allow_missing=True` maps `-1` to zero. High-level decoding preserves
+  holes as NaNs and skips rows without labels.
+
+A separate 64-position ROCm BF16 autocast probe on complete, incomplete, and
+shorter chains changed respectively 5/3/3 Lite IDs and 2/4/1 Large IDs compared
+with FP32. Available reconstructed coordinates were finite. The corresponding
+CPU-versus-ROCm FP32 token comparisons had zero differences. These small probes
+do not approve BF16 for production or assess reconstruction quality.

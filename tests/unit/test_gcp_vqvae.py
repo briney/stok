@@ -174,8 +174,10 @@ def test_published_encoder_and_vq_stage_parity(preset):
         )
     root = Path(fixtures)
     manifest = verify_fixture_set(root, require_models=True)
+    device = os.environ.get("STOK_GCP_DEVICE", "cpu")
+    assert manifest["environment"]["device"] == device
     model = load_pretrained_tokenizer(
-        preset, path=Path(weights) / preset / "best_valid.pth"
+        preset, path=Path(weights) / preset / "best_valid.pth", device=device
     )
     before = {key: value.clone() for key, value in model.quantizer.state_dict().items()}
     for case in manifest["cases"]:
@@ -191,8 +193,9 @@ def test_published_encoder_and_vq_stage_parity(preset):
             graph.ptr = torch.tensor([0, *np.cumsum(case["lengths"]).tolist()])
             graph._slice_dict = {"coords": graph.ptr}
             graph.residue_index = graph.seq_pos[:, 0].long()
+            graph = graph.to(device)
             masks = {
-                key: torch.from_numpy(arrays[key].copy())
+                key: torch.from_numpy(arrays[key].copy()).to(device)
                 for key in ("residue_mask", "token_mask")
             }
             captured = {}
@@ -232,14 +235,18 @@ def test_published_encoder_and_vq_stage_parity(preset):
             captured["vq_codes"] = codes
             for name, actual in captured.items():
                 torch.testing.assert_close(
-                    actual,
+                    actual.cpu(),
                     torch.from_numpy(arrays[name].copy()),
                     rtol=1e-5,
-                    atol=1e-5,
+                    # Native ROCm reductions differ from torch-scatter by a few
+                    # ulps; the transformer amplifies them. Measured in tests/README.
+                    atol=2e-5
+                    if device != "cpu" and name == "encoder_embeddings"
+                    else 1e-5,
                     msg=lambda msg: f"{case['name']}/{name}: {msg}",
                 )
             assert torch.equal(
-                indices, torch.from_numpy(arrays["vq_indices"].copy())
+                indices.cpu(), torch.from_numpy(arrays["vq_indices"].copy())
             ), case["name"]
     assert all(
         torch.equal(value, model.quantizer.state_dict()[key])

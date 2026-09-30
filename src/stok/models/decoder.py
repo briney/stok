@@ -80,9 +80,25 @@ class GeometricDecoder(nn.Module):
         *,
         true_lengths: torch.Tensor | None = None,
     ):
+        if structure_tokens.ndim != 3 or mask.shape != structure_tokens.shape[:2]:
+            raise ValueError(
+                "Decoder codes and mask must have matching [B,L] dimensions"
+            )
         x = self.projector_in(structure_tokens)
 
         decoder_mask_bool = mask.to(torch.bool)
+        if true_lengths is not None:
+            if (
+                true_lengths.shape != (structure_tokens.size(0),)
+                or true_lengths.dtype not in (torch.int32, torch.int64)
+                or (true_lengths < 0).any()
+                or (true_lengths > structure_tokens.size(1)).any()
+            ):
+                raise ValueError(
+                    "true_lengths must be integer [B] within the input span"
+                )
+            positions = torch.arange(structure_tokens.size(1), device=mask.device)
+            decoder_mask_bool = positions[None] < true_lengths.to(mask.device)[:, None]
         x = self.decoder_stack(x, mask=decoder_mask_bool)
 
         bb_out = self.affine_output_projection(

@@ -78,25 +78,53 @@ def sample_indices_top_p(
     return idx.long()
 
 
-def indices_to_codes(codebook: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
+def indices_to_codes(
+    codebook: torch.Tensor, indices: torch.Tensor, *, allow_missing: bool = False
+) -> torch.Tensor:
     """
     Gather code vectors by index.
 
     Args:
         codebook: [C, d_code] codebook matrix.
         indices: [B, L] integer indices in [0, C).
+        allow_missing: Permit -1 as an unavailable slot and return a zero vector.
 
     Returns:
         [B, L, d_code] tensor of code vectors.
     """
     if codebook.ndim != 2:
         raise ValueError("codebook must have shape [C, d_code]")
-    if indices.ndim != 2:
-        raise ValueError("indices must have shape [B, L]")
+    if indices.ndim != 2 or indices.dtype not in (torch.int32, torch.int64):
+        raise ValueError("indices must be integer [B, L]")
     C = codebook.size(0)
-    if (indices < 0).any() or (indices >= C).any():
+    if (indices < (-1 if allow_missing else 0)).any() or (indices >= C).any():
         raise ValueError("indices out of range for provided codebook")
-    return codebook[indices]  # type: ignore[index]
+    codes = codebook[indices.clamp_min(0).long()]
+    return codes.masked_fill((indices == -1)[..., None], 0)
+
+
+def decode_structure_tokens(
+    decoder,
+    codebook: torch.Tensor,
+    indices: torch.Tensor,
+    *,
+    residue_mask: torch.Tensor,
+) -> torch.Tensor:
+    """Decode available labels in place; return NaN for holes and padding."""
+    if residue_mask.dtype != torch.bool or residue_mask.shape != indices.shape:
+        raise ValueError("residue_mask must be boolean [B,L] matching indices")
+    codes = indices_to_codes(codebook, indices, allow_missing=True)
+    if ((indices >= 0) & ~residue_mask).any():
+        raise ValueError("Available tokens must belong to real residue positions")
+    available = (indices >= 0) & residue_mask
+    result = codes.new_full((*indices.shape, 3, 3), float("nan"))
+    active = available.any(dim=1)
+    if active.any():
+        decoded = decode_coords(decoder, codes[active], available[active])
+        result[active] = decoded.masked_fill(
+            ~available[active, :, None, None], float("nan")
+        )
+    return result
 
 
 def decode_coords(
