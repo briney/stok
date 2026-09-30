@@ -274,7 +274,7 @@ Execute the listed order for a simple serial workflow. Tasks 4, 5, and 11 are in
 
 **Interfaces:** `token_ce_loss` keeps mean loss as its default and adds keyword-only `reduction: str = 'mean'` supporting `mean` and `sum`. Only `ignore_index` is ignored; other invalid IDs raise. Task 6 requests summed CE for exact window normalization.
 
-- [ ] Add this failing test plus `sum` reduction, mixed ignored labels, and invalid-class tests:
+- [x] Add this failing test plus `sum` reduction, mixed ignored labels, and invalid-class tests:
 
   ```python
   def test_all_ignored_ce_has_connected_zero_gradient():
@@ -286,9 +286,9 @@ Execute the listed order for a simple serial workflow. Tasks 4, 5, and 11 are in
       assert torch.equal(logits.grad, torch.zeros_like(logits))
   ```
 
-- [ ] Run `pytest tests/unit/test_token_ce_loss.py -q`; confirm NaN failure before editing.
-- [ ] Validate class bounds on nonignored labels; return `(logits * 0.0).sum()` when no labels remain, otherwise use PyTorch CE with the requested reduction. Multiply before summing to avoid FP16 reduction overflow for finite logits. Retain all-null Parquet label checks for zero loss/gradients and include finite FP16 logits whose unmasked sum would overflow. Do not sanitize genuine nonfinite model logits or change random masking statistics to hide the condition.
-- [ ] Run the new module, MLM model tests, and `test_parquet_dataset.py`; compare both reductions against PyTorch on valid data. Commit: `fix: define empty and invalid supervision loss behavior`.
+- [x] Run `pytest tests/unit/test_token_ce_loss.py -q`; confirm NaN failure before editing.
+- [x] Validate class bounds on nonignored labels; return `(logits * 0.0).sum()` when no labels remain, otherwise use PyTorch CE with the requested reduction. Multiply before summing to avoid FP16 reduction overflow for finite logits. Retain all-null Parquet label checks for zero loss/gradients and include finite FP16 logits whose unmasked sum would overflow. Do not sanitize genuine nonfinite model logits or change random masking statistics to hide the condition.
+- [x] Run the new module, MLM model tests, and `test_parquet_dataset.py`; compare both reductions against PyTorch on valid data. Commit: `fix: define empty and invalid supervision loss behavior`.
 
 ## Task 5 — Give native loaders sole ownership of distributed samples
 
@@ -708,3 +708,4 @@ verification is recorded below and committed separately.
 | 1 | Propagate main-rank directory, configuration, and log-opening failures before peers continue. Existing checkpoint and empty-loader safeguards retained. | Three new two-rank cases failed before the fix. Distributed, progress, checkpoint, programmatic, and wrapped-model modules: **40 passed**. |
 | 2 | Coordinate schema validation plus strict collator label lengths before truncation; updated stale short-label fixtures. Positional gaps, mixed coordinates, biological masks, and differentiable residue-only decoding retained. | Two new label-length cases failed before the fix. Named alignment/Parquet/decoder/structure/mixed-shard modules: **128 passed**. |
 | 3 | Verified sanitized geometric operands, finite masked gradients, connected empty FAPE, valid-only protein means, and unavailable underdetermined alignment. Existing implementation retained. | FAPE, structural metrics/independent references, and decoder/FAPE integration: **19 passed, 2 accelerator-only skipped**. Fresh accelerator checks belong to Task 14. |
+| 4 | Retained connected zero loss/gradients for empty supervision, class bounds, and mean/sum CE. Added the explicitly requested finite-FP16 reduction-overflow regression for both reductions; it passes the existing multiply-before-sum implementation. | CE, MLM model, and Parquet modules: **94 passed**. |
