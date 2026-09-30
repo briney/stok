@@ -402,9 +402,9 @@ The probe accepts `--case coverage|eval-tail`, `--output PATH`, `--workers N`, a
 
 **Interfaces:** consume `outputs['residue_mask']` from Task 2 and aligned coordinates. Both standard and logistic modes accumulate per-protein precision sums/counts. Keep the configured C-alpha threshold and `min_seq_sep` defaults. Use a local `random.Random(42 + iteration)` for splits.
 
-- [ ] Build a deterministic attention/coordinate example with known ranked upper-triangle contacts. Add CLS/EOS/padding without changing its expected precision; then make one residue's coordinates missing and assert its pairs are excluded, never relabeled negative. Test short sequences with no eligible pairs as unavailable.
-- [ ] Run contact tests and demonstrate the old candidate-mask/sequence-length failure. Add direct-versus-logistic-fallback aggregation checks on proteins of different lengths.
-- [ ] Construct candidates from biological residue positions AND finite required coordinates, exclude diagonal/short separations, and compute top-k with `k=min(valid_residue_count, eligible_pair_count)`. Use original residue positions for separation: removing missing coordinates must not close an internal sequence gap. Exclude special/padded positions from symmetrization/APC population before calculating their sums.
+- [x] Build a deterministic attention/coordinate example with known ranked upper-triangle contacts. Add CLS/EOS/padding without changing its expected precision; then make one residue's coordinates missing and assert its pairs are excluded, never relabeled negative. Test short sequences with no eligible pairs as unavailable.
+- [x] Run contact tests and demonstrate the old candidate-mask/sequence-length failure. Add direct-versus-logistic-fallback aggregation checks on proteins of different lengths.
+- [x] Construct candidates from biological residue positions AND finite required coordinates, exclude diagonal/short separations, and compute top-k with `k=min(valid_residue_count, eligible_pair_count)`. Use original residue positions for separation: removing missing coordinates must not close an internal sequence gap. Exclude special/padded positions from symmetrization/APC population before calculating their sums.
 
   ```python
   valid = outputs["residue_mask"] & torch.isfinite(coords[:, :, 1]).all(-1)
@@ -414,8 +414,8 @@ The probe accepts `--case coverage|eval-tail`, `--output PATH`, `--workers N`, a
   ```
 
   Here `positions=torch.arange(tokens.size(1),device=tokens.device)`; the shared leading-token offset does not change residue separation. Cache/contact labels must retain their association with these positions.
-- [ ] Remove global Python RNG reseeding. For repeated logistic splits, average each protein's held-out scores first, then average proteins, preventing differing held-out frequencies from changing weighting. Count training-only/unscored proteins separately.
-- [ ] Run the contact and MLM structure integration modules. Commit: `fix: align contact candidates and protein-level scores`.
+- [x] Remove global Python RNG reseeding. For repeated logistic splits, average each protein's held-out scores first, then average proteins, preventing differing held-out frequencies from changing weighting. Count training-only/unscored proteins separately.
+- [x] Run the contact and MLM structure integration modules. Commit: `fix: align contact candidates and protein-level scores`.
 
 ## Task 10 — Derive MLM token IDs and isolate evaluation randomness
 
@@ -713,3 +713,4 @@ verification is recorded below and committed separately.
 | 6 | Verified globally normalized accumulation, independent CE/FAPE counts, partial windows, empty-rank participation, skipped-update handling, and optimizer-update budgets/artifacts. Existing update implementation retained. | Task 1 progress/distributed/checkpoint evidence and Task 3 FAPE-only updates; scheduler/window/config helper module: **21 passed**. |
 | 7 | Verified requested-metric precedence, actual label/coordinate capabilities, decoder auto-activation, aliases/conflicts, and effective configuration snapshots. Existing implementation retained. | Registry and decoder auto-enable modules: **30 passed**; Task 2 structure-folder and Task 3 FAPE checks also passed. |
 | 8 | Retained exact evaluation populations and coordinated failures. Training now omits unavailable token accuracy for FAPE-only windows, emits token/protein observation counts, and handles perplexity exponent overflow without aborting valid updates. | Both new logging assertions failed before the fix. Evaluation/base/logger/harness and FAPE/progress modules: **95 passed, 2 accelerator-only skipped**; Task 1 also exercised real distributed metric failures and tails. |
+| 9 | Verified biological and finite-coordinate candidates, original sequence separation, masked APC, unique pairs, protein-level weighting, local logistic randomness, stable ordering, and retained duplicates. Existing estimator implementation retained. | Contact module: **45 passed**; Task 2 already exercised MLM structure evaluation and Task 1 exercised distributed logistic aggregation. |
