@@ -55,6 +55,7 @@ def _maybe_get_accelerator():
     accelerator = Accelerator()
     if accelerator.distributed_type.name not in {"NO", "MULTI_CPU", "MULTI_GPU"}:
         raise ValueError(f"Unsupported distributed backend: {accelerator.distributed_type}; use replicated DDP")
+    accelerator.gradient_accumulation_steps = 1
     return accelerator
 
 

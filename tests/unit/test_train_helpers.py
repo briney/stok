@@ -146,6 +146,15 @@ def test_accumulation_windows_keep_partial_tail():
         list(iter_windows([], 0))
 
 
+def test_manual_accumulation_is_not_divided_by_accelerate_environment(monkeypatch):
+    from stok.cli.train import _maybe_get_accelerator
+    monkeypatch.setenv('ACCELERATE_GRADIENT_ACCUMULATION_STEPS', '4')
+    accelerator = _maybe_get_accelerator()
+    value = torch.tensor(1., requires_grad=True)
+    accelerator.backward(value * 16)
+    assert value.grad.item() == 16.
+
+
 @pytest.mark.parametrize('load_coords', [None, False, True])
 def test_required_coordinate_loading_policy(tmp_path, load_coords):
     from pathlib import Path
