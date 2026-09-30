@@ -445,7 +445,7 @@ The probe accepts `--case coverage|eval-tail`, `--output PATH`, `--workers N`, a
 
 **Interfaces:** preserve `MultiheadAttention.forward`; boolean masks continue to mean blocked positions in this project's API. Define fully masked rows as zero attention/output in both manual and SDPA paths.
 
-- [ ] Add a combined additive/padding forward/backward regression and all-masked-row case:
+- [x] Add a combined additive/padding forward/backward regression and all-masked-row case:
 
   ```python
   def test_additive_padding_mask_is_finite(attention_module, sample_input):
@@ -459,9 +459,9 @@ The probe accepts `--case coverage|eval-tail`, `--output PATH`, `--workers N`, a
       assert torch.isfinite(x.grad).all()
   ```
 
-- [ ] Run `pytest tests/unit/test_attention.py -q` and confirm the new additive-mask failure.
-- [ ] Replace zero-times-infinity arithmetic with `masked_fill`. In manual attention, identify fully blocked rows before softmax, use finite placeholder logits for those rows, then explicitly zero their attention probabilities. Do not apply blanket `nan_to_num` to arbitrary attention outputs.
-- [ ] Compare manual/SDPA outputs and gradients for float and boolean masks and supported FP32/BF16/FP16 combinations. Commit: `fix: compose attention masks without nonfinite arithmetic`.
+- [x] Run `pytest tests/unit/test_attention.py -q` and confirm the new additive-mask failure.
+- [x] Replace zero-times-infinity arithmetic with `masked_fill`. In manual attention, identify fully blocked rows before softmax, use finite placeholder logits for those rows, then explicitly zero their attention probabilities. Do not apply blanket `nan_to_num` to arbitrary attention outputs.
+- [x] Compare manual/SDPA outputs and gradients for float and boolean masks and supported FP32/BF16/FP16 combinations. Commit: `fix: compose attention masks without nonfinite arithmetic`.
 
 ## Task 12 — Request only necessary attention and bound logistic collection
 
@@ -715,3 +715,4 @@ verification is recorded below and committed separately.
 | 8 | Retained exact evaluation populations and coordinated failures. Training now omits unavailable token accuracy for FAPE-only windows, emits token/protein observation counts, and handles perplexity exponent overflow without aborting valid updates. | Both new logging assertions failed before the fix. Evaluation/base/logger/harness and FAPE/progress modules: **95 passed, 2 accelerator-only skipped**; Task 1 also exercised real distributed metric failures and tails. |
 | 9 | Verified biological and finite-coordinate candidates, original sequence separation, masked APC, unique pairs, protein-level weighting, local logistic randomness, stable ordering, and retained duplicates. Existing estimator implementation retained. | Contact module: **45 passed**; Task 2 already exercised MLM structure evaluation and Task 1 exercised distributed logistic aggregation. |
 | 10 | Verified tokenizer-derived masking/replacement IDs, probability validation, stable sample-identity evaluation masks across batching/workers, stochastic training, and restored evaluation RNG/model state. Existing implementation retained. | MLM collator and CLI modules: **17 passed**; Task 8 evaluator cases also verified repeatability and RNG restoration. |
+| 11 | Preserved safe boolean/additive masking and fully blocked rows. Fixed manual attention for float32 additive masks with FP16/BF16 values by matching the weighted-value multiplication dtype. | Both mixed-dtype cases failed before the one-line fix; attention module: **65 passed**, including forward/gradient SDPA parity. |
