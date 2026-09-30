@@ -1440,7 +1440,10 @@ def run_training(cfg: DictConfig):
                     if running_cls_count > 0
                     else None
                 )
-                ppl = math.exp(avg_cls_loss) if avg_cls_loss is not None else None
+                try:
+                    ppl = math.exp(avg_cls_loss) if avg_cls_loss is not None else None
+                except OverflowError:
+                    ppl = float("inf")
 
                 # Compute cumulative FLOPs (6N approximation)
                 cumulative_flops = compute_flops_6n(num_params, total_tokens)
@@ -1467,7 +1470,8 @@ def run_training(cfg: DictConfig):
                     msg += f" | lr {lr:.2e}"
                 else:
                     # Codebook-specific logging
-                    msg += f" | acc {acc:.4f} | lr {lr:.2e}"
+                    msg += f" | acc {acc:.4f}" if running_masked_acc_count else " | acc unavailable"
+                    msg += f" | lr {lr:.2e}"
                     if avg_cls_loss is not None:
                         msg += f" | cls {avg_cls_loss:.4f} | ppl {ppl:.2f}"
 
@@ -1499,6 +1503,8 @@ def run_training(cfg: DictConfig):
                         "train/loss": float(avg_total_loss),
                         "lr": float(lr),
                         "train/micro_step": float(micro_step),
+                        f"train/{'mask_acc' if is_mlm else 'acc'}/num_valid": float(running_masked_acc_count),
+                        "train/fape_loss/num_valid": float(running_fape_count),
                     }
 
                     if is_mlm:
@@ -1512,7 +1518,8 @@ def run_training(cfg: DictConfig):
                         if ppl is not None:
                             payload["train/ppl"] = float(ppl)
                     else:
-                        payload["train/acc"] = float(acc)
+                        if running_masked_acc_count:
+                            payload["train/acc"] = float(acc)
                         if avg_cls_loss is not None and ppl is not None:
                             payload["train/cls_loss"] = float(avg_cls_loss)
                             payload["train/ppl"] = float(ppl)

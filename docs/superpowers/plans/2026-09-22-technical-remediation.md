@@ -375,7 +375,7 @@ The probe accepts `--case coverage|eval-tail`, `--output PATH`, `--workers N`, a
 
 **Interfaces:** retain `Metric.update(outputs,tokens,labels,coords,cfg)` and `compute()->dict[str,float]`. Add integer counters `num_valid`, `num_skipped`, `num_failed` to metric state; include them in distributed aggregation. `compute()` omits unavailable scores and includes numeric diagnostic keys such as `rmsd/num_valid`. Preserve existing score aliases. Unexpected errors are recorded locally and raised with consistent context after ranks synchronize.
 
-- [ ] Add tests for missing optional observations, all failed predictions, injected update errors, unequal batch sizes, and an empty local rank. Use a rebatching regression for perplexity:
+- [x] Add tests for missing optional observations, all failed predictions, injected update errors, unequal batch sizes, and an empty local rank. Use a rebatching regression for perplexity:
 
   ```python
   def test_perplexity_is_token_weighted():
@@ -391,10 +391,10 @@ The probe accepts `--case coverage|eval-tail`, `--output PATH`, `--workers N`, a
   ```
 
   Add a separate real-logits test for CE sum/count, and compare structural aggregates for batch sizes 1, 2, and a nondividing size.
-- [ ] Run classification/structure/evaluator/logger tests and confirm zero-as-success and weighting failures.
-- [ ] Remove inner broad exception suppression. Count evaluable proteins/tokens, accumulate numerators, and omit unavailable score keys. Catch fatal local evaluation errors at the evaluator boundary so other ranks still reach the single final error-status exchange. Raise on any unexpected failure; do not discard failed predictions and report a favorable subset. Keep no-input skips separate from errors. Restore incoming model mode in `finally`.
-- [ ] Update console/W&B logging to retain numeric population diagnostics and visibly show unavailable requested results before raising. Merge state once with the Task 5 unpadded population; explicitly test rank with zero local observations plus global no-data failure.
-- [ ] Run unit suites and distributed `eval-tail`. Commit: `fix: report metric validity and aggregate exact populations`.
+- [x] Run classification/structure/evaluator/logger tests and confirm zero-as-success and weighting failures.
+- [x] Remove inner broad exception suppression. Count evaluable proteins/tokens, accumulate numerators, and omit unavailable score keys. Catch fatal local evaluation errors at the evaluator boundary so other ranks still reach the single final error-status exchange. Raise on any unexpected failure; do not discard failed predictions and report a favorable subset. Keep no-input skips separate from errors. Restore incoming model mode in `finally`.
+- [x] Update console/W&B logging to retain numeric population diagnostics and visibly show unavailable requested results before raising. Merge state once with the Task 5 unpadded population; explicitly test rank with zero local observations plus global no-data failure.
+- [x] Run unit suites and distributed `eval-tail`. Commit: `fix: report metric validity and aggregate exact populations`.
 
 ## Task 9 — Correct contact candidates and per-protein aggregation
 
@@ -712,3 +712,4 @@ verification is recorded below and committed separately.
 | 5 | Verified native sampler/stream ownership, rank/worker batching, mixture streams, persistent-worker epoch shuffling, unpadded evaluation, supported backends, and restored model mode. Existing implementation retained. | Task 1's real distributed checks cover ownership and uneven/empty evaluation ranks; iterable and multi-train/multi-eval modules: **6 passed**. |
 | 6 | Verified globally normalized accumulation, independent CE/FAPE counts, partial windows, empty-rank participation, skipped-update handling, and optimizer-update budgets/artifacts. Existing update implementation retained. | Task 1 progress/distributed/checkpoint evidence and Task 3 FAPE-only updates; scheduler/window/config helper module: **21 passed**. |
 | 7 | Verified requested-metric precedence, actual label/coordinate capabilities, decoder auto-activation, aliases/conflicts, and effective configuration snapshots. Existing implementation retained. | Registry and decoder auto-enable modules: **30 passed**; Task 2 structure-folder and Task 3 FAPE checks also passed. |
+| 8 | Retained exact evaluation populations and coordinated failures. Training now omits unavailable token accuracy for FAPE-only windows, emits token/protein observation counts, and handles perplexity exponent overflow without aborting valid updates. | Both new logging assertions failed before the fix. Evaluation/base/logger/harness and FAPE/progress modules: **95 passed, 2 accelerator-only skipped**; Task 1 also exercised real distributed metric failures and tails. |
