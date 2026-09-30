@@ -55,6 +55,7 @@ def _maybe_get_accelerator():
     accelerator = Accelerator()
     if accelerator.distributed_type.name not in {"NO", "MULTI_CPU", "MULTI_GPU"}:
         raise ValueError(f"Unsupported distributed backend: {accelerator.distributed_type}; use replicated DDP")
+    accelerator.gradient_accumulation_steps = 1
     return accelerator
 
 
@@ -301,9 +302,13 @@ def _tokenize_and_align(
         indices_raw = item.get("structure_tokens")
         if indices_raw is not None:
             indices: torch.Tensor = indices_raw.long()
+            if indices.numel() != len(seq):
+                raise ValueError(
+                    f"Sample {item.get('sequence_id', '?')}: structure_tokens length must match sequence length"
+                )
             if num_classes is not None and (indices >= num_classes).any():
                 raise ValueError(f"Sample {item.get('sequence_id', '?')}: class ID out of range")
-            copy_len = min(len(seq), int(indices.numel()), L - 2)
+            copy_len = min(len(seq), L - 2)
             values = indices[:copy_len]
             labels[1:1+copy_len] = values.masked_fill(values < 0, ignore_index)
 
@@ -1036,18 +1041,13 @@ def run_training(cfg: DictConfig):
 
     # resolve project directories and save config (main only)
     io_dirs = _resolve_project_dirs(cfg)
+    output_error = None
     if is_main:
-        _ensure_dirs(
-            [
-                io_dirs["root"],
-                io_dirs["model"],
-                io_dirs["checkpoints"],
-                io_dirs["logs"],
-                io_dirs["configs"],
-            ]
-        )
-    if accelerator:
-        accelerator.wait_for_everyone()
+        try:
+            _ensure_dirs(list(io_dirs.values()))
+        except Exception as exc:
+            output_error = f"{type(exc).__name__}: {exc}"
+    _raise_rank_errors(output_error, accelerator, "Creating project directories failed")
 
     # Load codebook only for codebook objective
     codebook = None
@@ -1169,8 +1169,13 @@ def run_training(cfg: DictConfig):
                         f"{int(E.shape[1])}"
                     )
 
+    output_error = None
     if is_main:
-        _save_config_snapshot(cfg, io_dirs["configs"] / "run.yaml")
+        try:
+            _save_config_snapshot(cfg, io_dirs["configs"] / "run.yaml")
+        except Exception as exc:
+            output_error = f"{type(exc).__name__}: {exc}"
+    _raise_rank_errors(output_error, accelerator, "Saving configuration failed")
 
     # optimizer
     optimizer = AdamW(
@@ -1259,8 +1264,18 @@ def run_training(cfg: DictConfig):
         console_enabled = bool(console_cfg.get("enabled", True))
     # console progbar renders to stdout only, text lines are also logged separately to file
     log_file_handle = None
+    output_error = None
     if is_main:
-        log_file_handle = (io_dirs["logs"] / "train.log").open("a", encoding="utf-8")
+        try:
+            log_file_handle = (io_dirs["logs"] / "train.log").open("a", encoding="utf-8")
+            print(
+                f"Training started. Objective: {objective}",
+                file=log_file_handle,
+                flush=True,
+            )
+        except Exception as exc:
+            output_error = f"{type(exc).__name__}: {exc}"
+    _raise_rank_errors(output_error, accelerator, "Opening training log failed")
     console = ConsoleLogger(
         total_steps=max_steps,
         initial_step=global_step,
@@ -1268,13 +1283,6 @@ def run_training(cfg: DictConfig):
         enabled=console_enabled,
         file=sys.stdout,
     )
-    if is_main and log_file_handle is not None:
-        print(
-            f"Training started. Objective: {objective}",
-            file=log_file_handle,
-            flush=True,
-        )
-
     # Initialize modular evaluation system
     evaluator = Evaluator(
         cfg=cfg,
@@ -1431,7 +1439,10 @@ def run_training(cfg: DictConfig):
                     if running_cls_count > 0
                     else None
                 )
-                ppl = math.exp(avg_cls_loss) if avg_cls_loss is not None else None
+                try:
+                    ppl = math.exp(avg_cls_loss) if avg_cls_loss is not None else None
+                except OverflowError:
+                    ppl = float("inf")
 
                 # Compute cumulative FLOPs (6N approximation)
                 cumulative_flops = compute_flops_6n(num_params, total_tokens)
@@ -1458,7 +1469,8 @@ def run_training(cfg: DictConfig):
                     msg += f" | lr {lr:.2e}"
                 else:
                     # Codebook-specific logging
-                    msg += f" | acc {acc:.4f} | lr {lr:.2e}"
+                    msg += f" | acc {acc:.4f}" if running_masked_acc_count else " | acc unavailable"
+                    msg += f" | lr {lr:.2e}"
                     if avg_cls_loss is not None:
                         msg += f" | cls {avg_cls_loss:.4f} | ppl {ppl:.2f}"
 
@@ -1490,6 +1502,8 @@ def run_training(cfg: DictConfig):
                         "train/loss": float(avg_total_loss),
                         "lr": float(lr),
                         "train/micro_step": float(micro_step),
+                        f"train/{'mask_acc' if is_mlm else 'acc'}/num_valid": float(running_masked_acc_count),
+                        "train/fape_loss/num_valid": float(running_fape_count),
                     }
 
                     if is_mlm:
@@ -1503,7 +1517,8 @@ def run_training(cfg: DictConfig):
                         if ppl is not None:
                             payload["train/ppl"] = float(ppl)
                     else:
-                        payload["train/acc"] = float(acc)
+                        if running_masked_acc_count:
+                            payload["train/acc"] = float(acc)
                         if avg_cls_loss is not None and ppl is not None:
                             payload["train/cls_loss"] = float(avg_cls_loss)
                             payload["train/ppl"] = float(ppl)

@@ -156,7 +156,7 @@ class MultiheadAttention(nn.Module):
             attn_weights, p=self.dropout, training=self.training
         )
 
-        output = torch.matmul(attn_weights_dropped, v)  # [B, H, L, D]
+        output = torch.matmul(attn_weights_dropped.to(dtype=v.dtype), v)  # [B, H, L, D]
 
         # Return pre-dropout weights for interpretability
         return output, attn_weights

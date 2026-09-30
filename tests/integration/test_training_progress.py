@@ -127,3 +127,26 @@ def test_skipped_optimizer_step_does_not_advance_schedule(tmp_path, monkeypatch)
     assert checkpoint['global_step'] == checkpoint['scheduler']['last_epoch'] == 2
     assert checkpoint['micro_step'] == 3
     assert all(s['step'].item() == 2 for s in checkpoint['optimizer']['state'].values())
+
+
+def test_large_finite_loss_does_not_abort_perplexity_logging(tmp_path, monkeypatch):
+    import torch
+    from hydra import compose, initialize_config_dir
+    from stok.cli.train import run_training
+    from stok.models.stok import STokModel
+    source = tmp_path/'train.parquet'
+    write_labeled_parquet(source, count=2)
+    original = STokModel.forward
+    def high_loss(self, *args, **kwargs):
+        outputs = original(self, *args, **kwargs)
+        outputs['logits'] = outputs['logits'] * 0
+        outputs['logits'][..., 0] -= 2000
+        return outputs
+    monkeypatch.setattr(STokModel, 'forward', high_loss)
+    with initialize_config_dir(config_dir=str(Path(__file__).resolve().parents[2]/'src/stok/configs'), version_base=None):
+        cfg = compose(config_name='config', overrides=training_command(
+            tmp_path/'run', f'data.train={source}', 'train.num_steps=1', 'train.log_steps=1')[3:])
+    run_training(cfg)
+    checkpoint = torch.load(tmp_path/'run/model/final.pt', weights_only=False, map_location='cpu')
+    assert checkpoint['global_step'] == 1
+    assert 'ppl inf' in (tmp_path/'run/logs/train.log').read_text()

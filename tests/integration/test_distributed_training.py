@@ -57,6 +57,37 @@ def test_two_rank_checkpoint_write_failure_exits(tmp_path):
         assert 'Checkpoint failed' in result.stderr
 
 
+@pytest.mark.parametrize(
+    'target,context',
+    [
+        ('checkpoints', 'Creating project directories failed'),
+        ('configs/run.yaml', 'Saving configuration failed'),
+        ('logs/train.log', 'Opening training log failed'),
+    ],
+)
+def test_project_output_failure_reaches_every_rank(tmp_path, target, context):
+    path = tmp_path / target
+    if target == 'checkpoints':
+        path.write_text('not a directory')
+    else:
+        path.mkdir(parents=True)
+    results = run_distributed(training_command(tmp_path), timeout=15)
+    for result in results:
+        assert result.returncode != 0
+        assert context in result.stderr, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(not os.path.exists('/dev/full'), reason='requires a failing write sink')
+def test_initial_log_write_failure_reaches_every_rank(tmp_path):
+    (tmp_path / 'logs').mkdir()
+    (tmp_path / 'logs/train.log').symlink_to('/dev/full')
+    results = run_distributed(training_command(tmp_path), timeout=15)
+    for result in results:
+        assert result.returncode != 0
+        assert 'Opening training log failed' in result.stderr, result.stdout + result.stderr
+        assert 'No space left on device' in result.stderr
+
+
 
 
 def write_probe_data(root, n=17, eval_n=5):

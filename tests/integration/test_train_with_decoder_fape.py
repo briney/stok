@@ -130,6 +130,10 @@ def test_fape_only_missing_coordinates_produces_finite_update(tmp_path, monkeypa
     from stok.cli.train import run_training
     from stok.models.decoder import _DECODER_ARCH
     from tests.integration.test_training_progress import training_command
+    from types import SimpleNamespace
+    payloads = []
+    monkeypatch.setattr('stok.cli.train._maybe_init_wandb',
+        lambda *args, **kwargs: SimpleNamespace(log=lambda data, **kwargs: payloads.append(data)))
     monkeypatch.setitem(_DECODER_ARCH, 'lite', dict(d_model=32, ffn_mult=1.,
         n_layers=1, n_heads=2, attn_kv_heads=1, num_memory_tokens=0, max_length=32))
     decoder_path = _make_decoder_ckpt(tmp_path)
@@ -143,7 +147,7 @@ def test_fape_only_missing_coordinates_produces_finite_update(tmp_path, monkeypa
     }), source)
     overrides = training_command(tmp_path/'run', f'data.train={source}', 'data.load_coords=true',
         f'model.decoder.path={decoder_path}', 'train.fape.enabled=true',
-        'train.grad_accum_steps=2', 'train.scheduler.warmup_steps=0')[3:]
+        'train.grad_accum_steps=2', 'train.scheduler.warmup_steps=0', 'train.log_steps=1')[3:]
     states = []
     for updates in (0, 1):
         with initialize_config_dir(config_dir=str(Path(__file__).resolve().parents[2]/'src/stok/configs'), version_base=None):
@@ -154,6 +158,11 @@ def test_fape_only_missing_coordinates_produces_finite_update(tmp_path, monkeypa
         states.append(checkpoint['model'])
     assert all(torch.isfinite(value).all() for value in states[1].values())
     assert any(not torch.equal(states[0][name], states[1][name]) for name in states[0])
+    assert ' | acc unavailable' in (tmp_path/'run/logs/train.log').read_text()
+    assert len(payloads) == 1
+    assert payloads[0]['train/acc/num_valid'] == 0
+    assert payloads[0]['train/fape_loss/num_valid'] == 4
+    assert not {'train/acc', 'train/mask_acc', 'train/cls_loss', 'train/ppl'} & payloads[0].keys()
 
 
 @pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])

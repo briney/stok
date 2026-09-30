@@ -75,6 +75,21 @@ def _parquet_columns(
             )
         columns.append("structure_tokens")
     if load_coords and "coordinates" in schema.names:
+        dtype = schema.field("coordinates").type
+        element_type, depth = dtype, 0
+        while (
+            pa.types.is_list(element_type)
+            or pa.types.is_large_list(element_type)
+            or pa.types.is_fixed_size_list(element_type)
+        ):
+            element_type = element_type.value_type
+            depth += 1
+        if depth != 3 or not (
+            pa.types.is_integer(element_type) or pa.types.is_floating(element_type)
+        ):
+            raise ValueError(
+                f"{path}: coordinates must be three nested lists of integers or floats, got {dtype}"
+            )
         columns.append("coordinates")
     return columns
 

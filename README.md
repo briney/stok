@@ -663,6 +663,8 @@ logging/evaluation/checkpoint intervals, and scheduler steps use that unit;
 not be compared by step number. A final partial accumulation window is flushed;
 empty supervision never advances the optimizer or scheduler. A completely empty
 or unsupervised training pass fails clearly.
+Accelerate's internal accumulation factor stays at one; the training loop owns
+normalization even when `ACCELERATE_GRADIENT_ACCUMULATION_STEPS` is set.
 
 MLM rejects enabled FAPE or decoder/structure-decoding options.
 Only AdamW, a frozen codebook with its tied classifier, and a frozen training
@@ -694,6 +696,10 @@ required work. Unlabeled structure evaluation omits classification metrics;
 explicit requests for unavailable resources fail. Numeric metric aliases remain,
 with `num_valid`, `num_skipped`, and `num_failed` diagnostics. Unavailable scores
 are omitted, never replaced by a favorable zero.
+Training logs also include `train/acc/num_valid` (or `train/mask_acc/num_valid`)
+and `train/fape_loss/num_valid`. FAPE-only windows omit unavailable token scores
+and display `acc unavailable`; perplexity exponent overflow reports infinity
+without interrupting an otherwise valid update.
 
 Accuracy and perplexity aggregate supervised tokens. Structural scores and
 contact P@L average eligible proteins. P@L uses finite C-alpha coordinates,

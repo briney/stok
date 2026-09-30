@@ -31,3 +31,13 @@ def test_ce_rejects_out_of_range_labels(label):
 def test_default_empty_ce_is_finite():
     logits = torch.randn(1, 2, 3, requires_grad=True)
     assert torch.isfinite(token_ce_loss(logits, torch.full((1, 2), -100)))
+
+
+@pytest.mark.parametrize('reduction', ['mean', 'sum'])
+def test_empty_fp16_ce_avoids_reduction_overflow(reduction):
+    logits = torch.full((8, 16, 5), 1000., dtype=torch.float16, requires_grad=True)
+    assert torch.isinf(logits.sum())  # Summing before multiplying by zero overflows.
+    loss = token_ce_loss(logits, torch.full((8, 16), -100), reduction=reduction)
+    assert loss.item() == 0.0 and loss.requires_grad
+    loss.backward()
+    assert torch.equal(logits.grad, torch.zeros_like(logits))

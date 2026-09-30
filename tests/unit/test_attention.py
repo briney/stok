@@ -891,6 +891,25 @@ def test_combined_masks_finite_and_manual_sdpa_parity(attention_module, sample_i
     torch.testing.assert_close(grad_manual, grad_sdpa, atol=tol, rtol=tol)
 
 
+@pytest.mark.parametrize('dtype', [torch.bfloat16, torch.float16])
+def test_float32_additive_mask_with_low_precision_attention(attention_module, sample_input, dtype):
+    attn = attention_module.to(dtype=dtype)
+    x = sample_input.to(dtype=dtype).requires_grad_()
+    padding = torch.zeros(x.shape[:2], dtype=torch.bool)
+    padding[:, -1] = True
+    mask = torch.zeros(x.size(1), x.size(1), dtype=torch.float32)
+    mask[:, -2] = .25
+    mask[2] = -float('inf')
+    sdpa = attn(x, key_padding_mask=padding, attn_mask=mask)
+    manual, weights = attn(x, key_padding_mask=padding, attn_mask=mask, need_weights=True)
+    assert torch.isfinite(manual).all() and (weights[:, :, 2] == 0).all()
+    grad_sdpa, = torch.autograd.grad(sdpa.sum(), x, retain_graph=True)
+    grad_manual, = torch.autograd.grad(manual.sum(), x)
+    assert torch.isfinite(grad_manual).all()
+    torch.testing.assert_close(manual, sdpa, atol=.02, rtol=.02)
+    torch.testing.assert_close(grad_manual, grad_sdpa, atol=.02, rtol=.02)
+
+
 def test_selected_layers_use_sdpa_elsewhere_and_preserve_contacts(monkeypatch):
     from stok.eval.metrics.contact import _extract_attention_contacts
     model = STokModel(vocab_size=32, pad_id=1, d_model=32, n_heads=4, n_layers=6,

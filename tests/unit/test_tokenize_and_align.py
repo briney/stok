@@ -1,4 +1,5 @@
 import torch
+import pytest
 
 from stok.cli.train import _tokenize_and_align
 from stok.utils.tokenizer import Tokenizer
@@ -11,7 +12,7 @@ def test_tokenize_and_align_alignment_and_ignore_index():
     pad_id = 1
 
     seq = "LAGVSEK"  # short sequence
-    indices = torch.tensor([3, 1, 4, 1], dtype=torch.long)
+    indices = torch.tensor([3, 1, 4, 1, 5, 9, 2], dtype=torch.long)
 
     tokens, labels = _tokenize_and_align(
         [{"sequence": seq, "structure_tokens": indices}],
@@ -44,7 +45,7 @@ def test_tokenize_and_align_ignores_negative_indices():
 
     seq = "LAGVSEK"
     # Include trailing -1 values that should be ignored
-    raw_indices = torch.tensor([2, 5, 1, -1, -1, -1], dtype=torch.long)
+    raw_indices = torch.tensor([2, 5, 1, -1, -1, -1, -1], dtype=torch.long)
 
     tokens, labels = _tokenize_and_align(
         [{"sequence": seq, "structure_tokens": raw_indices}],
@@ -105,3 +106,13 @@ def test_alignment_truncates_before_eos():
     assert labels.tolist() == [[-100, 0, 1, 2, -100]]
     torch.testing.assert_close(aligned[0, 1:4], coords[:3])
     assert torch.isnan(aligned[0, [0, 4]]).all()
+
+
+@pytest.mark.parametrize('length', [3, 8])
+def test_alignment_rejects_label_length_before_truncation(length):
+    with pytest.raises(ValueError, match='bad.*length'):
+        _tokenize_and_align(
+            [{'sequence_id': 'bad', 'sequence': 'LAGVSEK',
+              'structure_tokens': torch.arange(length)}],
+            Tokenizer(), max_len=5, ignore_index=-100, pad_id=1,
+        )
