@@ -6,11 +6,11 @@
 
 **Architecture:** Repair the existing data, training, and metric paths in reviewable increments. Preserve the encoder, frozen codebook classifier, decoder architecture, metric registry, and tuple batch interface. Introduce only narrow helpers needed by multiple existing callers; do not split the training module wholesale.
 
-**Tech Stack:** Python >=3.10, PyTorch, Accelerate, Hydra/OmegaConf, tokenizers/transformers, pandas/PyArrow, NumPy, scikit-learn, pytest, Ruff. No new runtime dependencies.
+**Tech Stack:** Python >=3.10, PyTorch, Accelerate, Hydra/OmegaConf, tokenizers/transformers, PyArrow for Parquet input, NumPy, scikit-learn, pytest, Ruff. No new runtime dependencies.
 
-**Spec:** [Technical analysis](../../TECHNICAL_ANALYSIS.md), findings F01–F19, committed in `5e80556`, supplies the requirements baseline. The design decisions below are recommendations for this plan, not statements that the analysis already approved them.
+**Spec:** [Technical analysis](../../TECHNICAL_ANALYSIS.md), findings F01–F19, committed in `5e80556`, supplies the historical requirements baseline. The [current input contract](../../../README.md#training-data-format), introduced in `1e59137` and preserved through the merge in `4d34046`, governs the schema and examples below.
 
-**Status:** Planning only. Tests and implementation snippets below describe work to perform; they have not been added to the product or executed as remediation tests.
+**Status:** Implemented and merged into `main`: remediation via PR #5 (`9a0d9dd`), followed by the Parquet schema changes via PR #6 (`53b3dec`). Updated September 29, 2026 for the current input contract. Task checklists retain the original execution instructions; completion and validation evidence is recorded below and in the technical analysis. Pre-fix failure instructions describe the historical baseline, not expected failures in the current code.
 
 ## Scope and design decisions
 
@@ -20,6 +20,17 @@ The default scope corrects existing behavior and rejects unsupported options. It
 
 ### 1. Residue and batch contract
 
+- Training input is a Parquet file (`.parquet`, `.parq`, or `.pq`) or a flat directory of Parquet shards. CSV/TSV and legacy headers are unsupported. Single files use `TokenizedDataset`; shard directories use `IterableTokenizedDataset`. PDB/mmCIF structure folders remain supported for evaluation only.
+
+  | Source column | Arrow type / shape | Required |
+  |---|---|---|
+  | `sequence_id` | `string` or `large_string`, non-null values | Always |
+  | `sequence` | `string` or `large_string`, non-null values | Always |
+  | `structure_tokens` | `list` or `large_list` of integers | Codebook training; optional for MLM |
+  | `coordinates` | Nested numeric lists, `[L,3,3]`, atoms ordered N–CA–C | Optional |
+
+- Validate required names and types in every shard and read only the selected columns. Each supplied `structure_tokens` list must have exactly one element per source residue before truncation. IDs must be nonnegative and fit int64; use null elements for unlabeled residues. Reject whole null lists, string/float token encodings, and negative input IDs. Store no padding or special tokens in source lists.
+- Dataset items use `sequence_id`, `sequence`, and optional `structure_tokens` tensors. The loader converts null token elements to internal `-1` sentinels; collation converts those sentinels to `ignore_index` without deleting positions. The source `coordinates` column becomes the existing `coords` tensor key; structure-folder items use the same identity/sequence keys and omit `structure_tokens`.
 - Preserve `(tokens, labels)` and `(tokens, labels, coords)` batches, with shapes `[B,T]`, `[B,T]`, and `[B,T,3,3]`.
 - `data.max_len` remains a **token** budget. A sequence contributes at most `T-2` residues. Require `max_len >= 3`.
 - Coordinates and codebook labels align with token positions: residue zero is at position one. CLS/EOS/PAD receive ignored labels and NaN coordinates. Internal missing labels retain their positions.
@@ -67,8 +78,9 @@ Use **native PyTorch dataset/sampler partitioning as the sole data owner**. This
 - A per-dataset `metrics.only` list enables its listed metrics and disables others; per-dataset metric `enabled` overrides win last. Reject unknown metric IDs. Keep `has_coords` as a deprecated alias for `load_coords` and reject conflicting values.
 - Structure metrics explicitly selected by configuration activate decoding and its loader. `eval_enabled=true` activates the automatic lDDT/TM/RMSD set, subject to the precedence above. `model.decoder.enabled=true` alone loads the decoder but does not invent metrics or FAPE.
 - Label capability is objective-specific: structure folders lack VQ targets but can supply MLM targets. Mixed/missing labels use valid counts, not fabricated accuracy.
-- Train MLM remains stochastic. Eval MLM masks use a local generator seeded by `(evaluation seed, source dataset name, pid, sequence)` with a stable stdlib hash, so batching, workers, and rank count do not change masks. Refactor collate's masking draws to accept a generator; use `random.Random` for contact splits. Save/restore global torch/NumPy/Python RNG around evaluation so even loader construction and optional top-p decoding do not perturb training.
+- Train MLM remains stochastic. Eval MLM masks use a local generator seeded by `(evaluation seed, source dataset name, sequence_id, sequence)` with a stable stdlib hash, so batching, workers, and rank count do not change masks. Refactor collate's masking draws to accept a generator; use `random.Random` for contact splits. Save/restore global torch/NumPy/Python RNG around evaluation so even loader construction and optional top-p decoding do not perturb training.
 - Changes to step units, invalid-input validation, contact averaging, activation precedence, and metric failures are intentional behavior corrections and require migration notes. Do not renormalize old checkpoints or historical metrics silently.
+- Input migration: convert CSV/TSV sources to typed Parquet; rename source `pid` to `sequence_id`, `protein_sequence` to `sequence`, and `indices` to `structure_tokens`. Replace dataset-item `pid`/`seq`/`indices` keys with `sequence_id`/`sequence`/`structure_tokens`, and constructor keyword `require_indices` with `require_structure_tokens`. Replace negative missing-label values with null elements on disk. Preserve sample IDs and sequences when migrating to retain evaluation-mask identity. Internal structure-parser attributes and the `coords` tensor key retain their existing names.
 
 ## Global constraints
 
@@ -81,7 +93,7 @@ Use **native PyTorch dataset/sampler partitioning as the sole data owner**. This
 
 ## Review focus
 
-1. Internal missing residues, malformed label lengths, and mixed coordinate availability must preserve sample/residue identity: Task 2.
+1. Typed Parquet null elements, malformed label lengths/types, legacy headers, required columns in every shard, and mixed coordinate availability must preserve sample/residue identity or fail clearly: Task 2.
 2. Rank-local empty supervision and globally empty windows must preserve collective participation without fictitious optimizer steps: Tasks 4–6.
 3. Uneven evaluation tails and ranks with no examples must produce exactly-once population statistics: Tasks 5 and 8.
 4. Finite forward losses must also have finite correct gradients; invalid predictions cannot disappear from denominators: Task 3.
@@ -102,6 +114,7 @@ Use **native PyTorch dataset/sampler partitioning as the sole data owner**. This
 | `src/stok/models/{stok,encoder,blocks,attention}.py` | Correct mask arithmetic and request/store weights only from required layers, preserving the all-layer API default. |
 | `src/stok/configs/`, `README.md`, `tests/README.md`, `pyproject.toml`, `.github/workflows/pytest.yaml` | Document supported contracts, development setup, migration, and extend existing CI. |
 | Existing `tests/unit/` and `tests/integration/` modules | Extend tests at the owner of each behavior; retain package-build coverage. |
+| `tests/unit/test_parquet_dataset.py` | Existing typed-schema checks for single files/shards, null labels, rejected legacy inputs, and optional coordinates; reuse in Tasks 2, 4, and 14. |
 | New `tests/unit/test_token_ce_loss.py`, `tests/integration/test_training_progress.py`, `tests/integration/test_distributed_training.py` | Missing loss/window/progress and process-isolated distributed regression coverage. |
 | New `tests/utils/distributed_probe.py` | One small CLI probe for subprocess DDP runs; emits rank-local IDs/counts/artifact paths for assertions. |
 
@@ -159,7 +172,7 @@ Execute the listed order for a simple serial workflow. Tasks 4, 5, and 11 are in
       assert (tmp_path / "checkpoints/step_00000002.pt").is_file()
   ```
 
-  Add an undersized real CSV case to `test_training_progress.py`: one row, batch size two, positive step budget, subprocess timeout, expected actionable nonzero exit. Also reject `grad_accum_steps < 1`, negative budgets, and zero log/eval intervals before the loop.
+  Add an undersized real Parquet case to `test_training_progress.py`: one typed row with `sequence_id`, `sequence`, and `structure_tokens`, batch size two, positive step budget, subprocess timeout, expected actionable nonzero exit. Also reject `grad_accum_steps < 1`, negative budgets, and zero log/eval intervals before the loop.
 - [ ] Run `pytest tests/integration/test_distributed_training.py tests/integration/test_training_progress.py -q`; first establish timeout/progress failures in the reviewed code.
 - [ ] Move checkpoint synchronization outside the main-rank write branch and propagate write failures across ranks before any rank exits. Count yielded batches per pass and raise on a zero-batch pass. Implement the core branch in this order:
 
@@ -188,18 +201,18 @@ Execute the listed order for a simple serial workflow. Tasks 4, 5, and 11 are in
 
 ## Task 2 — Preserve residue identity through collation and decoding
 
-**Files:** modify `src/stok/data/{dataset,structure_dataset,collate}.py`, `src/stok/utils/{masking,decoding}.py`, `src/stok/cli/train.py`, `src/stok/eval/evaluator.py`, `src/stok/configs/model/arch.yaml`; extend `tests/unit/test_{tokenize_and_align,mlm_collate,vqindices_coords,structure_dataset,decoding_utils}.py` and `tests/integration/test_mlm_p_at_l_structure_eval.py`.
+**Files:** modify `src/stok/data/{dataset,structure_dataset,collate}.py`, `src/stok/utils/{masking,decoding}.py`, `src/stok/cli/train.py`, `src/stok/eval/evaluator.py`, `src/stok/configs/model/arch.yaml`; extend `tests/unit/test_{parquet_dataset,tokenize_and_align,mlm_collate,vqindices_coords,structure_dataset,decoding_utils}.py` and `tests/integration/test_mlm_p_at_l_structure_eval.py`.
 
-**Interfaces:** implement the mask/decoder signatures in the file map. Add optional `num_classes: int | None = None` to `_tokenize_and_align` for class-boundary validation; CLI supplies the actual codebook size. Retain existing positional arguments and tuple returns. Add one shared coordinate-alignment function in `collate.py`: `align_coords(coords: Tensor | None, *, residue_count: int, token_length: int) -> Tensor[token_length,3,3]`.
+**Interfaces:** implement the mask/decoder signatures in the file map. Dataset constructors use `require_structure_tokens: bool = True`; set false for sequence-only MLM or label-free evaluation. Collators consume `sequence_id`, `sequence`, optional `structure_tokens`, and optional `coords`. Add optional `num_classes: int | None = None` to `_tokenize_and_align` for class-boundary validation; CLI supplies the actual codebook size. Retain existing positional arguments and tuple returns. Add one shared coordinate-alignment function in `collate.py`: `align_coords(coords: Tensor | None, *, residue_count: int, token_length: int) -> Tensor[token_length,3,3]`.
 
-- [ ] Add the failing alignment test, mixed-coordinate batches for both collators, and parser tests for internal `None`/negative entries. Update synthetic integration datasets whose label lengths currently disagree with their sequence lengths; do not relax the validation to accommodate those fixtures.
+- [ ] Add the failing alignment test and mixed-coordinate batches for both collators. Reuse `test_parquet_dataset.py` for null-element alignment and truncation, typed integer lists, sequence-only MLM, negative-ID/whole-null-list/length/type rejection, legacy-header/CSV rejection, required columns in every shard, and shards with missing optional coordinates. Update synthetic integration datasets whose label lengths currently disagree with their sequence lengths; do not relax the validation to accommodate those fixtures. The collator-level example below uses the loader's internal `-1` sentinel; the source Parquet list is `[7, null, 9]`.
 
   ```python
   def test_internal_gap_and_coordinates_stay_on_same_residue(tokenizer):
       from stok.cli.train import _tokenize_and_align
       coords = torch.arange(27, dtype=torch.float32).reshape(3, 3, 3)
       tokens, labels, aligned = _tokenize_and_align(
-          [{"pid": "p", "seq": "LAG", "indices": torch.tensor([7, -1, 9]),
+          [{"sequence_id": "p", "sequence": "LAG", "structure_tokens": torch.tensor([7, -1, 9]),
             "coords": coords}], tokenizer, max_len=6, ignore_index=-100,
           pad_id=tokenizer.pad_token_id, num_classes=10,
       )
@@ -208,8 +221,8 @@ Execute the listed order for a simple serial workflow. Tasks 4, 5, and 11 are in
       assert torch.isnan(aligned[0, [0, 4, 5]]).all()
   ```
 
-- [ ] Run `pytest tests/unit/test_tokenize_and_align.py tests/unit/test_mlm_collate.py tests/unit/test_vqindices_coords.py tests/unit/test_decoding_utils.py -q`; confirm the positional/mixed cases fail.
-- [ ] Replace filtering with positional masking. Validate raw lengths before dataset padding/truncation; preserve `None` as a missing sentinel. For mixed batches, align or create NaN coordinates for every item before stacking. Inspect optional columns per Parquet shard and include path/pid in schema/shape failures. Validate one-character residue tokenization before copying arrays.
+- [ ] Run `pytest tests/unit/test_parquet_dataset.py tests/unit/test_tokenize_and_align.py tests/unit/test_mlm_collate.py tests/unit/test_vqindices_coords.py tests/unit/test_decoding_utils.py -q`; confirm the positional/mixed cases fail on the historical baseline and pass with the current contracts.
+- [ ] Replace filtering with positional masking. Validate raw lengths before dataset padding/truncation; convert null token elements to positional internal `-1` sentinels and reject negative source IDs. For mixed batches, align or create NaN coordinates for every item before stacking. Validate required columns/types and inspect optional columns per Parquet shard; include source path and `sequence_id` where available in schema/shape failures. Validate one-character residue tokenization before copying arrays.
 - [ ] Implement the shared structural mask and decoder adapter. Use mask IDs from resolved tokenizer metadata, not CE labels. Decoder adapter indexing must remain differentiable:
 
   ```python
@@ -255,7 +268,7 @@ Execute the listed order for a simple serial workflow. Tasks 4, 5, and 11 are in
 
 ## Task 4 — Define empty-supervision CE behavior
 
-**Files:** modify `src/stok/utils/losses.py`; create `tests/unit/test_token_ce_loss.py`; extend `tests/unit/test_mlm_model.py`.
+**Files:** modify `src/stok/utils/losses.py`; create `tests/unit/test_token_ce_loss.py`; extend `tests/unit/test_mlm_model.py` and reuse `tests/unit/test_parquet_dataset.py` for all-null source labels.
 
 **Interfaces:** `token_ce_loss` keeps mean loss as its default and adds keyword-only `reduction: str = 'mean'` supporting `mean` and `sum`. Only `ignore_index` is ignored; other invalid IDs raise. Task 6 requests summed CE for exact window normalization.
 
@@ -272,25 +285,25 @@ Execute the listed order for a simple serial workflow. Tasks 4, 5, and 11 are in
   ```
 
 - [ ] Run `pytest tests/unit/test_token_ce_loss.py -q`; confirm NaN failure before editing.
-- [ ] Validate class bounds on nonignored labels; return `logits.sum() * 0.0` when no labels remain, otherwise use PyTorch CE with the requested reduction. Do not sanitize genuine nonfinite model logits or change random masking statistics to hide the condition.
-- [ ] Run the new module and MLM model tests; compare both reductions against PyTorch on valid data. Commit: `fix: define empty and invalid supervision loss behavior`.
+- [ ] Validate class bounds on nonignored labels; return `(logits * 0.0).sum()` when no labels remain, otherwise use PyTorch CE with the requested reduction. Multiply before summing to avoid FP16 reduction overflow for finite logits. Retain all-null Parquet label checks for zero loss/gradients and include finite FP16 logits whose unmasked sum would overflow. Do not sanitize genuine nonfinite model logits or change random masking statistics to hide the condition.
+- [ ] Run the new module, MLM model tests, and `test_parquet_dataset.py`; compare both reductions against PyTorch on valid data. Commit: `fix: define empty and invalid supervision loss behavior`.
 
 ## Task 5 — Give native loaders sole ownership of distributed samples
 
 **Files:** modify `src/stok/data/dataset.py`, `src/stok/cli/train.py`, `src/stok/eval/evaluator.py`; extend `tests/unit/test_iterable_vqindices_dataset.py`, `tests/integration/test_distributed_training.py`; create `tests/utils/distributed_probe.py`.
 
-**Interfaces:** retain public dataset constructors with backward-compatible optional training partition settings. Add `rank`/`world_size` to `MixtureSampler` with defaults 0/1 and `set_epoch(epoch: int)`; its `__len__` reports local emitted samples. Loader lengths report actual local batches. Evaluator uses unwrapped replicated model and ordinary final state reduction, not `gather_for_metrics` on accumulated states.
+**Interfaces:** retain the current Parquet dataset constructors and add optional training partition settings. The schema migration renames `require_indices` to `require_structure_tokens`; it does not retain legacy source/header aliases. Add `rank`/`world_size` to `MixtureSampler` with defaults 0/1 and `set_epoch(epoch: int)`; its `__len__` reports local emitted samples. Loader lengths report actual local batches. Evaluator uses unwrapped replicated model and ordinary final state reduction, not `gather_for_metrics` on accumulated states.
 
 The probe accepts `--case coverage|eval-tail`, `--output PATH`, `--workers N`, and `--accum N`, and writes `rank_{rank}.json` with `ids`, `micro_steps`, and `optimizer_steps`. Task 6 adds `empty-labels` when its implementation exists. Create source data once before launching ranks; every process must consume the same fixture.
 
-- [ ] Add `coverage` and `eval-tail` probe cases emitting rank-local IDs for CSV, sharded Parquet, map mixtures, and map/iterable mixtures. Test workers 0 and 2. For evaluation N=5 and two ranks, assert these identities rather than just counts:
+- [ ] Add `coverage` and `eval-tail` probe cases emitting rank-local IDs for single-file Parquet, sharded Parquet, map mixtures, and map/iterable mixtures. Use the same typed schema for all sources and test workers 0 and 2. For evaluation N=5 and two ranks, assert these identities rather than just counts:
 
   ```python
   import json
 
   rank_ids = [json.loads((tmp_path / f"rank_{rank}.json").read_text())["ids"]
               for rank in range(2)]
-  flattened = [pid for ids in rank_ids for pid in ids]
+  flattened = [sequence_id for ids in rank_ids for sequence_id in ids]
   assert sorted(flattened) == ["0", "1", "2", "3", "4"]
   assert len(set(flattened)) == len(flattened)
   ```
@@ -412,15 +425,15 @@ The probe accepts `--case coverage|eval-tail`, `--output PATH`, `--workers N`, a
 
   ```python
   kwargs = dict(max_len=12, eval_seed=123, dataset_name="validation")
-  one = mlm_collate([{"pid": "p", "seq": "LAGVSE"}], tokenizer, **kwargs)
-  two = mlm_collate([{"pid": "p", "seq": "LAGVSE"}], tokenizer, **kwargs)
+  one = mlm_collate([{"sequence_id": "p", "sequence": "LAGVSE"}], tokenizer, **kwargs)
+  two = mlm_collate([{"sequence_id": "p", "sequence": "LAGVSE"}], tokenizer, **kwargs)
   torch.testing.assert_close(one[0], two[0])
   torch.testing.assert_close(one[1], two[1])
   ```
 
   Repeat with p in different batch positions and worker counts; verify train collation stays stochastic.
 - [ ] Run MLM tests and establish vocabulary/determinism failures.
-- [ ] Derive IDs and replacement candidates; validate probability ranges and `mask_token_prob + random_token_prob <= 1`. For eval, form a local per-sample generator with `hashlib.blake2b` over unambiguous encoded seed/dataset/pid/sequence components (use JSON serialization), not Python `hash()`. Replace every masking/random-replacement draw with the local generator.
+- [ ] Derive IDs and replacement candidates; validate probability ranges and `mask_token_prob + random_token_prob <= 1`. For eval, form a local per-sample generator with `hashlib.blake2b` over unambiguous encoded seed/dataset/sequence_id/sequence components (use JSON serialization), not Python `hash()`. Replace every masking/random-replacement draw with the local generator.
 - [ ] Wrap the entire evaluation traversal, including iterator creation, in saved/restored Python/NumPy/torch CPU and active CUDA RNG state. Seed optional stochastic decoding explicitly for repeatability at a fixed evaluation configuration; document that batching-invariant top-p sampling is not guaranteed. Use a dedicated DataLoader generator for eval worker initialization. Test that inserting evaluation does not change the next training random draws.
 - [ ] Run MLM unit/integration suites and an evaluation-with-workers regression. Commit: `fix: derive MLM token semantics and isolate eval randomness`.
 
@@ -470,11 +483,11 @@ The probe accepts `--case coverage|eval-tail`, `--output PATH`, `--workers N`, a
 - [ ] Run train-helper/model/checkpoint tests to show the previously accepted no-op options.
 - [ ] Add startup validation before downloads or training. Remove `_try_load_latest_checkpoint` and `simple_pad_collate` after a repository caller search; do not wire unsupported resume accidentally. Keep `gcpnet.py` until an external-use/dependency audit justifies deletion; document its inactive integration status. Preserve `load_pretrained_decoder(freeze=False)` as a standalone API if useful, while clearly rejecting it in the training loop that has no decoder optimizer.
 - [ ] Save checkpoints through a temporary sibling file and atomic replacement, including latest; preserve Task 1 coordinated failure propagation. This improves artifact durability without claiming full recovery. Add interrupted-write/failure tests proving the previous latest remains readable.
-- [ ] Document unsupported resume, step-unit migration, changed invalid-input behavior, activation precedence, contact averaging, and noncomparability of old affected scores. Run package-data and CLI help/smoke tests. Commit: `fix: enforce supported configuration and checkpoint contracts`.
+- [ ] Document unsupported resume, step-unit migration, the Parquet-only schema/header/constructor migration, null-element missing labels, changed invalid-input behavior, activation precedence, contact averaging, and noncomparability of old affected scores. Run package-data and CLI help/smoke tests. Commit: `fix: enforce supported configuration and checkpoint contracts`.
 
 ## Task 14 — Validate complete supported paths and extend existing CI
 
-**Files:** modify `.github/workflows/pytest.yaml`, `pyproject.toml`, `tests/README.md`, `README.md`, `docs/TECHNICAL_ANALYSIS.md`; extend existing end-to-end/decoder/MLM/structure-folder regression modules. Do not create a second test workflow duplicating the current matrix.
+**Files:** modify `.github/workflows/pytest.yaml`, `pyproject.toml`, `tests/README.md`, `README.md`, `docs/TECHNICAL_ANALYSIS.md`; reuse `tests/unit/test_parquet_dataset.py` and extend existing end-to-end/decoder/MLM/structure-folder regression modules. Do not create a second test workflow duplicating the current matrix.
 
 **Interfaces:** no new runtime API. Record finding status using F01–F19 with test references and commit hashes after implementation. Retain unresolved runtime/scientific validation boundaries explicitly.
 
@@ -482,11 +495,13 @@ The probe accepts `--case coverage|eval-tail`, `--output PATH`, `--workers N`, a
 
   | Scenario | Required assertion |
   |---|---|
-  | Codebook CSV, no coordinates | Finite learning, valid labels, exact update budget. |
+  | Codebook single-file Parquet, no coordinates | Finite learning, valid labels, exact update budget. |
+  | Typed Parquet files/shards with null structure-token elements | Positional alignment through truncation; all-null labels give zero loss/gradients, including FP16. |
+  | Invalid formats, legacy headers, malformed rows/types, or missing required shard columns | Clear rejection without silently filtering labels or skipping a shard. |
   | Parquet with FAPE and internal missing coordinates | Correct alignment, active structure loss, finite model gradients/updates. |
   | Mixed-coordinate sources | Correct per-sample association and eligible-protein counts. |
   | Label-free PDB/mmCIF codebook eval | Structure metrics run; classification metrics omitted. |
-  | MLM sequence and structure eval | Correct deterministic eval labels and contact population. |
+  | MLM sequence-only Parquet and structure-folder eval | `require_structure_tokens=false`; correct deterministic eval labels and contact population. |
   | Two-rank map/iterable/mixture training, workers 0/2 | Expected sample stream, equal update participation, checkpoint completion. |
   | Uneven distributed evaluation, including an empty rank | Single-process-equivalent population/scores without padding duplicates. |
   | Accumulation 1/4, partial window, empty supervision | Reference-equivalent updates and scheduler counts. |
@@ -520,7 +535,7 @@ The probe accepts `--case coverage|eval-tail`, `--output PATH`, `--workers N`, a
 
 ## Release gates and execution handoff
 
-1. **Supervision gate:** F01/F02/F14 tests pass before interpreting any new geometry/contact scores.
+1. **Supervision gate:** F01/F02/F14 tests and `tests/unit/test_parquet_dataset.py` pass with the current typed schema before interpreting any new geometry/contact scores. Null labels retain positions; legacy inputs, malformed rows/types, and missing required shard columns fail clearly.
 2. **Numerical gate:** F03/F07/F08 forward/backward cases pass; a real optimizer update remains finite.
 3. **Distributed gate:** checkpoint, coverage, uneven eval, empty-rank, and accumulation cases complete under subprocess timeouts and match reference counts.
 4. **Evaluation gate:** requested features execute; failed/unavailable metrics cannot masquerade as valid scores; rebatching does not change fixed-prediction aggregates.
@@ -534,10 +549,12 @@ Recommended execution method: native serial implementation with focused commits,
 ## Implementation completion record — September 22, 2026
 
 All 14 tasks were implemented in the isolated `fix/technical-remediation` branch,
-based on `5e80556`. The original checkout remains on `main`; no implementation
-push or merge was performed. Worktree: `/tmp/stok-remediation`.
+based on `5e80556`. At the September 22 handoff, the original checkout remained
+on `main`; no implementation push or merge had been performed. Worktree:
+`/tmp/stok-remediation`. The later merges are recorded in the September 29
+follow-up below.
 
-Validation after the final review fixes:
+Historical validation after the final review fixes (before the Parquet schema changes):
 
 - Installed CPU unit/integration suite: **435 passed, 2 skipped** in 182.26 seconds.
   The skips are the two accelerator-only real-decoder cases; both passed separately
@@ -592,3 +609,37 @@ CLI decoder/codebook, and sharded backends remain unsupported by approved scope.
 ### Deferred minors
 
 None. The advertised metrics-only recipe was regraded by its effect on users and fixed.
+
+## Parquet schema follow-up — September 29, 2026
+
+Remediation was merged via PR #5 (`9a0d9dd`). The typed Parquet schema change
+(`1e59137`) was reconciled with remediation in `4d34046` and merged via PR #6
+(`53b3dec`). This plan now reflects that combined input contract; the original
+F01–F19 requirements and September 22 validation remain historical evidence.
+
+Focused validation during the schema review used the existing
+`/tmp/stok-parquet-venv` environment against this checkout, with CPU execution,
+`PYTHONPATH=src`, and unrelated pytest plugin autoload disabled:
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=src ACCELERATE_USE_CPU=true \
+  CUDA_VISIBLE_DEVICES='' HIP_VISIBLE_DEVICES='' ROCR_VISIBLE_DEVICES='' \
+  OMP_NUM_THREADS=1 /tmp/stok-parquet-venv/bin/python -m pytest \
+  tests/unit/test_parquet_dataset.py tests/unit/test_tokenize_and_align.py \
+  tests/unit/test_mlm_collate.py tests/unit/test_vqindices_coords.py \
+  tests/unit/test_dataset_mlm.py tests/unit/test_iterable_vqindices_dataset.py \
+  tests/integration/test_training_progress.py -q
+```
+
+Result: **67 passed, 1 failed**. The failing
+`test_reordered_vocabulary_and_eval_identity` completed its direct and
+zero-worker assertions, then timed out in the two-worker DataLoader:
+the sandbox blocked multiprocessing socket setup with
+`PermissionError: [Errno 1] Operation not permitted`. This run does not validate
+the two-worker path. A separate finite-FP16 check reproduced NaN from
+`logits.sum() * 0.0` and zero loss/gradients from `(logits * 0.0).sum()`.
+
+The full suite, distributed checks, builds, and accelerator checks were not
+rerun during this review. Repeat the blocked worker test and the Task 14
+release checks in a compatible environment before treating September 22's
+complete-suite evidence as validation of the combined schema revision.
