@@ -247,7 +247,7 @@ Execute the listed order for a simple serial workflow. Tasks 4, 5, and 11 are in
 
 **Interfaces:** preserve existing `fape_loss`, `rmsd`, and `tm_score` signatures. Ground-truth validity combines the caller mask with finite required atoms. Reject nonfinite predictions on that valid set. FAPE averages only examples with valid ground truth and returns connected zero when none are valid; metric wrappers decide whether an example is eligible rather than scoring an empty example zero.
 
-- [ ] Add a backward regression and valid-only reference comparison. Change existing tests that accept all-NaN predictions against valid ground truth to assert a clear exception. Keep a separate all-invalid-ground-truth case.
+- [x] Add a backward regression and valid-only reference comparison. Change existing tests that accept all-NaN predictions against valid ground truth to assert a clear exception. Keep a separate all-invalid-ground-truth case.
 
   ```python
   def test_nan_padding_does_not_poison_valid_fape_gradients():
@@ -263,10 +263,10 @@ Execute the listed order for a simple serial workflow. Tasks 4, 5, and 11 are in
   ```
 
   Add RMSD/TM masked-padding tests comparing to the unpadded example, proper rotations, reflections, and fewer than three valid alignment points. Define aligned RMSD/TM as unavailable when ground truth lacks three noncollinear valid points; do not pretend identity alignment solved an underdetermined case. A finite collapsed prediction against adequate ground truth must still be scored, not removed from the evaluation population.
-- [ ] Run `pytest tests/unit/test_fape_loss.py tests/unit/test_metrics.py -q` and establish the backward/SVD failures.
-- [ ] Compute masks first. Replace invalid N/CA/C triplets with a fixed nondegenerate finite frame and sanitize excluded point operands before every transform/norm/SVD. Do not use multiplication to erase NaNs. Preserve the original validity mask for all reductions. Use FP32 geometry under autocast where required. Invalid predicted residues with valid targets must raise before being excluded.
-- [ ] Compare valid gradients to a separately evaluated unpadded tensor with `torch.testing.assert_close`; test finite gradients through the Task 2 decoder adapter. Remove training's silent “skip nonfinite FAPE” path in favor of coordinated failure handling used by Task 6. Verify identity/rigid-transform invariants in FP32 and available autocast modes.
-- [ ] Run those tests and the decoder/FAPE integration test with actual coordinate loading explicitly enabled until Task 7 fixes automatic loading. Assert finite parameter changes attributable to FAPE. Commit: `fix: sanitize geometric operands before differentiation`.
+- [x] Run `pytest tests/unit/test_fape_loss.py tests/unit/test_metrics.py -q` and establish the backward/SVD failures.
+- [x] Compute masks first. Replace invalid N/CA/C triplets with a fixed nondegenerate finite frame and sanitize excluded point operands before every transform/norm/SVD. Do not use multiplication to erase NaNs. Preserve the original validity mask for all reductions. Use FP32 geometry under autocast where required. Invalid predicted residues with valid targets must raise before being excluded.
+- [x] Compare valid gradients to a separately evaluated unpadded tensor with `torch.testing.assert_close`; test finite gradients through the Task 2 decoder adapter. Remove training's silent “skip nonfinite FAPE” path in favor of coordinated failure handling used by Task 6. Verify identity/rigid-transform invariants in FP32 and available autocast modes.
+- [x] Run those tests and the decoder/FAPE integration test with actual coordinate loading explicitly enabled until Task 7 fixes automatic loading. Assert finite parameter changes attributable to FAPE. Commit: `fix: sanitize geometric operands before differentiation`.
 
 ## Task 4 — Define empty-supervision CE behavior
 
@@ -707,3 +707,4 @@ verification is recorded below and committed separately.
 |---|---|---|
 | 1 | Propagate main-rank directory, configuration, and log-opening failures before peers continue. Existing checkpoint and empty-loader safeguards retained. | Three new two-rank cases failed before the fix. Distributed, progress, checkpoint, programmatic, and wrapped-model modules: **40 passed**. |
 | 2 | Coordinate schema validation plus strict collator label lengths before truncation; updated stale short-label fixtures. Positional gaps, mixed coordinates, biological masks, and differentiable residue-only decoding retained. | Two new label-length cases failed before the fix. Named alignment/Parquet/decoder/structure/mixed-shard modules: **128 passed**. |
+| 3 | Verified sanitized geometric operands, finite masked gradients, connected empty FAPE, valid-only protein means, and unavailable underdetermined alignment. Existing implementation retained. | FAPE, structural metrics/independent references, and decoder/FAPE integration: **19 passed, 2 accelerator-only skipped**. Fresh accelerator checks belong to Task 14. |
