@@ -41,18 +41,18 @@ def main():
         cfg = compose(config_name='config', overrides=['data.batch_size=2', 'data.max_len=5',
             f'data.num_workers={args.workers}', 'data.pin_memory=false', 'train.seed=7',
             'data.shuffle_shards=false', 'data.shuffle_rows=false'])
-    train_path = str(root / ('shards' if args.source == 'iterable' else 'train.csv'))
+    train_path = str(root / ('shards' if args.source == 'iterable' else 'train.parquet'))
     if args.source.endswith('mixture'):
-        other = root / ('shards' if args.source == 'mixed-mixture' else 'train.csv')
+        other = root / ('shards' if args.source == 'mixed-mixture' else 'train.parquet')
         cfg.data.train = {'a': {'path': train_path, 'fraction': .4},
                           'b': {'path': str(other), 'fraction': .6}}
     else:
         cfg.data.train = train_path
-    cfg.data.eval = str(root / ('eval_shards' if args.source == 'iterable' else 'eval.csv'))
+    cfg.data.eval = str(root / ('eval_shards' if args.source == 'iterable' else 'eval.parquet'))
     if args.case == "empty-labels":
         cfg.train.seed = 1337
     if args.case == "eval-empty":
-        cfg.data.eval = {"default": {"path": str(root/'eval.csv'), "metrics": {"only": ["accuracy"]}}}
+        cfg.data.eval = {"default": {"path": str(root/'eval.parquet'), "metrics": {"only": ["accuracy"]}}}
     train, evaluations = _build_dataloaders(cfg, codebook_size=128, pad_id=1)
     loader = train if args.case in {'coverage', 'empty-labels'} else evaluations['default']
     ids = []

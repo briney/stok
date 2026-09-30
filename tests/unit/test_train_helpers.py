@@ -153,7 +153,7 @@ def test_required_coordinate_loading_policy(tmp_path, load_coords):
     from hydra import compose, initialize_config_dir
     from stok.cli.train import _build_dataloaders
     source = tmp_path/'train.parquet'
-    pd.DataFrame([{'pid': 'p', 'protein_sequence': 'LAG', 'indices': [0, 1, 2],
+    pd.DataFrame([{'sequence_id': 'p', 'sequence': 'LAG', 'structure_tokens': [0, 1, 2],
         'coordinates': [[[0., 0., 0.], [1., 0., 0.], [1., 1., 0.]]]*3}]*2).to_parquet(source)
     with initialize_config_dir(config_dir=str(Path(__file__).resolve().parents[2]/'src/stok/configs'), version_base=None):
         cfg = compose(config_name='config', overrides=['data.batch_size=2', 'data.max_len=6',
@@ -172,8 +172,9 @@ def test_coordinate_alias_conflict_and_missing_source(tmp_path):
     from pathlib import Path
     from hydra import compose, initialize_config_dir
     from stok.cli.train import _build_dataloaders
-    source = tmp_path/'seq.csv'
-    source.write_text('pid,protein_sequence,indices\np,LAG,0 1 2\np,LAG,0 1 2\n')
+    source = tmp_path/'seq.parquet'
+    import pandas as pd
+    pd.DataFrame([{'sequence_id': 'p', 'sequence': 'LAG', 'structure_tokens': [0, 1, 2]}]*2).to_parquet(source, index=False)
     with initialize_config_dir(config_dir=str(Path(__file__).resolve().parents[2]/'src/stok/configs'), version_base=None):
         cfg = compose(config_name='config', overrides=[f'data.train={source}', 'data.num_workers=0'])
     cfg.data.eval = {'val': {'path': str(source), 'has_coords': True, 'load_coords': False}}

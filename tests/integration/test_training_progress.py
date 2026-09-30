@@ -3,6 +3,9 @@ from pathlib import Path
 import subprocess
 import sys
 
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 
@@ -24,9 +27,9 @@ def training_env():
 
 
 def test_undersized_loader_fails_promptly(tmp_path):
-    csv = tmp_path / 'small.csv'
-    csv.write_text('pid,protein_sequence,indices\np,LAG,0 1 2\n')
-    result = subprocess.run(training_command(tmp_path / 'run', f'data.train={csv}'),
+    source = tmp_path / 'small.parquet'
+    pd.DataFrame([{'sequence_id': 'p', 'sequence': 'LAG', 'structure_tokens': [0, 1, 2]}]).to_parquet(source, index=False)
+    result = subprocess.run(training_command(tmp_path / 'run', f'data.train={source}'),
                             env=training_env(), capture_output=True, text=True, timeout=15)
     assert result.returncode != 0
     assert 'complete batches' in result.stderr
@@ -59,17 +62,19 @@ def test_num_steps_counts_optimizer_updates(tmp_path):
     assert checkpoint['step_unit'] == 'optimizer_update'
 
 
-def write_labeled_csv(path, count=16, empty=False):
-    rows = ['pid,protein_sequence,indices']
-    for i in range(count):
-        labels = '-1 -1 -1' if empty else ('0 -1 -1' if i % 3 else '0 1 2')
-        rows.append(f'{i},LAG,{labels}')
-    path.write_text('\n'.join(rows)+'\n')
+def write_labeled_parquet(path, count=16, empty=False):
+    tokens = [[None] * 3 if empty else ([0, None, None] if i % 3 else [0, 1, 2])
+              for i in range(count)]
+    pq.write_table(pa.table({
+        'sequence_id': [str(i) for i in range(count)],
+        'sequence': ['LAG'] * count,
+        'structure_tokens': pa.array(tokens, type=pa.list_(pa.int64())),
+    }), path)
 
 
 def test_epoch_flushes_final_partial_window(tmp_path):
-    source = tmp_path/'train.csv'
-    write_labeled_csv(source, count=10)
+    source = tmp_path/'train.parquet'
+    write_labeled_parquet(source, count=10)
     checkpoint = run_checkpoint(tmp_path/'run', f'data.train={source}',
                                 'train.epochs=1', 'train.grad_accum_steps=4')
     assert checkpoint['global_step'] == 2
@@ -80,8 +85,8 @@ def test_epoch_flushes_final_partial_window(tmp_path):
 
 def test_accumulation_matches_large_batch_with_unequal_supervision(tmp_path):
     import torch
-    source = tmp_path/'train.csv'
-    write_labeled_csv(source)
+    source = tmp_path/'train.parquet'
+    write_labeled_parquet(source)
     common = [f'data.train={source}', 'train.num_steps=2', 'train.scheduler.warmup_steps=0',
               'train.optimizer.lr=0.001', 'train.grad_clip_norm=0']
     small = run_checkpoint(tmp_path/'small', *common, 'data.batch_size=2', 'train.grad_accum_steps=4')
@@ -91,8 +96,8 @@ def test_accumulation_matches_large_batch_with_unequal_supervision(tmp_path):
 
 
 def test_fully_unsupervised_pass_fails_without_checkpoint(tmp_path):
-    source = tmp_path/'empty.csv'
-    write_labeled_csv(source, count=4, empty=True)
+    source = tmp_path/'empty.parquet'
+    write_labeled_parquet(source, count=4, empty=True)
     project = tmp_path/'run'
     result = subprocess.run(training_command(project, f'data.train={source}'),
                             env=training_env(), capture_output=True, text=True, timeout=15)

@@ -2,6 +2,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 import torch
 from click.testing import CliRunner
@@ -28,9 +30,9 @@ def _write_parquet_with_coords(path: Path, n_rows: int, seq_min_len: int, seq_ma
         L = np.random.randint(seq_min_len, seq_max_len + 1)
         seq = "".join(np.random.choice(list("ACDEFGHIKLMNPQRSTVWY"), size=L))
         rows.append({
-            "pid": f"pc{i}",
-            "protein_sequence": seq,
-            "indices": [0] * len(seq),
+            "sequence_id": f"pc{i}",
+            "sequence": seq,
+            "structure_tokens": [0] * len(seq),
             "coordinates": _make_coords(L),
         })
     df = pd.DataFrame(rows)
@@ -134,8 +136,11 @@ def test_fape_only_missing_coordinates_produces_finite_update(tmp_path, monkeypa
     source = tmp_path/'structure.parquet'
     coords = np.asarray(_make_coords(4))
     coords[2] = np.nan
-    pd.DataFrame([{'pid': str(i), 'protein_sequence': 'LAGV', 'indices': [-1]*4,
-                   'coordinates': coords.tolist()} for i in range(4)]).to_parquet(source)
+    pq.write_table(pa.table({
+        'sequence_id': [str(i) for i in range(4)], 'sequence': ['LAGV'] * 4,
+        'structure_tokens': pa.array([[None] * 4] * 4, type=pa.list_(pa.int64())),
+        'coordinates': [coords.tolist()] * 4,
+    }), source)
     overrides = training_command(tmp_path/'run', f'data.train={source}', 'data.load_coords=true',
         f'model.decoder.path={decoder_path}', 'train.fape.enabled=true',
         'train.grad_accum_steps=2', 'train.scheduler.warmup_steps=0')[3:]

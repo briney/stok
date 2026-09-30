@@ -26,9 +26,9 @@ def test_dataset_parquet_with_coords_returns_coords_tensor(tmp_path):
         L = len(seq)
         rows.append(
             {
-                "pid": f"p{i}",
-                "protein_sequence": seq,
-                "indices": list(range(L)),  # arbitrary
+                "sequence_id": f"p{i}",
+                "sequence": seq,
+                "structure_tokens": list(range(L)),  # arbitrary
                 "coordinates": _make_coords(L),
             }
         )
@@ -57,9 +57,9 @@ def test_dataset_parquet_without_coords_omits_key(tmp_path):
         seq = "ACDEFGHIKLM"[: 6 + i]
         rows.append(
             {
-                "pid": f"q{i}",
-                "protein_sequence": seq,
-                "indices": list(range(len(seq))),
+                "sequence_id": f"q{i}",
+                "sequence": seq,
+                "structure_tokens": list(range(len(seq))),
             }
         )
     pd.DataFrame(rows).to_parquet(pq, index=False)
@@ -69,33 +69,11 @@ def test_dataset_parquet_without_coords_omits_key(tmp_path):
     assert "coords" not in item
 
 
-def test_dataset_csv_never_includes_coords(tmp_path):
-    csv = tmp_path / "data.csv"
-    rows = []
-    for i in range(2):
-        seq = "ACDEFGHIKLM"[: 6 + i]
-        indices_str = " ".join(str(x) for x in range(len(seq)))
-        rows.append(
-            {
-                "pid": f"c{i}",
-                "protein_sequence": seq,
-                "indices": indices_str,
-            }
-        )
-    pd.DataFrame(rows).to_csv(csv, index=False)
-
-    ds = TokenizedDataset(str(csv), max_length=8)
-    item = ds[0]
-    assert "coords" not in item
-
-
-
-
 def test_parser_preserves_missing_positions_and_rejects_bad_lengths(tmp_path):
-    from stok.data.dataset import BaseTokenizedDataset
-    row = pd.Series({'pid': 'p', 'protein_sequence': 'LAG', 'indices': [7, None, 9]})
-    item = BaseTokenizedDataset._build_output_from_row(row, max_length=6, has_coords=False)
-    assert item['indices'].tolist() == [7, -1, 9, -1, -1, -1]
-    row['indices'] = [7, 9]
+    from stok.data.dataset import _build_output_from_row
+    row = {'sequence_id': 'p', 'sequence': 'LAG', 'structure_tokens': [7, None, 9]}
+    item = _build_output_from_row(row, max_length=6, has_coords=False)
+    assert item['structure_tokens'].tolist() == [7, -1, 9]
+    row['structure_tokens'] = [7, 9]
     with pytest.raises(ValueError, match='p.*length'):
-        BaseTokenizedDataset._build_output_from_row(row, max_length=6, has_coords=False)
+        _build_output_from_row(row, max_length=6, has_coords=False)

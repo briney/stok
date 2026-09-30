@@ -84,7 +84,6 @@ class TestStructureFolderDataset:
         
         assert len(ds) == 2
         assert ds.has_coords is True
-        assert ds._is_parquet is False
 
     def test_getitem_output_keys(self, tmp_path):
         """Output dict has expected keys."""
@@ -93,13 +92,13 @@ class TestStructureFolderDataset:
         
         item = ds[0]
         
-        assert "pid" in item
-        assert "seq" in item
+        assert "sequence_id" in item
+        assert "sequence" in item
         assert "coords" in item
         assert "masks" in item
         assert "nan_masks" in item
         # indices should NOT be present
-        assert "indices" not in item
+        assert "structure_tokens" not in item
 
     def test_coords_shape(self, tmp_path):
         """Coords tensor has correct shape [max_length, 3, 3]."""
@@ -151,7 +150,7 @@ class TestStructureFolderDataset:
         
         item = ds[0]
         
-        assert len(item["seq"]) == max_length
+        assert len(item["sequence"]) == max_length
         assert item["coords"].shape == (max_length, 3, 3)
         assert item["masks"].all()  # All positions valid after truncation
 
@@ -202,7 +201,7 @@ END
         ds = StructureFolderDataset(folder, max_length=16, chain_id="B")
         item = ds[0]
         
-        assert item["seq"] == "M"
+        assert item["sequence"] == "M"
 
     def test_has_coords_attribute(self, tmp_path):
         """Dataset has has_coords=True for compatibility."""

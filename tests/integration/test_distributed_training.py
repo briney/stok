@@ -1,6 +1,8 @@
 import json
 import sys
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 import os
@@ -58,15 +60,15 @@ def test_two_rank_checkpoint_write_failure_exits(tmp_path):
 
 
 def write_probe_data(root, n=17, eval_n=5):
-    rows = [{'pid': str(i), 'protein_sequence': 'LAG', 'indices': [i]*3} for i in range(n)]
-    frame = pd.DataFrame(rows)
-    frame.assign(indices=frame.indices.map(lambda x: ' '.join(map(str, x)))).to_csv(root/'train.csv', index=False)
+    rows = [{'sequence_id': str(i), 'sequence': 'LAG', 'structure_tokens': [i]*3} for i in range(n)]
+    table = pa.Table.from_pylist(rows)
+    pq.write_table(table, root/'train.parquet')
     (root/'shards').mkdir()
-    frame.iloc[:7].to_parquet(root/'shards/a.parquet', index=False)
-    frame.iloc[7:].to_parquet(root/'shards/b.parquet', index=False)
-    frame.iloc[:eval_n].assign(indices=lambda f: f.indices.map(lambda x: ' '.join(map(str, x)))).to_csv(root/'eval.csv', index=False)
+    pq.write_table(table.slice(0, 7), root/'shards/a.parquet')
+    pq.write_table(table.slice(7), root/'shards/b.parquet')
+    pq.write_table(table.slice(0, eval_n), root/'eval.parquet')
     (root/'eval_shards').mkdir()
-    frame.iloc[:eval_n].to_parquet(root/'eval_shards/a.parquet', index=False)
+    pq.write_table(table.slice(0, eval_n), root/'eval_shards/a.parquet')
 
 
 @pytest.mark.parametrize('workers', [0, 2])
@@ -119,9 +121,9 @@ def test_empty_label_rank_matches_global_reference(tmp_path):
     import torch
     write_probe_data(tmp_path, n=8)
     order = torch.randperm(8, generator=torch.Generator().manual_seed(1337)).tolist()
-    frame = pd.read_csv(tmp_path/'train.csv')
-    frame['indices'] = ['-1 -1 -1' if i in order[::2] else '0 1 2' for i in range(8)]
-    frame.to_csv(tmp_path/'train.csv', index=False)
+    frame = pd.read_parquet(tmp_path/'train.parquet')
+    frame['structure_tokens'] = [[None] * 3 if i in order[::2] else [0, 1, 2] for i in range(8)]
+    frame.to_parquet(tmp_path/'train.parquet', index=False)
     command = [sys.executable, '-m', 'tests.utils.distributed_probe', '--case', 'empty-labels',
                '--output', str(tmp_path), '--accum', '2']
     result = subprocess.run(command, env=training_env(), capture_output=True, text=True, timeout=30)
@@ -138,8 +140,9 @@ def test_empty_label_rank_matches_global_reference(tmp_path):
 
 
 def test_rank_local_bad_input_exits_all_ranks(tmp_path):
-    source = tmp_path/'bad.csv'
-    source.write_text('pid,protein_sequence,indices\na,LAG,9999 0 1\nb,LAG,0 1 2\n')
+    source = tmp_path/'bad.parquet'
+    pd.DataFrame({'sequence_id': ['a', 'b'], 'sequence': ['LAG'] * 2,
+                  'structure_tokens': [[9999, 0, 1], [0, 1, 2]]}).to_parquet(source, index=False)
     for result in run_distributed(training_command(tmp_path/'run', f'data.train={source}',
                                   'data.batch_size=1'), timeout=15):
         assert result.returncode != 0
@@ -147,8 +150,9 @@ def test_rank_local_bad_input_exits_all_ranks(tmp_path):
 
 
 def test_two_rank_globally_empty_pass_does_not_checkpoint(tmp_path):
-    source = tmp_path/'empty.csv'
-    source.write_text('pid,protein_sequence,indices\na,LAG,-1 -1 -1\nb,LAG,-1 -1 -1\n')
+    source = tmp_path/'empty.parquet'
+    pq.write_table(pa.table({'sequence_id': ['a', 'b'], 'sequence': ['LAG'] * 2,
+        'structure_tokens': pa.array([[None] * 3] * 2, type=pa.list_(pa.int64()))}), source)
     for result in run_distributed(training_command(tmp_path/'run', f'data.train={source}', 'data.batch_size=1')):
         assert result.returncode != 0
         assert 'no successful optimizer update' in result.stderr
@@ -159,9 +163,11 @@ def test_two_rank_globally_empty_pass_does_not_checkpoint(tmp_path):
 def test_evaluation_failure_reaches_every_rank(tmp_path, case):
     write_probe_data(tmp_path)
     if case == 'eval-empty':
-        frame = pd.read_csv(tmp_path/'eval.csv')
-        frame['indices'] = '-1 -1 -1'
-        frame.to_csv(tmp_path/'eval.csv', index=False)
+        frame = pd.read_parquet(tmp_path/'eval.parquet')
+        pq.write_table(pa.table({
+            'sequence_id': frame.sequence_id.tolist(), 'sequence': frame.sequence.tolist(),
+            'structure_tokens': pa.array([[None] * 3] * len(frame), type=pa.list_(pa.int64())),
+        }), tmp_path/'eval.parquet')
     command = [sys.executable, '-m', 'tests.utils.distributed_probe', '--case', case,
                '--output', str(tmp_path)]
     for result in run_distributed(command):

@@ -15,9 +15,9 @@ def _write_shard(dir_path: Path, name: str, rows: int, indices_len: int = 5):
         seq = "ACDEFGHIKLMNPQRSTVWY"[: (6 + (i % 10))]
         data.append(
             {
-                "pid": f"{name}_{i}",
-                "protein_sequence": seq,
-                "indices": list(range(len(seq))),
+                "sequence_id": f"{name}_{i}",
+                "sequence": seq,
+                "structure_tokens": list(range(len(seq))),
             }
         )
     df = pd.DataFrame(data)
@@ -44,8 +44,8 @@ def test_iterable_epoch_shuffle_changes_order(tmp_path):
     _write_shard(d, "y", rows=4)
     ds = IterableTokenizedDataset(d.as_posix(), max_length=16, shuffle_shards=True, shuffle_rows=True, seed=0)
     # collect pids for two epochs and ensure order differs
-    epoch1 = [item["pid"] for item in ds]
-    epoch2 = [item["pid"] for item in ds]
+    epoch1 = [item["sequence_id"] for item in ds]
+    epoch2 = [item["sequence_id"] for item in ds]
     assert len(epoch1) == len(epoch2) == len(ds)
     assert epoch1 != epoch2
 
@@ -56,7 +56,7 @@ def test_mixed_optional_columns_and_required_schema(tmp_path):
     from stok.utils.tokenizer import Tokenizer
     import torch
     _write_shard(tmp_path, 'a', 1)
-    df = pd.DataFrame([{'pid': 'b', 'protein_sequence': 'LA', 'indices': [1, 2],
+    df = pd.DataFrame([{'sequence_id': 'b', 'sequence': 'LA', 'structure_tokens': [1, 2],
                         'coordinates': [[[0., 0., 0.]]*3]*2}])
     df.to_parquet(tmp_path/'b.parquet', index=False)
     ds = IterableTokenizedDataset(str(tmp_path), max_length=8, shuffle_shards=False,
@@ -66,6 +66,6 @@ def test_mixed_optional_columns_and_required_schema(tmp_path):
     assert coords.shape == (2, 8, 3, 3)
     assert torch.isnan(coords[0]).all()
     assert torch.isfinite(coords[1, 1:3]).all()
-    df.drop(columns='indices').to_parquet(tmp_path/'bad.parquet', index=False)
-    with pytest.raises(ValueError, match='bad.parquet.*indices'):
+    df.drop(columns='structure_tokens').to_parquet(tmp_path/'bad.parquet', index=False)
+    with pytest.raises(ValueError, match='bad.parquet.*structure_tokens'):
         IterableTokenizedDataset(str(tmp_path), max_length=8)

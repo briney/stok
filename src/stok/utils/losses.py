@@ -26,7 +26,7 @@ def token_ce_loss(
     if (supervised & ((labels_flat < 0) | (labels_flat >= C))).any():
         raise ValueError(f"Target class IDs must be in [0, {C}) or ignore_index")
     if not supervised.any():
-        return logits.sum() * 0.0
+        return (logits * 0.0).sum()
     return F.cross_entropy(logits.reshape(-1, C), labels_flat,
                            ignore_index=ignore_index, reduction=reduction)
 

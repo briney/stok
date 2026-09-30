@@ -58,7 +58,7 @@ def mlm_collate(
       - remaining are kept unchanged
 
     Args:
-        batch: List of dicts with 'seq' key containing amino acid sequences.
+        batch: List of dicts with 'sequence' key containing amino acid sequences.
             May also contain 'coords' key with coordinate tensors [L, 3, 3].
         tokenizer: Tokenizer instance for encoding sequences.
         max_len: Maximum sequence length.
@@ -99,10 +99,10 @@ def mlm_collate(
     coords_list: list[torch.Tensor] = []
 
     for item in batch:
-        seq: str = item["seq"]
+        seq: str = item["sequence"]
         sample_generator = generator
         if eval_seed is not None:
-            identity = json.dumps([eval_seed, dataset_name, item.get("pid"), seq],
+            identity = json.dumps([eval_seed, dataset_name, item.get("sequence_id"), seq],
                                   ensure_ascii=False, separators=(",", ":")).encode()
             seed = int.from_bytes(hashlib.blake2b(identity, digest_size=8).digest(), "big")
             sample_generator = torch.Generator().manual_seed(seed)

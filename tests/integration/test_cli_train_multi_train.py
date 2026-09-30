@@ -1,4 +1,5 @@
-import csv
+import pyarrow as pa
+import pyarrow.parquet as pq
 from pathlib import Path
 
 from click.testing import CliRunner
@@ -7,26 +8,24 @@ from stok.cli.cli import cli
 from tests.utils.synthetic import random_protein_sequence
 
 
-def _write_csv(path: Path, n_rows: int, seq_min_len: int, seq_max_len: int, indices_len: int):
+def _write_parquet(path: Path, n_rows: int, seq_min_len: int, seq_max_len: int):
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["pid", "protein_sequence", "indices"])  # header
-        for i in range(n_rows):
-            seq = random_protein_sequence(seq_min_len, seq_max_len)
-            writer.writerow([f"p{i}", seq, " ".join(["0"] * len(seq))])
+    rows = []
+    for i in range(n_rows):
+        seq = random_protein_sequence(seq_min_len, seq_max_len)
+        rows.append({"sequence_id": f"p{i}", "sequence": seq, "structure_tokens": [0] * len(seq)})
+    pq.write_table(pa.Table.from_pylist(rows), path)
 
 
 def test_cli_train_with_multiple_train_datasets_and_fractions(tmp_path):
     runner = CliRunner()
 
     max_len = 16
-    indices_len = max_len - 2
 
-    train_a = tmp_path / "train_a.csv"
-    train_b = tmp_path / "train_b.csv"
-    _write_csv(train_a, n_rows=8, seq_min_len=12, seq_max_len=28, indices_len=indices_len)
-    _write_csv(train_b, n_rows=8, seq_min_len=12, seq_max_len=28, indices_len=indices_len)
+    train_a = tmp_path / "train_a.parquet"
+    train_b = tmp_path / "train_b.parquet"
+    _write_parquet(train_a, n_rows=8, seq_min_len=12, seq_max_len=28)
+    _write_parquet(train_b, n_rows=8, seq_min_len=12, seq_max_len=28)
 
     overrides = [
         # multiple train datasets via dict keys + fractions

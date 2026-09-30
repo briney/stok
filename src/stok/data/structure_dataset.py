@@ -26,8 +26,8 @@ class StructureFolderDataset(Dataset):
 
     This dataset is designed for evaluation with structure-based metrics.
     Each structure file produces one sample with:
-      - pid: structure identifier (filename stem)
-      - seq: amino acid sequence extracted from structure
+      - sequence_id: structure identifier (filename stem)
+      - sequence: amino acid sequence extracted from structure
       - coords: backbone coordinates [max_length, 3, 3] for N, CA, C atoms
       - masks: boolean mask [max_length] for valid positions
       - nan_masks: same as masks (all backbone atoms present or NaN)
@@ -106,7 +106,6 @@ class StructureFolderDataset(Dataset):
         # Flags for compatibility with existing dataset code
         self.has_coords = bool(load_coords)
         self.has_labels = False
-        self._is_parquet = False
 
     def __len__(self) -> int:
         """Return number of structure files in the dataset."""
@@ -120,13 +119,13 @@ class StructureFolderDataset(Dataset):
 
         Returns:
             Dict with keys:
-                - pid (str): Structure identifier
-                - seq (str): Amino acid sequence
+                - sequence_id (str): Structure identifier
+                - sequence (str): Amino acid sequence
                 - coords (Tensor): [max_length, 3, 3] backbone coordinates
                 - masks (Tensor): [max_length] boolean mask for valid positions
                 - nan_masks (Tensor): [max_length] same as masks
 
-            Note: 'indices' key is NOT included (not available for raw structures).
+            Note: 'structure_tokens' key is NOT included (not available for raw structures).
         """
         path = self._files[idx]
 
@@ -157,8 +156,8 @@ class StructureFolderDataset(Dataset):
         mask = [True] * seq_len + [False] * pad_len
 
         out: dict[str, torch.Tensor | str] = {
-            "pid": data.pid,
-            "seq": seq,
+            "sequence_id": data.pid,
+            "sequence": seq,
             "coords": torch.tensor(coords_padded, dtype=torch.float32),
             "masks": torch.tensor(mask, dtype=torch.bool),
             "nan_masks": torch.tensor(mask, dtype=torch.bool),

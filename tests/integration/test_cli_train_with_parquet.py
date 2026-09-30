@@ -11,15 +11,15 @@ from tests.utils.synthetic import random_protein_sequence
 pytest.importorskip("pyarrow")
 
 
-def _write_parquet(path: Path, n_rows: int, seq_min_len: int, seq_max_len: int, indices_len: int):
+def _write_parquet(path: Path, n_rows: int, seq_min_len: int, seq_max_len: int):
     path.parent.mkdir(parents=True, exist_ok=True)
     rows = []
     for i in range(n_rows):
         seq = random_protein_sequence(seq_min_len, seq_max_len)
         rows.append({
-            "pid": f"p{i}",
-            "protein_sequence": seq,
-            "indices": [0] * len(seq),
+            "sequence_id": f"p{i}",
+            "sequence": seq,
+            "structure_tokens": [0] * len(seq),
         })
     df = pd.DataFrame(rows)
     df.to_parquet(path, index=False)
@@ -29,12 +29,11 @@ def test_cli_train_with_parquet_e2e(tmp_path):
     runner = CliRunner()
 
     max_len = 16
-    indices_len = max_len - 2  # align with token positions excluding BOS/EOS
 
     train_pq = tmp_path / "train.parquet"
     eval_pq = tmp_path / "eval.parquet"
-    _write_parquet(train_pq, n_rows=8, seq_min_len=12, seq_max_len=28, indices_len=indices_len)
-    _write_parquet(eval_pq, n_rows=4, seq_min_len=12, seq_max_len=28, indices_len=indices_len)
+    _write_parquet(train_pq, n_rows=8, seq_min_len=12, seq_max_len=28)
+    _write_parquet(eval_pq, n_rows=4, seq_min_len=12, seq_max_len=28)
 
     overrides = [
         f"data.train={train_pq.as_posix()}",

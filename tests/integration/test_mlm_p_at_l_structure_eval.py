@@ -41,9 +41,9 @@ class TestStructureDatasetPipeline:
 
         # Check first sample
         sample = ds[0]
-        assert "seq" in sample, "Sample should have 'seq' key"
+        assert "sequence" in sample, "Sample should have 'sequence' key"
         assert "coords" in sample, "Sample should have 'coords' key"
-        assert isinstance(sample["seq"], str), "Sequence should be a string"
+        assert isinstance(sample["sequence"], str), "Sequence should be a string"
         assert isinstance(sample["coords"], torch.Tensor), "Coords should be a tensor"
 
         # Verify coords shape: [max_length, 3, 3]
@@ -52,8 +52,8 @@ class TestStructureDatasetPipeline:
         )
 
         # Verify sequence length is reasonable for real proteins
-        assert len(sample["seq"]) >= 10, (
-            f"Real protein sequences should be >= 10 residues, got {len(sample['seq'])}"
+        assert len(sample["sequence"]) >= 10, (
+            f"Real protein sequences should be >= 10 residues, got {len(sample['sequence'])}"
         )
 
     def test_mlm_collate_preserves_coords(self):
@@ -462,16 +462,16 @@ class TestEndToEndMLMWithCameoEval:
             pytest.skip("CAMEO test data not found")
 
         # Create minimal MLM training data
-        train_csv = tmp_path / "train.csv"
+        train_parquet = tmp_path / "train.parquet"
         df = pd.DataFrame(
             {
-                "pid": [f"train_{i}" for i in range(10)],
-                "protein_sequence": [
+                "sequence_id": [f"train_{i}" for i in range(10)],
+                "sequence": [
                     "MVLSPADKTNVKAAWGKVGAHAGEYGAEALERMFLSFPTT"[:30] for _ in range(10)
                 ],
             }
         )
-        df.to_csv(train_csv, index=False)
+        df.to_parquet(train_parquet, index=False)
 
         runner = CliRunner()
         overrides = [
@@ -487,7 +487,7 @@ class TestEndToEndMLMWithCameoEval:
             "data.max_len=256",  # Enough for real proteins
             "data.num_workers=0",
             "data.pin_memory=false",
-            f"data.train={train_csv.as_posix()}",
+            f"data.train={train_parquet.as_posix()}",
             # Use CAMEO structure folder for eval
             f"+data.eval.cameo.path={CAMEO_TEST_DATA.as_posix()}",
             "+data.eval.cameo.format=structure",
@@ -531,16 +531,16 @@ class TestEndToEndMLMWithCameoEval:
         if not CAMEO_TEST_DATA.exists():
             pytest.skip("CAMEO test data not found")
 
-        train_csv = tmp_path / "train.csv"
+        train_parquet = tmp_path / "train.parquet"
         df = pd.DataFrame(
             {
-                "pid": [f"train_{i}" for i in range(10)],
-                "protein_sequence": [
+                "sequence_id": [f"train_{i}" for i in range(10)],
+                "sequence": [
                     "MVLSPADKTNVKAAWGKVGAHAGEYGAEALERMFLSFPTT"[:30] for _ in range(10)
                 ],
             }
         )
-        df.to_csv(train_csv, index=False)
+        df.to_parquet(train_parquet, index=False)
 
         runner = CliRunner()
         overrides = [
@@ -556,7 +556,7 @@ class TestEndToEndMLMWithCameoEval:
             "data.max_len=256",
             "data.num_workers=0",
             "data.pin_memory=false",
-            f"data.train={train_csv.as_posix()}",
+            f"data.train={train_parquet.as_posix()}",
             # Pass directory directly - should auto-detect as structure folder
             f"+data.eval.cameo={CAMEO_TEST_DATA.as_posix()}",
             "train.eval.metrics.p_at_l.enabled=true",
@@ -576,29 +576,29 @@ class TestEndToEndMLMWithCameoEval:
         Verify p_at_l is NOT computed when coords are not available.
         This ensures the metric correctly respects its requirements.
         """
-        # Create CSV dataset without coords
-        train_csv = tmp_path / "train.csv"
-        eval_csv = tmp_path / "eval.csv"
+        # Create Parquet dataset without coords
+        train_parquet = tmp_path / "train.parquet"
+        eval_parquet = tmp_path / "eval.parquet"
 
         df = pd.DataFrame(
             {
-                "pid": [f"train_{i}" for i in range(10)],
-                "protein_sequence": [
+                "sequence_id": [f"train_{i}" for i in range(10)],
+                "sequence": [
                     "MVLSPADKTNVKAAWGKVGAHAGEYGAEALERMFLSFPTT"[:30] for _ in range(10)
                 ],
             }
         )
-        df.to_csv(train_csv, index=False)
+        df.to_parquet(train_parquet, index=False)
 
         eval_df = pd.DataFrame(
             {
-                "pid": [f"eval_{i}" for i in range(5)],
-                "protein_sequence": [
+                "sequence_id": [f"eval_{i}" for i in range(5)],
+                "sequence": [
                     "MNIFEMLRIDKGLQVVAVKAPGFGDNRKNQ"[:25] for _ in range(5)
                 ],
             }
         )
-        eval_df.to_csv(eval_csv, index=False)
+        eval_df.to_parquet(eval_parquet, index=False)
 
         runner = CliRunner()
         overrides = [
@@ -614,8 +614,8 @@ class TestEndToEndMLMWithCameoEval:
             "data.max_len=64",
             "data.num_workers=0",
             "data.pin_memory=false",
-            f"data.train={train_csv.as_posix()}",
-            f"+data.eval.validation={eval_csv.as_posix()}",
+            f"data.train={train_parquet.as_posix()}",
+            f"+data.eval.validation={eval_parquet.as_posix()}",
             # Don't enable p_at_l explicitly - it requires coords
             "train.num_steps=4",
             "train.log_steps=2",

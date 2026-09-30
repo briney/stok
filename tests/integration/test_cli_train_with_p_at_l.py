@@ -7,32 +7,23 @@ from click.testing import CliRunner
 from stok.cli.cli import cli
 
 
-def _generate_coords_string(length: int) -> str:
-    """Generate a mock coords string for testing.
-
-    Returns a space-separated string of 9 * length floats representing
-    N, CA, C coordinates for each residue.
-    """
-    # Generate random coords in a reasonable range
-    rng = np.random.RandomState(42)
-    coords = rng.randn(length, 3, 3) * 5.0  # [L, 3_atoms, 3_xyz]
-    flat = coords.flatten()
-    return " ".join(f"{x:.4f}" for x in flat)
+def _generate_coords(length: int) -> list:
+    return (np.random.RandomState(42).randn(length, 3, 3) * 5.0).tolist()
 
 
 def test_cli_train_mlm_with_p_at_l_disabled(tmp_path):
     """Test that MLM training works with P@L disabled (default)."""
     # Create minimal data with coords
-    train_csv = tmp_path / "train.csv"
+    train_parquet = tmp_path / "train.parquet"
     seq = "MKTAYIAKQRQISFVK"
     train_data = pd.DataFrame(
         {
-            "pid": [f"train_{i}" for i in range(10)],
-            "protein_sequence": [seq for _ in range(10)],
-            "coords": [_generate_coords_string(len(seq)) for _ in range(10)],
+            "sequence_id": [f"train_{i}" for i in range(10)],
+            "sequence": [seq for _ in range(10)],
+            "coordinates": [_generate_coords(len(seq)) for _ in range(10)],
         }
     )
-    train_data.to_csv(train_csv, index=False)
+    train_data.to_parquet(train_parquet, index=False)
 
     runner = CliRunner()
     overrides = [
@@ -48,7 +39,7 @@ def test_cli_train_mlm_with_p_at_l_disabled(tmp_path):
         "data.max_len=32",
         "data.num_workers=0",
         "data.pin_memory=false",
-        f"data.train={train_csv.as_posix()}",
+        f"data.train={train_parquet.as_posix()}",
         "train.num_steps=3",
         "train.log_steps=1",
         "train.eval.steps=100000",  # Don't trigger eval
@@ -70,27 +61,27 @@ def test_cli_train_mlm_with_p_at_l_enabled(tmp_path):
     or hidden states from the model.
     """
     # Create minimal data with coords
-    train_csv = tmp_path / "train.parquet"
-    eval_csv = tmp_path / "eval.parquet"
+    train_parquet = tmp_path / "train.parquet"
+    eval_parquet = tmp_path / "eval.parquet"
     seq = "MKTAYIAKQRQISFVK"
 
     train_data = pd.DataFrame(
         {
-            "pid": [f"train_{i}" for i in range(10)],
-            "protein_sequence": [seq for _ in range(10)],
+            "sequence_id": [f"train_{i}" for i in range(10)],
+            "sequence": [seq for _ in range(10)],
             "coordinates": [np.random.default_rng(42).normal(size=(len(seq), 3, 3)).tolist() for _ in range(10)],
         }
     )
-    train_data.to_parquet(train_csv, index=False)
+    train_data.to_parquet(train_parquet, index=False)
 
     eval_data = pd.DataFrame(
         {
-            "pid": [f"eval_{i}" for i in range(5)],
-            "protein_sequence": [seq for _ in range(5)],
+            "sequence_id": [f"eval_{i}" for i in range(5)],
+            "sequence": [seq for _ in range(5)],
             "coordinates": [np.random.default_rng(42).normal(size=(len(seq), 3, 3)).tolist() for _ in range(5)],
         }
     )
-    eval_data.to_parquet(eval_csv, index=False)
+    eval_data.to_parquet(eval_parquet, index=False)
 
     runner = CliRunner()
     overrides = [
@@ -107,8 +98,8 @@ def test_cli_train_mlm_with_p_at_l_enabled(tmp_path):
         "data.num_workers=0",
         "data.pin_memory=false",
         "data.load_coords=true",
-        f"data.train={train_csv.as_posix()}",
-        f"+data.eval.validation={eval_csv.as_posix()}",
+        f"data.train={train_parquet.as_posix()}",
+        f"+data.eval.validation={eval_parquet.as_posix()}",
         "train.num_steps=4",
         "train.log_steps=2",
         "train.eval.steps=2",
@@ -128,25 +119,25 @@ def test_cli_train_mlm_with_p_at_l_enabled(tmp_path):
 def test_p_at_l_metric_config_override(tmp_path):
     """Test that P@L metric config can be overridden per-dataset."""
     # Create minimal data
-    train_csv = tmp_path / "train.csv"
-    eval_csv = tmp_path / "eval.csv"
+    train_parquet = tmp_path / "train.parquet"
+    eval_parquet = tmp_path / "eval.parquet"
     seq = "MKTAYIAKQRQISFVK"
 
     train_data = pd.DataFrame(
         {
-            "pid": [f"train_{i}" for i in range(10)],
-            "protein_sequence": [seq for _ in range(10)],
+            "sequence_id": [f"train_{i}" for i in range(10)],
+            "sequence": [seq for _ in range(10)],
         }
     )
-    train_data.to_csv(train_csv, index=False)
+    train_data.to_parquet(train_parquet, index=False)
 
     eval_data = pd.DataFrame(
         {
-            "pid": [f"eval_{i}" for i in range(5)],
-            "protein_sequence": [seq for _ in range(5)],
+            "sequence_id": [f"eval_{i}" for i in range(5)],
+            "sequence": [seq for _ in range(5)],
         }
     )
-    eval_data.to_csv(eval_csv, index=False)
+    eval_data.to_parquet(eval_parquet, index=False)
 
     runner = CliRunner()
     overrides = [
@@ -162,8 +153,8 @@ def test_p_at_l_metric_config_override(tmp_path):
         "data.max_len=32",
         "data.num_workers=0",
         "data.pin_memory=false",
-        f"data.train={train_csv.as_posix()}",
-        f"+data.eval.validation.path={eval_csv.as_posix()}",
+        f"data.train={train_parquet.as_posix()}",
+        f"+data.eval.validation.path={eval_parquet.as_posix()}",
         # Override metrics for this specific eval dataset
         # (P@L won't run without coords, but config parsing should work)
         "train.num_steps=4",
