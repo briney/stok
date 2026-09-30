@@ -570,5 +570,8 @@ def scatter_reduce(
     idx = index.unsqueeze(-1).expand_as(x)
 
     out.scatter_reduce_(dim, idx, x, reduce=reduce, include_self=False)
+    if reduce in ("amax", "amin"):
+        occupied = torch.bincount(index, minlength=dim_size) > 0
+        out = out.masked_fill(~occupied[:, None], 0)
     return out
     # return torch.scatter_reduce(out, dim, idx, x, reduce=reduce, include_self=False)

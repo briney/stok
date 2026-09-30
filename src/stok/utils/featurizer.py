@@ -21,11 +21,10 @@ class ProteinFeaturiser(nn.Module):
 
     Args:
         representation (str): Target structural representation. Currently, this
-            module operates on C-alpha backbone coordinates ("ca_bb").
+            module operates on C-alpha backbone coordinates ("CA" / "ca_bb").
         scalar_node_features (list[str]): Per-node scalar features to compute.
             Supported: "amino_acid_one_hot", "alpha", "kappa",
-            "dihedrals", and "sequence_positional_encoding" (instantiated but
-            not applied here).
+            "dihedrals", and the required "sequence_positional_encoding".
         vector_node_features (list[str]): Per-node vector features to compute.
             Supported: "orientation".
         edge_types (list[str]): Edge construction strategy identifiers. This
@@ -39,8 +38,8 @@ class ProteinFeaturiser(nn.Module):
     Note:
         If "sequence_positional_encoding" is included, a
         :class:`torch_geometric.nn.encoding.PositionalEncoding` module is
-        created and exposed as ``self.positional_encoding`` but not applied in
-        this class. Downstream models can use it as needed.
+        created as ``self.positional_encoding`` and its 16 features are prepended
+        to the scalar features using the explicit dense residue positions.
     """
 
     def __init__(
@@ -59,6 +58,10 @@ class ProteinFeaturiser(nn.Module):
         vector_edge_features: list[str] = ["edge_vectors"],
     ):
         super(ProteinFeaturiser, self).__init__()
+        if "sequence_positional_encoding" not in scalar_node_features:
+            raise ValueError(
+                "The supported featurizer requires sequence positional encoding"
+            )
         self.representation = representation
         self.scalar_node_features = scalar_node_features
         self.vector_node_features = vector_node_features
