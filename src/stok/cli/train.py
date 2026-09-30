@@ -1036,18 +1036,13 @@ def run_training(cfg: DictConfig):
 
     # resolve project directories and save config (main only)
     io_dirs = _resolve_project_dirs(cfg)
+    output_error = None
     if is_main:
-        _ensure_dirs(
-            [
-                io_dirs["root"],
-                io_dirs["model"],
-                io_dirs["checkpoints"],
-                io_dirs["logs"],
-                io_dirs["configs"],
-            ]
-        )
-    if accelerator:
-        accelerator.wait_for_everyone()
+        try:
+            _ensure_dirs(list(io_dirs.values()))
+        except Exception as exc:
+            output_error = f"{type(exc).__name__}: {exc}"
+    _raise_rank_errors(output_error, accelerator, "Creating project directories failed")
 
     # Load codebook only for codebook objective
     codebook = None
@@ -1169,8 +1164,13 @@ def run_training(cfg: DictConfig):
                         f"{int(E.shape[1])}"
                     )
 
+    output_error = None
     if is_main:
-        _save_config_snapshot(cfg, io_dirs["configs"] / "run.yaml")
+        try:
+            _save_config_snapshot(cfg, io_dirs["configs"] / "run.yaml")
+        except Exception as exc:
+            output_error = f"{type(exc).__name__}: {exc}"
+    _raise_rank_errors(output_error, accelerator, "Saving configuration failed")
 
     # optimizer
     optimizer = AdamW(
@@ -1259,8 +1259,13 @@ def run_training(cfg: DictConfig):
         console_enabled = bool(console_cfg.get("enabled", True))
     # console progbar renders to stdout only, text lines are also logged separately to file
     log_file_handle = None
+    output_error = None
     if is_main:
-        log_file_handle = (io_dirs["logs"] / "train.log").open("a", encoding="utf-8")
+        try:
+            log_file_handle = (io_dirs["logs"] / "train.log").open("a", encoding="utf-8")
+        except Exception as exc:
+            output_error = f"{type(exc).__name__}: {exc}"
+    _raise_rank_errors(output_error, accelerator, "Opening training log failed")
     console = ConsoleLogger(
         total_steps=max_steps,
         initial_step=global_step,

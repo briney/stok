@@ -57,6 +57,26 @@ def test_two_rank_checkpoint_write_failure_exits(tmp_path):
         assert 'Checkpoint failed' in result.stderr
 
 
+@pytest.mark.parametrize(
+    'target,context',
+    [
+        ('checkpoints', 'Creating project directories failed'),
+        ('configs/run.yaml', 'Saving configuration failed'),
+        ('logs/train.log', 'Opening training log failed'),
+    ],
+)
+def test_project_output_failure_reaches_every_rank(tmp_path, target, context):
+    path = tmp_path / target
+    if target == 'checkpoints':
+        path.write_text('not a directory')
+    else:
+        path.mkdir(parents=True)
+    results = run_distributed(training_command(tmp_path), timeout=15)
+    for result in results:
+        assert result.returncode != 0
+        assert context in result.stderr, result.stdout + result.stderr
+
+
 
 
 def write_probe_data(root, n=17, eval_n=5):

@@ -148,8 +148,8 @@ Execute the listed order for a simple serial workflow. Tasks 4, 5, and 11 are in
 
 **Interfaces:** keep `run_training(cfg)` unchanged. Use the existing CLI for process-isolated smoke/checkpoint checks. Task 5 creates the rank-diagnostic probe when coverage tests first need it; do not scaffold unused probe cases in this task.
 
-- [ ] Add a dev extra containing pytest/Ruff, following the current tool versions chosen during environment setup; record the versions. Create a clean environment, install `.[dev]`, run `pytest tests/unit -q`, and record existing unrelated failures. A dependency/collection failure is not an expected regression-test failure.
-- [ ] Add time-bounded process tests. Launch the actual entry point for checkpointing; add the separate probe only for cases needing rank diagnostics. Reuse the existing Hydra composition pattern for local tests. The following is the checkpoint regression core:
+- [x] Add a dev extra containing pytest/Ruff, following the current tool versions chosen during environment setup; record the versions. Create a clean environment, install `.[dev]`, run `pytest tests/unit -q`, and record existing unrelated failures. A dependency/collection failure is not an expected regression-test failure.
+- [x] Add time-bounded process tests. Launch the actual entry point for checkpointing; add the separate probe only for cases needing rank diagnostics. Reuse the existing Hydra composition pattern for local tests. The following is the checkpoint regression core:
 
   ```python
   import os
@@ -174,8 +174,8 @@ Execute the listed order for a simple serial workflow. Tasks 4, 5, and 11 are in
   ```
 
   Add an undersized real Parquet case to `test_training_progress.py`: one typed row with `sequence_id`, `sequence`, and `structure_tokens`, batch size two, positive step budget, subprocess timeout, expected actionable nonzero exit. Also reject `grad_accum_steps < 1`, negative budgets, and zero log/eval intervals before the loop.
-- [ ] Run `pytest tests/integration/test_distributed_training.py tests/integration/test_training_progress.py -q`; first establish timeout/progress failures in the reviewed code.
-- [ ] Move checkpoint synchronization outside the main-rank write branch and propagate write failures across ranks before any rank exits. Count yielded batches per pass and raise on a zero-batch pass. Implement the core branch in this order:
+- [x] Run `pytest tests/integration/test_distributed_training.py tests/integration/test_training_progress.py -q`; first establish timeout/progress failures in the reviewed code.
+- [x] Move checkpoint synchronization outside the main-rank write branch and propagate write failures across ranks before any rank exits. Count yielded batches per pass and raise on a zero-batch pass. Implement the core branch in this order:
 
   ```python
   from accelerate.utils import gather_object
@@ -198,7 +198,7 @@ Execute the listed order for a simple serial workflow. Tasks 4, 5, and 11 are in
   ```
 
   Use the existing loop's checkpoint-due condition and step path. Put latest-file updating inside the same guarded writer operation, so its failure is also reported. The all-rank result gather is the synchronization; no main-only barrier remains. Ensure a failed writer reports the same error to all ranks instead of leaving them waiting.
-- [ ] Rerun those tests plus existing checkpoint/programmatic smoke coverage. Test an unwritable checkpoint target and require bounded failure on all ranks. Commit: `fix: prevent checkpoint and empty-loader training hangs`.
+- [x] Rerun those tests plus existing checkpoint/programmatic smoke coverage. Test an unwritable checkpoint target and require bounded failure on all ranks. Commit: `fix: prevent checkpoint and empty-loader training hangs`.
 
 ## Task 2 — Preserve residue identity through collation and decoding
 
@@ -694,3 +694,15 @@ the alignment, structure-folder, mixed-shard, worker, and two-process distribute
 regressions. Ruff, compileall, and whitespace checks also passed. The two skips
 remain accelerator-only cases; package builds and accelerator checks were not
 rerun for this follow-up. No push or merge was performed.
+
+
+## Task-by-task completion audit — September 29, 2026
+
+The task checkboxes record completed implementation and acceptance checks.
+Historical RED instructions were satisfied in the original implementation;
+new gaps use fresh failing regressions before fixes. Each task's current
+verification is recorded below and committed separately.
+
+| Task | Current acceptance and follow-up | Verification |
+|---|---|---|
+| 1 | Propagate main-rank directory, configuration, and log-opening failures before peers continue. Existing checkpoint and empty-loader safeguards retained. | Three new two-rank cases failed before the fix. Distributed, progress, checkpoint, programmatic, and wrapped-model modules: **40 passed**. |
