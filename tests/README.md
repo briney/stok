@@ -418,6 +418,17 @@ Install the project with `python -m pip install -e '.[dev]'`. Use
 Distributed regression tests launch two local processes and require loopback
 sockets; their subprocess timeouts prevent hangs from blocking the suite.
 
+The September 29 completion audit adds numeric nested Arrow coordinate-schema
+checks for both Parquet loaders, raw label-length rejection before truncation,
+FP16 empty-loss reduction overflow, two-rank output-directory/configuration/log
+startup failures (including a successful open followed by `/dev/full` write
+failure), unavailable training metric counts/perplexity overflow, FP16/BF16
+manual attention with float32 additive masks, and Accelerate environment
+accumulation overrides. These live in the existing Parquet, alignment, loss,
+distributed, training-progress/FAPE, attention, and train-helper modules.
+Each task's acceptance evidence and focused commit are recorded in the
+[completion audit](../docs/superpowers/plans/2026-09-22-technical-remediation.md#task-by-task-completion-audit--september-29-2026).
+
 ## Remediation coverage and limits (2026-09-22)
 
 The current acceptance matrix adds assertions beyond CLI exit status:

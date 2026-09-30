@@ -10,7 +10,7 @@
 
 **Spec:** [Technical analysis](../../TECHNICAL_ANALYSIS.md), findings F01–F19, committed in `5e80556`, supplies the historical requirements baseline. The [current input contract](../../../README.md#training-data-format), introduced in `1e59137` and preserved through the merge in `4d34046`, governs the schema and examples below.
 
-**Status:** Implemented and merged into `main`: remediation via PR #5 (`9a0d9dd`), followed by the Parquet schema changes via PR #6 (`53b3dec`). Updated September 29, 2026 for the current input contract. The coordinate-type validation follow-up identified in the September 29 plan review is implemented locally on `fix/parquet-coordinate-schema`; see Task 2 and the follow-up record below. Task checklists retain the original execution instructions; completion and validation evidence is recorded below and in the technical analysis. Pre-fix failure instructions describe the historical baseline, not expected failures in the current code.
+**Status:** Implemented and merged into `main`: remediation via PR #5 (`9a0d9dd`), followed by the Parquet schema changes via PR #6 (`53b3dec`). Updated September 29, 2026 for the current input contract. All 14 tasks and the coordinate-type follow-up were audited and completed locally on `fix/parquet-coordinate-schema`, with a focused commit per task and an additional independently reviewed startup-write correction; see the September 29 completion audit below. Task checklists record the September 29 completion audit while retaining the original execution instructions; current acceptance evidence is recorded below and in the technical analysis. Pre-fix failure instructions describe the historical baseline, not expected failures in the current code.
 
 ## Scope and design decisions
 
@@ -493,7 +493,7 @@ The probe accepts `--case coverage|eval-tail`, `--output PATH`, `--workers N`, a
 
 **Interfaces:** no new runtime API. Record finding status using F01–F19 with test references and commit hashes after implementation. Retain unresolved runtime/scientific validation boundaries explicitly.
 
-- [ ] Run a complete installed-environment baseline and final comparison, then the supported scenario matrix:
+- [x] Run a complete installed-environment baseline and final comparison, then the supported scenario matrix:
 
   | Scenario | Required assertion |
   |---|---|
@@ -509,7 +509,7 @@ The probe accepts `--case coverage|eval-tail`, `--output PATH`, `--workers N`, a
   | Accumulation 1/4, partial window, empty supervision | Reference-equivalent updates and scheduler counts. |
   | Supported accelerator autocast | Finite gradients and no advancement on skipped optimizer steps. |
 
-- [ ] Run concrete checks from an installed checkout:
+- [x] Run concrete checks from an installed checkout:
 
   ```bash
   python -m pytest tests/unit -q
@@ -531,9 +531,9 @@ The probe accepts `--case coverage|eval-tail`, `--output PATH`, `--workers N`, a
   ```
 
   Do not count duplicate invocation of the distributed module as additional evidence; its standalone command is for CI/debug reproduction.
-- [ ] Extend existing CI with the dev install, chosen lint rules, and a single bounded CPU two-process regression job configuration. Preserve Python 3.10 compatibility and package build checks. Document accelerator-only checks and their recorded hardware separately; do not claim them passed when skipped.
-- [ ] For scientific validation, record the exact Kabsch-aligned TM and C-alpha/contact definitions and compare synthetic known answers plus a small fixed structure subset with an agreed independent reference. Verify decoder/codebook preset pairing; custom same-dimension codebooks require a documented compatible decoder source, not just a successful shape check. Keep any unresolved reference disagreement visible rather than claiming equivalence.
-- [ ] Review all F01–F19 acceptance criteria, add test/commit evidence to the technical analysis, and record measured memory for Task 12. Commit: `test: validate remediation paths and document migration`.
+- [x] Extend existing CI with the dev install, chosen lint rules, and a single bounded CPU two-process regression job configuration. Preserve Python 3.10 compatibility and package build checks. Document accelerator-only checks and their recorded hardware separately; do not claim them passed when skipped.
+- [x] For scientific validation, record the exact Kabsch-aligned TM and C-alpha/contact definitions and compare synthetic known answers plus a small fixed structure subset with an agreed independent reference. Verify decoder/codebook preset pairing; custom same-dimension codebooks require a documented compatible decoder source, not just a successful shape check. Keep any unresolved reference disagreement visible rather than claiming equivalence.
+- [x] Review all F01–F19 acceptance criteria, add test/commit evidence to the technical analysis, and record measured memory for Task 12. Commit: `test: validate remediation paths and document migration`.
 
 ## Release gates and execution handoff
 
@@ -719,6 +719,8 @@ verification is recorded below and committed separately.
 | 12 | Verified selected-layer metadata/collection, equivalent logits/contact scores, retained-feature projections, rank/global budgets, and coordinated limit errors. Existing collection implementation and recorded FP32 GPU/host capacity measurements retained. | Task 11's **65 attention cases**, Task 9's **45 contact cases**, Task 8 evaluator cases, and Task 1 real distributed budget/gather cases cover this task. Fresh supported accelerator checks follow in Task 14. |
 | 13 | Verified early public-option rejection, deprecated-coordinate errors, atomic checkpoint durability, no implicit resume, packaged resources, and CLI behavior. Force Accelerate's internal accumulation factor to one even when its environment override is set, preserving manual global normalization. | The environment regression produced gradient 4 instead of 16 before the fix. Helpers/model/checkpoint/package/CLI modules: **42 passed**. |
 
+| 14 | Completed all supported scenario gates, independent review correction, current migration notes, scientific-reference checks, and wheel/source builds. Existing Python 3.10–3.13 CI matrix and bounded distributed job already satisfy the plan; retained without duplication. | Final CPU suite: **513 passed, 2 accelerator-only skipped**; Radeon FP16/BF16: **2 passed**. Lint, compilation, whitespace, package builds, and installed-wheel resources/CLI/typed-Parquet training smoke passed. |
+
 ### Final review follow-up
 
 The independent review of `5e52a35..d91e765` found one Important startup gap:
@@ -731,3 +733,49 @@ suite/build/accelerator acceptance because it is verified separately below, and
 retained the explicitly unsupported recovery/trainable/sharded and external
 scientific-quality boundaries. Later logging failures were unchanged and were
 not separately reproduced; this fix establishes the startup-output contract.
+
+### Final validation — September 29, 2026
+
+- The pre-audit checkout (`8f643fb`) passed **501 CPU tests, 2 skipped**.
+  The first combined run after Tasks 1–13 passed **512 tests, 2 skipped**
+  in 232.97 seconds. After the final review fix, the complete unit/integration
+  suite passed **513 tests, 2 skipped, 104 warnings** in 233.28 seconds.
+  Real CPU two-rank/worker tests and the independent CAMEO reference cases are
+  included in that count, rather than counted again as separate full-suite runs.
+- Both skipped real-decoder cases separately passed under FP16/BF16 autocast
+  on **Radeon 8060S Graphics**, torch `2.14.0+rocm7.2`, HIP `7.2.53211`.
+- Environment: Python 3.12.14, Accelerate 1.14.0, PyArrow 25.0.0, Hydra 1.3.7,
+  OmegaConf 2.3.1, x-transformers 2.31.2, pytest 9.1.1, Ruff 0.16.6.
+- Ruff E4/E7/E9/F, `compileall`, `git diff --check`, and wheel/sdist builds
+  (`python -m build --no-isolation`) passed. A fresh wheel installation outside
+  the source checkout, sharing already-installed dependencies without downloads,
+  resolved `stok` from the wheel environment, loaded base/lite codebooks and
+  packaged configuration, ran CLI help, and completed typed-Parquet training
+  with null labels and two microbatches per optimizer update. Final checkpoint
+  counters, scheduler/optimizer steps, and finite model tensors were asserted.
+- Task 12's original measured GPU/host capacity values remain in the technical
+  analysis with their exact FP32/B/H/L/layer settings. This audit verifies the
+  capacity contracts without presenting historical measurements as fresh ones.
+- Remote CI, every Python/platform combination, multi-GPU/NCCL, real distributed
+  AMP overflow, pretrained benchmark quality, and full recovery remain unvalidated
+  or explicitly unsupported as documented. No push or merge was performed.
+
+### Execution rulings retained at handoff
+
+- Apply population truthfulness to training logs as well as evaluation.
+  Cost: consumers must handle omitted unavailable token-score keys.
+- Reset the native Accelerate accumulation property after construction.
+  Cost if incorrect: optimizer gradients would have the wrong scale; the native
+  environment regression and reference-equivalent update tests passed.
+- The executor owns full-suite/build/accelerator acceptance, separately from
+  review. Cost if omitted: supported-path regressions would lack evidence;
+  actual acceptance checks above completed.
+- Retain unsupported resume/trainable CLI codebook or decoder/FSDP/DeepSpeed
+  policy. Cost: these modes cannot be used through the training CLI.
+- Do not claim full-capacity pretrained quality or TM-align/all-atom equivalence.
+  Cost: this validation supplies no external benchmark-quality guarantee.
+- Keep later logging failures outside the reproduced startup-write fix.
+  Cost: later writer failures can still lose rank-local context; they were not
+  separately reproduced or corrected in this completion audit.
+
+No deferred minor review findings remain.

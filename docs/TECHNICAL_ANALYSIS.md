@@ -1,5 +1,52 @@
 # STok Technical Analysis
 
+## Completion audit — September 29, 2026
+
+All 14 tasks were audited against the merged implementation and current typed
+Parquet contract, with a focused local commit per task. Correct existing paths
+were retained. The [task-by-task record](superpowers/plans/2026-09-22-technical-remediation.md#task-by-task-completion-audit--september-29-2026)
+contains their targeted acceptance evidence.
+
+Fresh regressions exposed and corrected these remaining cases:
+
+- F01/F02/F14: reject malformed nested coordinate Arrow schemas before converting
+  rows (`8f643fb`) and mismatched raw label lengths before truncation (`b7242bd`).
+- F04/F15: propagate rank-zero output-directory, configuration, and training-log
+  startup errors (`93662ac`). Final independent review also reproduced a
+  successful log open followed by a failed initial write; `557d109` moves that
+  write/flush into the existing coordinated handler.
+- F05: override Accelerate's environment-driven internal accumulation factor so
+  manual normalization is applied once (`d91e765`).
+- F09/F12: omit unavailable training token scores, expose observation counts,
+  and tolerate finite-loss perplexity exponent overflow (`dec801c`).
+- F16: preserve manual/SDPA forward and gradient parity with float32 additive
+  masks and FP16/BF16 values (`dd91305`).
+
+The requested finite-FP16 empty-CE reduction-overflow regression passes the
+existing multiply-before-sum implementation (`2331a79`); no production rewrite
+was needed. The independent review of `5e52a35..d91e765` found one Important
+startup-write issue, fixed with a failing-then-passing actual two-rank test.
+There were no other critical, important, or minor findings.
+
+Final acceptance: **513 CPU tests passed, 2 accelerator-only skipped** in
+233.28 seconds (104 warnings); the two skipped cases separately passed FP16/BF16
+real-decoder backward and optimizer updates on Radeon 8060S Graphics. The
+pre-audit checkout had 501 CPU passes. Python 3.12.14, torch `2.14.0+rocm7.2`,
+Accelerate 1.14.0, PyArrow 25.0.0, Hydra 1.3.7, OmegaConf 2.3.1,
+x-transformers 2.31.2, pytest 9.1.1, and Ruff 0.16.6 were used. Correctness lint,
+compilation, whitespace, wheel/sdist builds, and a fresh wheel installation's
+resource/CLI/typed-Parquet accumulation training smoke passed. The wheel smoke
+ran outside the repository and used existing dependencies without downloading
+or replacing the accelerator stack. The existing CI matrix already provides the
+requested dev install, lint/build checks, and bounded distributed CPU job.
+
+The previously recorded capacity measurements below remain historical;
+selected-layer retention and bounded logistic storage were freshly verified by
+the current attention/contact/evaluator/distributed tests. Scientific definitions
+and independent CAMEO/Biopython/NumPy references remain unchanged and are included
+in the full suite. Multi-GPU/NCCL, real distributed AMP overflow, pretrained
+benchmark quality, and recovery guarantees remain outside the validated scope.
+
 ## Remediation status — September 22, 2026
 
 The approved remediation corrects existing behavior and rejects unsupported
