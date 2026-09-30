@@ -68,8 +68,8 @@ def _kabsch(
 
         if mask is None:
             mask = torch.ones((B, L), device=device, dtype=torch.bool)
-        P = torch.where(mask[..., None], P, 0.).float()
-        Q = torch.where(mask[..., None], Q, 0.).float()
+        P = torch.where(mask[..., None], P, 0.0).float()
+        Q = torch.where(mask[..., None], Q, 0.0).float()
         w = mask.to(P.dtype)[..., None]  # [B, L, 1]
 
         # Weighted centroids
@@ -100,7 +100,9 @@ def _kabsch(
         t = (mu_Q - torch.einsum("bij,bj->bi", R, mu_P)).to(P.dtype)  # [B, 3]
 
         # A target must contain three noncollinear points to define rigid alignment.
-        enough = (mask.sum(dim=1) >= 3) & (torch.linalg.matrix_rank(Q_centered.float()) >= 2)
+        enough = (mask.sum(dim=1) >= 3) & (
+            torch.linalg.matrix_rank(Q_centered.float()) >= 2
+        )
         R = R.masked_fill(~enough[:, None, None], float("nan"))
         t = t.masked_fill(~enough[:, None], float("nan"))
 
@@ -130,7 +132,9 @@ def lddt_ca(
         B, L = pred.shape[:2]
         device = pred.device
 
-        pred, true, res_mask = sanitize_coordinates(pred, true, residue_mask, ca_only=True)
+        pred, true, res_mask = sanitize_coordinates(
+            pred, true, residue_mask, ca_only=True
+        )
 
         ca_pred = _get_atom(pred, "CA")  # [B, L, 3]
         ca_true = _get_atom(true, "CA")
@@ -140,7 +144,11 @@ def lddt_ca(
             # [B, L, L]
             x2 = (x**2).sum(dim=-1)  # [B, L]
             # dist^2 = ||x_i - x_j||^2
-            d2 = x2[:, :, None] + x2[:, None, :] - 2.0 * torch.einsum("bid,bjd->bij", x, x)
+            d2 = (
+                x2[:, :, None]
+                + x2[:, None, :]
+                - 2.0 * torch.einsum("bid,bjd->bij", x, x)
+            )
             return d2.clamp_min(0.0).sqrt()
 
         Dp = pairwise_dists(ca_pred)
@@ -201,7 +209,9 @@ def tm_score(
             raise ValueError("coords must be shaped [B, L, 3, 3] with atoms (N, CA, C)")
         B, L = pred.shape[:2]
 
-        pred, true, res_mask = sanitize_coordinates(pred, true, residue_mask, ca_only=True)
+        pred, true, res_mask = sanitize_coordinates(
+            pred, true, residue_mask, ca_only=True
+        )
 
         ca_pred = _get_atom(pred, "CA")  # [B, L, 3]
         ca_true = _get_atom(true, "CA")  # [B, L, 3]
@@ -246,7 +256,9 @@ def rmsd(
         if pred.shape != true.shape or pred.ndim != 4 or pred.shape[-2:] != (3, 3):
             raise ValueError("coords must be shaped [B, L, 3, 3] with atoms (N, CA, C)")
 
-        pred, true, res_mask = sanitize_coordinates(pred, true, residue_mask, ca_only=atom_set.lower() == "ca")
+        pred, true, res_mask = sanitize_coordinates(
+            pred, true, residue_mask, ca_only=atom_set.lower() == "ca"
+        )
 
         ca_pred = _get_atom(pred, "CA")
         ca_true = _get_atom(true, "CA")
@@ -300,7 +312,9 @@ def true_aligned_error(
             raise ValueError("coords must be shaped [B, L, 3, 3] with atoms (N, CA, C)")
         B, L = pred.shape[:2]
 
-        pred, true, res_mask = sanitize_coordinates(pred, true, residue_mask, ca_only=False)
+        pred, true, res_mask = sanitize_coordinates(
+            pred, true, residue_mask, ca_only=False
+        )
 
         atom_pred = _get_atom(pred, atom)  # [B, L, 3]
         atom_true = _get_atom(true, atom)  # [B, L, 3]

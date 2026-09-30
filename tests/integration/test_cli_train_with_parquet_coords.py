@@ -19,17 +19,21 @@ def _make_coords(L: int) -> list[list[list[float]]]:
     return out
 
 
-def _write_parquet_with_coords(path: Path, n_rows: int, seq_min_len: int, seq_max_len: int):
+def _write_parquet_with_coords(
+    path: Path, n_rows: int, seq_min_len: int, seq_max_len: int
+):
     path.parent.mkdir(parents=True, exist_ok=True)
     rows = []
     for i in range(n_rows):
         seq = random_protein_sequence(seq_min_len, seq_max_len)
-        rows.append({
-            "sequence_id": f"pc{i}",
-            "sequence": seq,
-            "structure_tokens": [0] * len(seq),
-            "coordinates": _make_coords(len(seq)),
-        })
+        rows.append(
+            {
+                "sequence_id": f"pc{i}",
+                "sequence": seq,
+                "structure_tokens": [0] * len(seq),
+                "coordinates": _make_coords(len(seq)),
+            }
+        )
     df = pd.DataFrame(rows)
     df.to_parquet(path, index=False)
 
@@ -74,4 +78,3 @@ def test_cli_train_with_parquet_and_coords_e2e(tmp_path):
     result = runner.invoke(cli, ["train", *overrides])  # type: ignore[arg-type]
     assert result.exit_code == 0, result.output
     assert "Training complete." in result.output
-

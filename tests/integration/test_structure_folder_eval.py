@@ -40,7 +40,7 @@ def _create_structure_folder(tmp_path: Path, n_files: int = 5) -> Path:
     """Create a folder with PDB structure files."""
     folder = tmp_path / "structures"
     folder.mkdir()
-    
+
     residue_sets = [
         ["ALA", "GLY", "SER", "VAL"],
         ["MET", "LYS", "ARG", "ASP"],
@@ -48,24 +48,28 @@ def _create_structure_folder(tmp_path: Path, n_files: int = 5) -> Path:
         ["PRO", "THR", "CYS", "ASN"],
         ["GLN", "HIS", "TRP", "GLU"],
     ]
-    
+
     for i in range(n_files):
         residues = residue_sets[i % len(residue_sets)]
         pdb_content = _generate_pdb_content(residues)
         (folder / f"protein_{i}.pdb").write_text(pdb_content)
-    
+
     return folder
 
 
-def _create_train_parquet(tmp_path: Path, n_rows: int, seq_len: int, indices_len: int) -> Path:
+def _create_train_parquet(
+    tmp_path: Path, n_rows: int, seq_len: int, indices_len: int
+) -> Path:
     """Create a training Parquet file with sequences and indices."""
     train_parquet = tmp_path / "train.parquet"
     rows = []
     for i in range(n_rows):
         seq = random_protein_sequence(seq_len, seq_len)
         indices = [j % 128 for j in range(len(seq))]
-        rows.append({"sequence_id": f"train_{i}", "sequence": seq, "structure_tokens": indices})
-    
+        rows.append(
+            {"sequence_id": f"train_{i}", "sequence": seq, "structure_tokens": indices}
+        )
+
     df = pd.DataFrame(rows)
     df.to_parquet(train_parquet, index=False)
     return train_parquet
@@ -78,7 +82,7 @@ def _create_mlm_train_parquet(tmp_path: Path, n_rows: int, seq_len: int) -> Path
     for i in range(n_rows):
         seq = random_protein_sequence(seq_len, seq_len)
         rows.append({"sequence_id": f"train_{i}", "sequence": seq})
-    
+
     df = pd.DataFrame(rows)
     df.to_parquet(train_parquet, index=False)
     return train_parquet
@@ -94,7 +98,9 @@ class TestStructureFolderEvalExplicit:
         max_len = 16
         indices_len = max_len - 2
 
-        train_parquet = _create_train_parquet(tmp_path, n_rows=8, seq_len=12, indices_len=indices_len)
+        train_parquet = _create_train_parquet(
+            tmp_path, n_rows=8, seq_len=12, indices_len=indices_len
+        )
         struct_folder = _create_structure_folder(tmp_path, n_files=4)
 
         overrides = [
@@ -140,7 +146,9 @@ class TestStructureFolderEvalAutoDetect:
         max_len = 16
         indices_len = max_len - 2
 
-        train_parquet = _create_train_parquet(tmp_path, n_rows=8, seq_len=12, indices_len=indices_len)
+        train_parquet = _create_train_parquet(
+            tmp_path, n_rows=8, seq_len=12, indices_len=indices_len
+        )
         struct_folder = _create_structure_folder(tmp_path, n_files=4)
 
         overrides = [
@@ -224,7 +232,9 @@ class TestStructureFolderMetricWhitelist:
         max_len = 16
         indices_len = max_len - 2
 
-        train_parquet = _create_train_parquet(tmp_path, n_rows=8, seq_len=12, indices_len=indices_len)
+        train_parquet = _create_train_parquet(
+            tmp_path, n_rows=8, seq_len=12, indices_len=indices_len
+        )
         struct_folder = _create_structure_folder(tmp_path, n_files=4)
 
         overrides = [
@@ -269,7 +279,9 @@ class TestStructureFolderChainId:
         max_len = 16
         indices_len = max_len - 2
 
-        train_parquet = _create_train_parquet(tmp_path, n_rows=8, seq_len=12, indices_len=indices_len)
+        train_parquet = _create_train_parquet(
+            tmp_path, n_rows=8, seq_len=12, indices_len=indices_len
+        )
         struct_folder = _create_structure_folder(tmp_path, n_files=4)
 
         overrides = [

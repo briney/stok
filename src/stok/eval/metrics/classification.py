@@ -1,4 +1,5 @@
 """Token-weighted classification metrics with explicit observation counts."""
+
 import math
 import torch
 from stok.eval.base import MetricBase
@@ -46,11 +47,16 @@ class AccuracyMetric(MetricBase):
         return result
 
     def reset(self):
-        self._correct = self._total = 0.
+        self._correct = self._total = 0.0
         self.reset_population()
 
     def state_tensors(self):
-        return [torch.tensor([self._correct, self._total, *self.population_values()], dtype=torch.float64)]
+        return [
+            torch.tensor(
+                [self._correct, self._total, *self.population_values()],
+                dtype=torch.float64,
+            )
+        ]
 
     def load_state_tensors(self, tensors):
         if tensors:
@@ -79,8 +85,12 @@ class PerplexityMetric(MetricBase):
         if not count:
             return
         if "logits" in outputs:
-            loss_sum = token_ce_loss(outputs["logits"], labels,
-                cfg.model.classifier.get("ignore_index", -100), reduction="sum")
+            loss_sum = token_ce_loss(
+                outputs["logits"],
+                labels,
+                cfg.model.classifier.get("ignore_index", -100),
+                reduction="sum",
+            )
         else:
             # Compatibility for callers supplying a mean CE instead of logits.
             loss_sum = outputs.get("classification_loss", outputs.get("loss"))
@@ -102,12 +112,17 @@ class PerplexityMetric(MetricBase):
         return result
 
     def reset(self):
-        self._loss_sum = 0.
+        self._loss_sum = 0.0
         self._token_count = 0
         self.reset_population()
 
     def state_tensors(self):
-        return [torch.tensor([self._loss_sum, self._token_count, *self.population_values()], dtype=torch.float64)]
+        return [
+            torch.tensor(
+                [self._loss_sum, self._token_count, *self.population_values()],
+                dtype=torch.float64,
+            )
+        ]
 
     def load_state_tensors(self, tensors):
         if tensors:

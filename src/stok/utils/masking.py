@@ -14,7 +14,8 @@ def key_padding_mask_from_tokens(tokens: torch.Tensor, pad_id: int) -> torch.Ten
     return tokens == pad_id
 
 
-def residue_mask_from_tokens(tokens: torch.Tensor, *, pad_id: int, bos_id: int,
-                             eos_id: int) -> torch.Tensor:
+def residue_mask_from_tokens(
+    tokens: torch.Tensor, *, pad_id: int, bos_id: int, eos_id: int
+) -> torch.Tensor:
     """Keep biological positions, including unknown and MLM-masked residues."""
     return (tokens != pad_id) & (tokens != bos_id) & (tokens != eos_id)

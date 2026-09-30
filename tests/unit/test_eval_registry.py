@@ -220,7 +220,9 @@ def test_build_metrics_passes_config_params():
     )
 
     metrics = build_metrics(cfg, objective="mlm", has_coords=True)
-    p_at_l = next((m for m in metrics if type(m).__name__ == "PrecisionAtLMetric"), None)
+    p_at_l = next(
+        (m for m in metrics if type(m).__name__ == "PrecisionAtLMetric"), None
+    )
 
     assert p_at_l is not None
     assert p_at_l.contact_threshold == 6.0
@@ -314,7 +316,9 @@ def test_build_metrics_only_with_override():
                         "path": "/path/to/hybrid.parquet",
                         "metrics": {
                             "only": ["accuracy"],  # Whitelist only accuracy
-                            "perplexity": {"enabled": True},  # But explicitly enable perplexity
+                            "perplexity": {
+                                "enabled": True
+                            },  # But explicitly enable perplexity
                         },
                     }
                 }
@@ -428,9 +432,7 @@ def test_build_metrics_per_dataset_has_coords_explicit():
     )
 
     # Build for seq_val with per-dataset has_coords=False
-    metrics = build_metrics(
-        cfg, objective="mlm", has_coords=True, eval_name="seq_val"
-    )
+    metrics = build_metrics(cfg, objective="mlm", has_coords=True, eval_name="seq_val")
     metric_names = {type(m).__name__ for m in metrics}
 
     # Actual loaded capability is authoritative
@@ -523,7 +525,9 @@ def test_build_metrics_combined_only_and_has_coords():
     )
     struct_names = {type(m).__name__ for m in struct_metrics}
 
-    assert "PrecisionAtLMetric" in struct_names  # In 'only' list, has coords via override
+    assert (
+        "PrecisionAtLMetric" in struct_names
+    )  # In 'only' list, has coords via override
 
 
 def test_build_metrics_structure_format_has_coords():
@@ -553,9 +557,7 @@ def test_build_metrics_structure_format_has_coords():
     )
 
     # Build for cameo dataset with format="structure"
-    metrics = build_metrics(
-        cfg, objective="mlm", has_coords=False, eval_name="cameo"
-    )
+    metrics = build_metrics(cfg, objective="mlm", has_coords=False, eval_name="cameo")
     metric_names = {type(m).__name__ for m in metrics}
 
     # PrecisionAtLMetric requires coords, must not infer availability from format="structure"
@@ -595,9 +597,7 @@ def test_build_metrics_auto_detect_structure_folder(tmp_path):
     )
 
     # Build for pdb_val dataset (metadata alone does not load coordinates structure folder)
-    metrics = build_metrics(
-        cfg, objective="mlm", has_coords=False, eval_name="pdb_val"
-    )
+    metrics = build_metrics(cfg, objective="mlm", has_coords=False, eval_name="pdb_val")
     metric_names = {type(m).__name__ for m in metrics}
 
     # PrecisionAtLMetric requires coords, must not infer availability from auto-detection
@@ -633,9 +633,7 @@ def test_build_metrics_auto_detect_mmcif_folder(tmp_path):
         }
     )
 
-    metrics = build_metrics(
-        cfg, objective="mlm", has_coords=False, eval_name="cif_val"
-    )
+    metrics = build_metrics(cfg, objective="mlm", has_coords=False, eval_name="cif_val")
     metric_names = {type(m).__name__ for m in metrics}
 
     # An existing suffix does not prove coordinates were loaded
@@ -679,41 +677,53 @@ def test_build_metrics_no_auto_detect_for_parquet_folder(tmp_path):
     assert "PrecisionAtLMetric" not in metric_names
 
 
-
 @pytest.fixture
 def default_config():
     from pathlib import Path
     from hydra import compose, initialize_config_dir
-    with initialize_config_dir(config_dir=str(Path(__file__).resolve().parents[2]/'src/stok/configs'), version_base=None):
-        cfg = compose(config_name='config')
+
+    with initialize_config_dir(
+        config_dir=str(Path(__file__).resolve().parents[2] / "src/stok/configs"),
+        version_base=None,
+    ):
+        cfg = compose(config_name="config")
         OmegaConf.set_struct(cfg, False)
         yield cfg
 
 
 def test_whitelist_enables_globally_disabled_metric(default_config, tmp_path):
     from stok.eval.registry import resolve_eval_metrics
+
     cfg = default_config
     cfg.train.eval.metrics.lddt.enabled = False
-    cfg.data.eval = {'pdb': {'path': str(tmp_path), 'format': 'structure', 'metrics': {'only': ['lddt']}}}
-    selected = resolve_eval_metrics(cfg, 'pdb', objective='codebook')
-    assert set(selected) == {'lddt'}
-    assert selected['lddt']['explicit'] is True
-    cfg.data.eval.pdb.metrics.lddt = {'enabled': False}
-    assert resolve_eval_metrics(cfg, 'pdb', objective='codebook') == {}
+    cfg.data.eval = {
+        "pdb": {
+            "path": str(tmp_path),
+            "format": "structure",
+            "metrics": {"only": ["lddt"]},
+        }
+    }
+    selected = resolve_eval_metrics(cfg, "pdb", objective="codebook")
+    assert set(selected) == {"lddt"}
+    assert selected["lddt"]["explicit"] is True
+    cfg.data.eval.pdb.metrics.lddt = {"enabled": False}
+    assert resolve_eval_metrics(cfg, "pdb", objective="codebook") == {}
 
 
 def test_auto_structure_flags_respect_explicit_false(default_config):
     from stok.eval.registry import resolve_eval_metrics
+
     cfg = default_config
     cfg.train.decoding.eval_enabled = True
     cfg.train.eval.metrics.tm_score.enabled = False
-    selected = resolve_eval_metrics(cfg, 'default', objective='codebook')
-    assert 'lddt' in selected and 'rmsd' in selected
-    assert 'tm_score' not in selected
+    selected = resolve_eval_metrics(cfg, "default", objective="codebook")
+    assert "lddt" in selected and "rmsd" in selected
+    assert "tm_score" not in selected
 
 
 def test_unknown_metric_request_rejected(default_config):
     from stok.eval.registry import resolve_eval_metrics
-    default_config.data.eval = {'val': {'path': 'x', 'metrics': {'only': ['typo']}}}
-    with pytest.raises(ValueError, match='Unknown metric'):
-        resolve_eval_metrics(default_config, 'val', objective='codebook')
+
+    default_config.data.eval = {"val": {"path": "x", "metrics": {"only": ["typo"]}}}
+    with pytest.raises(ValueError, match="Unknown metric"):
+        resolve_eval_metrics(default_config, "val", objective="codebook")

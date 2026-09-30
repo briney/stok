@@ -120,6 +120,7 @@ class MultiheadAttention(nn.Module):
         output = self.out(y)
 
         if need_weights:
+            assert attn_weights is not None
             return output, attn_weights
         return output
 

@@ -1,6 +1,5 @@
 """Unit tests for the MetricLogger class."""
 
-
 from stok.eval.logger import MetricLogger
 
 
@@ -247,7 +246,9 @@ def test_format_eval_message_metric_ordering():
     alpha_pos = msg.find("alpha_metric")
     zebra_pos = msg.find("zebra_metric")
 
-    assert ppl_pos < alpha_pos < zebra_pos, "Unknown metrics should be sorted after known ones"
+    assert ppl_pos < alpha_pos < zebra_pos, (
+        "Unknown metrics should be sorted after known ones"
+    )
 
 
 def test_format_eval_message_epoch_not_logged_twice():
@@ -312,11 +313,14 @@ def test_log_eval_epoch_in_metrics_not_duplicated():
     assert "P@L" in msg or "p_at_l" in msg
 
 
-
 def test_unavailable_metric_diagnostics_remain_visible():
     logger = MetricLogger(console=None, wandb=None, log_file=None, is_main=True)
-    message = logger._format_eval_message('validation',
-        {'rmsd/num_valid': 0., 'rmsd/num_skipped': 5., 'rmsd/num_failed': 0.}, 1, None)
-    assert 'rmsd unavailable' in message
-    assert 'rmsd/num_skipped' in message
-    assert 'RMSD 0.000' not in message
+    message = logger._format_eval_message(
+        "validation",
+        {"rmsd/num_valid": 0.0, "rmsd/num_skipped": 5.0, "rmsd/num_failed": 0.0},
+        1,
+        None,
+    )
+    assert "rmsd unavailable" in message
+    assert "rmsd/num_skipped" in message
+    assert "RMSD 0.000" not in message

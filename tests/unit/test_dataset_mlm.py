@@ -1,6 +1,5 @@
 """Tests for dataset support for MLM training (without indices column)."""
 
-
 import pandas as pd
 import pytest
 
@@ -21,7 +20,9 @@ class TestTokenizedDatasetMLM:
         )
         df.to_parquet(parquet_path, index=False)
 
-        ds = TokenizedDataset(str(parquet_path), max_length=32, require_structure_tokens=False)
+        ds = TokenizedDataset(
+            str(parquet_path), max_length=32, require_structure_tokens=False
+        )
 
         assert len(ds) == 3
 
@@ -42,10 +43,14 @@ class TestTokenizedDatasetMLM:
         )
         df.to_parquet(parquet_path, index=False)
 
-        ds = TokenizedDataset(str(parquet_path), max_length=32, require_structure_tokens=False)
+        ds = TokenizedDataset(
+            str(parquet_path), max_length=32, require_structure_tokens=False
+        )
 
         item = ds[0]
-        assert "structure_tokens" in item  # Should have indices since they're in the file
+        assert (
+            "structure_tokens" in item
+        )  # Should have indices since they're in the file
 
     def test_dataset_raises_error_when_indices_required_but_missing(self, tmp_path):
         """Test that dataset raises error when indices required but not present."""
@@ -59,7 +64,9 @@ class TestTokenizedDatasetMLM:
         df.to_parquet(parquet_path, index=False)
 
         with pytest.raises(ValueError, match="Missing required columns"):
-            TokenizedDataset(str(parquet_path), max_length=32, require_structure_tokens=True)
+            TokenizedDataset(
+                str(parquet_path), max_length=32, require_structure_tokens=True
+            )
 
     def test_dataset_seq_content(self, tmp_path):
         """Test that sequence content is correctly loaded."""
@@ -73,7 +80,9 @@ class TestTokenizedDatasetMLM:
         )
         df.to_parquet(parquet_path, index=False)
 
-        ds = TokenizedDataset(str(parquet_path), max_length=32, require_structure_tokens=False)
+        ds = TokenizedDataset(
+            str(parquet_path), max_length=32, require_structure_tokens=False
+        )
 
         for i, seq in enumerate(sequences):
             item = ds[i]
@@ -92,7 +101,9 @@ class TestTokenizedDatasetMLM:
         )
         df.to_parquet(parquet_path)
 
-        ds = TokenizedDataset(str(parquet_path), max_length=32, require_structure_tokens=False)
+        ds = TokenizedDataset(
+            str(parquet_path), max_length=32, require_structure_tokens=False
+        )
 
         assert len(ds) == 2
         item = ds[0]
@@ -147,6 +158,7 @@ class TestDummyMLMDataset:
             assert pid not in pids, f"Duplicate PID: {pid}"
             pids.add(pid)
 
+
 class TestIterableDatasetMLM:
     """Tests for IterableTokenizedDataset with require_structure_tokens=False."""
 
@@ -163,9 +175,7 @@ class TestIterableDatasetMLM:
             df = pd.DataFrame(
                 {
                     "sequence_id": [f"p{i}_{j}" for j in range(5)],
-                    "sequence": [
-                        f"MVLSPADKTNVKA{j}" for j in range(5)
-                    ],
+                    "sequence": [f"MVLSPADKTNVKA{j}" for j in range(5)],
                 }
             )
             df.to_parquet(shard_dir / f"shard_{i}.parquet")
@@ -188,13 +198,27 @@ class TestIterableDatasetMLM:
             # and the parquet files don't have an indices column
 
 
-
 def test_optional_missing_label_array_preserves_all_positions(tmp_path):
     from stok.data.dataset import TokenizedDataset
-    source = tmp_path/'mixed.parquet'
-    pd.DataFrame([{'sequence_id': 'unlabeled', 'sequence': 'LAG', 'structure_tokens': [None] * 3},
-                  {'sequence_id': 'labeled', 'sequence': 'LAG', 'structure_tokens': [0, 1, 2]}]).to_parquet(source)
-    dataset = TokenizedDataset(str(source), max_length=6, require_structure_tokens=False)
+
+    source = tmp_path / "mixed.parquet"
+    pd.DataFrame(
+        [
+            {
+                "sequence_id": "unlabeled",
+                "sequence": "LAG",
+                "structure_tokens": [None] * 3,
+            },
+            {
+                "sequence_id": "labeled",
+                "sequence": "LAG",
+                "structure_tokens": [0, 1, 2],
+            },
+        ]
+    ).to_parquet(source)
+    dataset = TokenizedDataset(
+        str(source), max_length=6, require_structure_tokens=False
+    )
     assert dataset.has_labels
-    assert dataset[0]['structure_tokens'].tolist() == [-1]*3
-    assert dataset[1]['structure_tokens'][:3].tolist() == [0, 1, 2]
+    assert dataset[0]["structure_tokens"].tolist() == [-1] * 3
+    assert dataset[1]["structure_tokens"][:3].tolist() == [0, 1, 2]

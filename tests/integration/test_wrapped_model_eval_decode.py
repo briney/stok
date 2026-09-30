@@ -11,8 +11,20 @@ def test_eval_decode_with_wrapped_model(monkeypatch, tmp_path):
     from stok.cli.train import run_training
     from stok.utils.codebook import load_codebook
     from stok.models.decoder import GeometricDecoder, _DECODER_ARCH
-    monkeypatch.setitem(_DECODER_ARCH, "lite", dict(d_model=32, n_heads=2, n_layers=1,
-        ffn_mult=1., max_length=128, num_memory_tokens=0, attn_kv_heads=1))
+
+    monkeypatch.setitem(
+        _DECODER_ARCH,
+        "lite",
+        dict(
+            d_model=32,
+            n_heads=2,
+            n_layers=1,
+            ffn_mult=1.0,
+            max_length=128,
+            num_memory_tokens=0,
+            attn_kv_heads=1,
+        ),
+    )
 
     # Build a tiny decoder ckpt matching the codebook preset
     codebook = load_codebook(preset="lite")
@@ -89,18 +101,24 @@ def test_eval_decode_with_wrapped_model(monkeypatch, tmp_path):
         def wait_for_everyone(self):
             pass
 
-    monkeypatch.setattr("stok.cli.train._maybe_get_accelerator", lambda: FakeAccelerator())
+    monkeypatch.setattr(
+        "stok.cli.train._maybe_get_accelerator", lambda: FakeAccelerator()
+    )
 
     from tests.integration.test_structure_folder_eval import _create_structure_folder
+
     eval_path = _create_structure_folder(tmp_path, n_files=2)
     from stok.eval import Evaluator
+
     evaluated = []
     original = Evaluator.evaluate
+
     def evaluate(self, *args, **kwargs):
         metrics = original(self, *args, **kwargs)
         evaluated.append(metrics)
         return metrics
-    monkeypatch.setattr(Evaluator, 'evaluate', evaluate)
+
+    monkeypatch.setattr(Evaluator, "evaluate", evaluate)
     overrides = [
         f"data.eval={eval_path}",
         # tiny model for speed
@@ -136,4 +154,3 @@ def test_eval_decode_with_wrapped_model(monkeypatch, tmp_path):
             cfg = compose(config_name="config", overrides=overrides)
     run_training(cfg)
     assert evaluated and evaluated[0]["lddt/num_valid"] == 2
-

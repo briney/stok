@@ -47,7 +47,10 @@ def test_dataset_parquet_with_coords_returns_coords_tensor(tmp_path):
     pad_after = coords[L0:]
     assert torch.isnan(pad_after).all()
     # Head matches the first residue pattern
-    np.testing.assert_allclose(coords[0].numpy(), np.array([[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32))
+    np.testing.assert_allclose(
+        coords[0].numpy(),
+        np.array([[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32),
+    )
 
 
 def test_dataset_parquet_without_coords_omits_key(tmp_path):
@@ -71,9 +74,10 @@ def test_dataset_parquet_without_coords_omits_key(tmp_path):
 
 def test_parser_preserves_missing_positions_and_rejects_bad_lengths(tmp_path):
     from stok.data.dataset import _build_output_from_row
-    row = {'sequence_id': 'p', 'sequence': 'LAG', 'structure_tokens': [7, None, 9]}
+
+    row = {"sequence_id": "p", "sequence": "LAG", "structure_tokens": [7, None, 9]}
     item = _build_output_from_row(row, max_length=6, has_coords=False)
-    assert item['structure_tokens'].tolist() == [7, -1, 9]
-    row['structure_tokens'] = [7, 9]
-    with pytest.raises(ValueError, match='p.*length'):
+    assert item["structure_tokens"].tolist() == [7, -1, 9]
+    row["structure_tokens"] = [7, 9]
+    with pytest.raises(ValueError, match="p.*length"):
         _build_output_from_row(row, max_length=6, has_coords=False)

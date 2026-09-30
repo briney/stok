@@ -28,7 +28,9 @@ def test_iterable_len_equals_total_rows_single_rank(tmp_path):
     d = tmp_path / "shards"
     _write_shard(d, "a", rows=5)
     _write_shard(d, "b", rows=7)
-    ds = IterableTokenizedDataset(d.as_posix(), max_length=16, shuffle_shards=False, shuffle_rows=False, seed=123)
+    ds = IterableTokenizedDataset(
+        d.as_posix(), max_length=16, shuffle_shards=False, shuffle_rows=False, seed=123
+    )
     # world_size=1 -> __len__ equals total rows
     assert len(ds) == 12
     # exhaust iterator to ensure it yields len(ds) items
@@ -42,7 +44,9 @@ def test_iterable_epoch_shuffle_changes_order(tmp_path):
     d = tmp_path / "shards2"
     _write_shard(d, "x", rows=4)
     _write_shard(d, "y", rows=4)
-    ds = IterableTokenizedDataset(d.as_posix(), max_length=16, shuffle_shards=True, shuffle_rows=True, seed=0)
+    ds = IterableTokenizedDataset(
+        d.as_posix(), max_length=16, shuffle_shards=True, shuffle_rows=True, seed=0
+    )
     # collect pids for two epochs and ensure order differs
     epoch1 = [item["sequence_id"] for item in ds]
     epoch2 = [item["sequence_id"] for item in ds]
@@ -50,22 +54,39 @@ def test_iterable_epoch_shuffle_changes_order(tmp_path):
     assert epoch1 != epoch2
 
 
-
 def test_mixed_optional_columns_and_required_schema(tmp_path):
     from stok.cli.train import _tokenize_and_align
     from stok.utils.tokenizer import Tokenizer
     import torch
-    _write_shard(tmp_path, 'a', 1)
-    df = pd.DataFrame([{'sequence_id': 'b', 'sequence': 'LA', 'structure_tokens': [1, 2],
-                        'coordinates': [[[0., 0., 0.]]*3]*2}])
-    df.to_parquet(tmp_path/'b.parquet', index=False)
-    ds = IterableTokenizedDataset(str(tmp_path), max_length=8, shuffle_shards=False,
-                                  shuffle_rows=False, load_coords=True)
+
+    _write_shard(tmp_path, "a", 1)
+    df = pd.DataFrame(
+        [
+            {
+                "sequence_id": "b",
+                "sequence": "LA",
+                "structure_tokens": [1, 2],
+                "coordinates": [[[0.0, 0.0, 0.0]] * 3] * 2,
+            }
+        ]
+    )
+    df.to_parquet(tmp_path / "b.parquet", index=False)
+    ds = IterableTokenizedDataset(
+        str(tmp_path),
+        max_length=8,
+        shuffle_shards=False,
+        shuffle_rows=False,
+        load_coords=True,
+    )
     batch = list(ds)
-    _, _, coords = _tokenize_and_align(batch, Tokenizer(), max_len=8, ignore_index=-100, pad_id=1)
+    _, _, coords = _tokenize_and_align(
+        batch, Tokenizer(), max_len=8, ignore_index=-100, pad_id=1
+    )
     assert coords.shape == (2, 8, 3, 3)
     assert torch.isnan(coords[0]).all()
     assert torch.isfinite(coords[1, 1:3]).all()
-    df.drop(columns='structure_tokens').to_parquet(tmp_path/'bad.parquet', index=False)
-    with pytest.raises(ValueError, match='bad.parquet.*structure_tokens'):
+    df.drop(columns="structure_tokens").to_parquet(
+        tmp_path / "bad.parquet", index=False
+    )
+    with pytest.raises(ValueError, match="bad.parquet.*structure_tokens"):
         IterableTokenizedDataset(str(tmp_path), max_length=8)

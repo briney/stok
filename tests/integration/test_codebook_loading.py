@@ -1,4 +1,3 @@
-
 import torch
 
 from stok.utils.codebook import load_codebook

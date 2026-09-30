@@ -190,7 +190,9 @@ class TestParseStructure:
         pdb_file = tmp_path / "empty.pdb"
         pdb_file.write_text("END\n")
 
-        with pytest.raises(ValueError, match="(No protein chain found|No models found)"):
+        with pytest.raises(
+            ValueError, match="(No protein chain found|No models found)"
+        ):
             parse_structure(pdb_file)
 
 
@@ -200,10 +202,26 @@ class TestAA3TO1Mapping:
     def test_standard_amino_acids(self):
         """All 20 standard amino acids are mapped."""
         standard = {
-            "ALA": "A", "CYS": "C", "ASP": "D", "GLU": "E", "PHE": "F",
-            "GLY": "G", "HIS": "H", "ILE": "I", "LYS": "K", "LEU": "L",
-            "MET": "M", "ASN": "N", "PRO": "P", "GLN": "Q", "ARG": "R",
-            "SER": "S", "THR": "T", "VAL": "V", "TRP": "W", "TYR": "Y",
+            "ALA": "A",
+            "CYS": "C",
+            "ASP": "D",
+            "GLU": "E",
+            "PHE": "F",
+            "GLY": "G",
+            "HIS": "H",
+            "ILE": "I",
+            "LYS": "K",
+            "LEU": "L",
+            "MET": "M",
+            "ASN": "N",
+            "PRO": "P",
+            "GLN": "Q",
+            "ARG": "R",
+            "SER": "S",
+            "THR": "T",
+            "VAL": "V",
+            "TRP": "W",
+            "TYR": "Y",
         }
         for three, one in standard.items():
             assert AA3TO1.get(three) == one
@@ -212,3 +230,8 @@ class TestAA3TO1Mapping:
         """Common non-standard amino acids are mapped."""
         assert AA3TO1.get("MSE") == "M"  # Selenomethionine
         assert AA3TO1.get("UNK") == "X"  # Unknown
+
+    def test_unknown_residue_code(self):
+        from stok.utils.structure_parser import _get_one_letter_code
+
+        assert _get_one_letter_code("ZZZ") == "X"

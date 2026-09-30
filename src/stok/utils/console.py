@@ -92,4 +92,3 @@ class ConsoleLogger:
         if self.step_bar is not None:
             self.step_bar.close()
             self.step_bar = None
-

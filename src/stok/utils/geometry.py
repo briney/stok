@@ -38,6 +38,8 @@ class fp32_autocast_context:
 
 @typing.runtime_checkable
 class Rotation(typing.Protocol):
+    def __init__(self, tensor: torch.Tensor) -> None: ...
+
     @classmethod
     def identity(cls, shape: tuple[int, ...], **tensor_kwargs) -> Self: ...
 
@@ -50,7 +52,7 @@ class Rotation(typing.Protocol):
     def tensor(self) -> torch.Tensor: ...
 
     @property
-    def shape(self) -> torch.Size: ...
+    def shape(self) -> tuple[int, ...]: ...
 
     def as_matrix(self) -> "RotationMatrix": ...
 
@@ -111,7 +113,7 @@ class RotationMatrix(Rotation):
         return RotationMatrix(self._rots[indices + (slice(None), slice(None))])
 
     @property
-    def shape(self) -> torch.Size:
+    def shape(self) -> tuple[int, ...]:
         return self._rots.shape[:-2]
 
     def as_matrix(self) -> "RotationMatrix":
@@ -166,7 +168,10 @@ class Affine3D:
         **tensor_kwargs,
     ) -> "Affine3D":
         if isinstance(shape_or_affine, Affine3D):
-            kwargs = {"dtype": shape_or_affine.dtype, "device": shape_or_affine.device}
+            kwargs: dict[str, typing.Any] = {
+                "dtype": shape_or_affine.dtype,
+                "device": shape_or_affine.device,
+            }
             kwargs.update(tensor_kwargs)
             shape = shape_or_affine.shape
             rotation_type = type(shape_or_affine.rot)
@@ -185,7 +190,7 @@ class Affine3D:
         )
 
     @property
-    def shape(self) -> torch.Size:
+    def shape(self) -> tuple[int, ...]:
         return self.trans.shape[:-1]
 
     @property
@@ -303,9 +308,13 @@ def _graham_schmidt(
         return rots
 
 
-def sanitize_coordinates(pred: torch.Tensor, true: torch.Tensor,
-                         residue_mask: torch.Tensor | None = None, *,
-                         ca_only: bool = False):
+def sanitize_coordinates(
+    pred: torch.Tensor,
+    true: torch.Tensor,
+    residue_mask: torch.Tensor | None = None,
+    *,
+    ca_only: bool = False,
+):
     """Exclude missing targets before arithmetic; never hide invalid predictions."""
     required_true = true[..., 1, :] if ca_only else true.flatten(-2)
     required_pred = pred[..., 1, :] if ca_only else pred.flatten(-2)
@@ -314,10 +323,15 @@ def sanitize_coordinates(pred: torch.Tensor, true: torch.Tensor,
         valid = valid & residue_mask.to(device=true.device, dtype=torch.bool)
     if (valid & ~torch.isfinite(required_pred).all(-1)).any():
         raise ValueError("Nonfinite predictions on valid ground-truth residues")
-    canonical = true.new_tensor([[-1., 0., 0.], [0., 0., 0.], [0., 1., 0.]])
+    canonical = true.new_tensor([[-1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
     # For CA metrics, other atoms are not observations and may be missing.
     atom_mask = valid[..., None, None]
     if ca_only:
-        atom_mask = atom_mask & (torch.arange(3, device=true.device)[None, :, None] == 1)
-    return (torch.where(atom_mask, pred, canonical).float(),
-            torch.where(atom_mask, true, canonical).float(), valid)
+        atom_mask = atom_mask & (
+            torch.arange(3, device=true.device)[None, :, None] == 1
+        )
+    return (
+        torch.where(atom_mask, pred, canonical).float(),
+        torch.where(atom_mask, true, canonical).float(),
+        valid,
+    )

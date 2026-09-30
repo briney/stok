@@ -506,10 +506,12 @@ class TestGatherMetricStatesRegression:
         mock_accel = MockAccelerator(num_processes=2)
 
         # Simulate two processes with different values
-        mock_accel.set_process_values([
-            torch.tensor([10.0, 20.0, 20., 0., 0.]),  # Process 0
-            torch.tensor([15.0, 30.0, 30., 0., 0.]),  # Process 1
-        ])
+        mock_accel.set_process_values(
+            [
+                torch.tensor([10.0, 20.0, 20.0, 0.0, 0.0]),  # Process 0
+                torch.tensor([15.0, 30.0, 30.0, 0.0, 0.0]),  # Process 1
+            ]
+        )
 
         evaluator = Evaluator(cfg, model, accelerator=mock_accel, decoder=None)
 
@@ -518,7 +520,7 @@ class TestGatherMetricStatesRegression:
 
         # Verify the metric state was correctly aggregated
         assert metric._correct == 25.0  # 10 + 15
-        assert metric._total == 50.0    # 20 + 30
+        assert metric._total == 50.0  # 20 + 30
 
     def test_structure_metrics_state_tensors_work(self):
         """Test that structure metrics can also handle gathered state tensors."""
@@ -536,7 +538,7 @@ class TestGatherMetricStatesRegression:
         assert state.shape == torch.Size([5])
 
         # Simulate 2-process gather
-        gathered = torch.tensor([0.8, 2.0, 2., 0., 0., 0.9, 3.0, 3., 1., 0.])
+        gathered = torch.tensor([0.8, 2.0, 2.0, 0.0, 0.0, 0.9, 3.0, 3.0, 1.0, 0.0])
 
         # Apply fixed reshape logic
         original_size = state.numel()
@@ -566,7 +568,25 @@ class TestGatherMetricStatesRegression:
         assert state.shape == torch.Size([5])
 
         # Simulate 3-process gather
-        gathered = torch.tensor([100., 500., 500., 0., 0., 150., 600., 600., 0., 0., 50., 400., 400., 0., 0.])
+        gathered = torch.tensor(
+            [
+                100.0,
+                500.0,
+                500.0,
+                0.0,
+                0.0,
+                150.0,
+                600.0,
+                600.0,
+                0.0,
+                0.0,
+                50.0,
+                400.0,
+                400.0,
+                0.0,
+                0.0,
+            ]
+        )
 
         original_size = state.numel()
         gathered_size = gathered.numel()
@@ -577,54 +597,61 @@ class TestGatherMetricStatesRegression:
         metric_combined = PrecisionAtLMetric()
         metric_combined.load_state_tensors([summed])
         assert metric_combined._correct_sum == 300.0  # 100 + 150 + 50
-        assert metric_combined._total_sum == 1500.0   # 500 + 600 + 400
-
+        assert metric_combined._total_sum == 1500.0  # 500 + 600 + 400
 
 
 def test_evaluation_preserves_incoming_mode():
     model = MockModel()
     model.eval()
     evaluator = Evaluator(_make_cfg(), model, None)
-    loader = DataLoader(TensorDataset(torch.tensor([[0, 4, 5, 2]]),
-                                    torch.tensor([[-100, 0, 1, -100]])))
-    evaluator.evaluate(loader, 'validation')
+    loader = DataLoader(
+        TensorDataset(torch.tensor([[0, 4, 5, 2]]), torch.tensor([[-100, 0, 1, -100]]))
+    )
+    evaluator.evaluate(loader, "validation")
     assert not model.training
 
 
 def test_evaluation_propagates_update_failure_and_restores_mode(monkeypatch):
     from stok.eval.metrics.classification import AccuracyMetric
+
     cfg = _make_cfg()
     model = MockModel()
     model.eval()
+
     def fail(*args, **kwargs):
-        raise RuntimeError('injected failure')
-    monkeypatch.setattr(AccuracyMetric, 'update', fail)
-    loader = DataLoader(TensorDataset(torch.tensor([[0, 4, 5, 2]]),
-                                    torch.tensor([[-100, 0, 1, -100]])))
-    with pytest.raises(RuntimeError, match='validation.*acc.*injected failure'):
-        Evaluator(cfg, model, None).evaluate(loader, 'validation')
+        raise RuntimeError("injected failure")
+
+    monkeypatch.setattr(AccuracyMetric, "update", fail)
+    loader = DataLoader(
+        TensorDataset(torch.tensor([[0, 4, 5, 2]]), torch.tensor([[-100, 0, 1, -100]]))
+    )
+    with pytest.raises(RuntimeError, match="validation.*acc.*injected failure"):
+        Evaluator(cfg, model, None).evaluate(loader, "validation")
     assert not model.training
 
 
 def test_explicit_metric_without_supervision_is_unavailable():
     cfg = _make_cfg()
-    cfg.data.eval = {'val': {'path': 'unused', 'metrics': {'only': ['accuracy']}}}
-    loader = DataLoader(TensorDataset(torch.tensor([[0, 4, 5, 2]]),
-                                    torch.full((1, 4), -100)))
-    with pytest.raises(RuntimeError, match='val.*acc.*num_valid=0'):
-        Evaluator(cfg, MockModel(), None).evaluate(loader, 'val')
+    cfg.data.eval = {"val": {"path": "unused", "metrics": {"only": ["accuracy"]}}}
+    loader = DataLoader(
+        TensorDataset(torch.tensor([[0, 4, 5, 2]]), torch.full((1, 4), -100))
+    )
+    with pytest.raises(RuntimeError, match="val.*acc.*num_valid=0"):
+        Evaluator(cfg, MockModel(), None).evaluate(loader, "val")
 
 
 def test_evaluation_restores_all_training_rngs():
     import random
     import numpy as np
+
     class RandomModel(MockModel):
         def forward(self, *args, **kwargs):
             random.random()
             np.random.rand()
             return super().forward(*args, **kwargs)
+
     cfg = _make_cfg()
-    cfg.train.eval.metrics.pop('masked_accuracy')
+    cfg.train.eval.metrics.pop("masked_accuracy")
     evaluator = Evaluator(cfg, RandomModel(), None)
     loader = _make_eval_loader()
     torch_state = torch.get_rng_state()

@@ -5,15 +5,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Iterable, NewType, Tuple
+from typing import Callable, Iterable, Literal, NewType, Tuple, overload, cast
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 # import torch_scatter
-from graphein.protein.tensor.data import ProteinBatch
-from torch_geometric.data import Batch
+from torch_geometric.data import Batch, Data
 
 EncoderOutput = NewType("EncoderOutput", dict[str, torch.Tensor])
 
@@ -206,6 +205,9 @@ class ScalarVector:
 class CachedGaussianRBF(torch.nn.Module):
     """Gaussian RBF sampler that caches basis centers on each device."""
 
+    _centers_cpu: torch.Tensor
+    _sigma_cpu: torch.Tensor
+
     def __init__(
         self,
         min_distance: float = 0.0,
@@ -267,7 +269,7 @@ class CachedGaussianRBF(torch.nn.Module):
 
 
 def centralize(
-    batch: Batch | ProteinBatch,
+    batch: Data,
     key: str,
     batch_index: torch.Tensor,
     node_mask: torch.Tensor | None = None,
@@ -329,7 +331,7 @@ def centralize(
 
 
 def decentralize(
-    batch: Batch | ProteinBatch,
+    batch: Data,
     key: str,
     batch_index: torch.Tensor,
     entities_centroid: torch.Tensor,
@@ -443,7 +445,8 @@ def _extract_batch_info(
     batch_like: Batch | torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, int]:
     if isinstance(batch_like, Batch):
-        index = batch_like.batch
+        index = cast(Data, batch_like).batch
+        assert index is not None
         num_graphs = batch_like.num_graphs
         lengths = torch.bincount(index, minlength=num_graphs)
     else:
@@ -493,6 +496,16 @@ def get_aggregation(aggregation: str) -> Callable:
     if aggregation in {"sum", "add"}:
         return pool_sum
     raise ValueError(f"Unknown aggregation function: {aggregation}")
+
+
+@overload
+def get_activations(
+    act_name: str, return_functional: Literal[False] = False
+) -> nn.Module: ...
+
+
+@overload
+def get_activations(act_name: str, return_functional: Literal[True]) -> Callable: ...
 
 
 def get_activations(

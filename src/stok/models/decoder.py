@@ -162,7 +162,7 @@ def _ensure_downloaded(preset: str, *, progress: bool = True) -> Path:
     cache_dir = _resolve_cache_dir()
     local_name = f"decoder-{preset}.pt"
     local_path = cache_dir / local_name
-    url = DECODER_URLS.get(preset)
+    url = DECODER_URLS[preset]
 
     # if the weights file already exists, return the existing weights file
     if local_path.exists() and local_path.is_file():
@@ -262,9 +262,9 @@ def load_pretrained_decoder(
         )
 
     model = GeometricDecoder(
-        d_model=arch["d_model"],
-        n_heads=arch["n_heads"],
-        n_layers=arch["n_layers"],
+        d_model=int(arch["d_model"]),
+        n_heads=int(arch["n_heads"]),
+        n_layers=int(arch["n_layers"]),
         ffn_mult=float(arch["ffn_mult"]),
         max_length=int(arch["max_length"]),
         d_code=inferred_d_code,

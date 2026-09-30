@@ -270,4 +270,3 @@ def test_cli_train_codebook_still_works(tmp_path):
     assert "Training objective: codebook" in result.output
     # Codebook training should log "acc" not "mask_acc"
     assert "acc" in result.output
-

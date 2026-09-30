@@ -172,7 +172,9 @@ class STokModel(nn.Module):
                     Only present if output_hidden_states=True.
         """
         if coords is not None:
-            raise ValueError("Coordinate/FAPE supervision belongs to the training loop, not STokModel.forward")
+            raise ValueError(
+                "Coordinate/FAPE supervision belongs to the training loop, not STokModel.forward"
+            )
         # embedding
         h = self.embed(tokens)  # [B, L, d_model]
 
@@ -205,8 +207,10 @@ class STokModel(nn.Module):
 
         # classify based on head type
         if self.head_type == "codebook":
+            assert self.classifier is not None
             logits = self.classifier(h)  # [B, L, C]
         else:  # mlm
+            assert self.lm_head is not None
             logits = self.lm_head(h)  # [B, L, vocab_size]
 
         loss = None
@@ -233,8 +237,11 @@ class STokModel(nn.Module):
         if output_attentions:
             result["attentions"] = all_attentions
             result["num_attention_layers"] = len(self.encoder.layers)
-            result["attention_layer_indices"] = (tuple(range(len(self.encoder.layers)))
-                if attention_layer_indices is None else tuple(attention_layer_indices))
+            result["attention_layer_indices"] = (
+                tuple(range(len(self.encoder.layers)))
+                if attention_layer_indices is None
+                else tuple(attention_layer_indices)
+            )
 
         if output_hidden_states:
             result["hidden_states"] = all_hidden_states

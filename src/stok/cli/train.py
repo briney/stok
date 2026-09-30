@@ -8,7 +8,7 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import numpy as np
 import torch
@@ -19,7 +19,6 @@ from torch.optim import AdamW
 from torch.utils.data import (
     ConcatDataset,
     DataLoader,
-    Dataset,
     IterableDataset,
     Sampler,
     DistributedSampler,
@@ -41,6 +40,7 @@ from stok.eval import Evaluator, MetricLogger
 from stok.eval.registry import METRIC_REGISTRY, resolve_eval_metrics
 from stok.models.decoder import load_pretrained_decoder
 from stok.models.stok import STokModel
+from stok.models.head import CodebookClassifier
 from stok.utils.codebook import load_codebook
 from stok.utils.console import ConsoleLogger
 from stok.utils.decoding import decode_token_aligned_coords, logits_to_soft_codes_gumbel
@@ -52,9 +52,12 @@ from stok.utils.tokenizer import Tokenizer
 
 def _maybe_get_accelerator():
     from accelerate import Accelerator
+
     accelerator = Accelerator()
     if accelerator.distributed_type.name not in {"NO", "MULTI_CPU", "MULTI_GPU"}:
-        raise ValueError(f"Unsupported distributed backend: {accelerator.distributed_type}; use replicated DDP")
+        raise ValueError(
+            f"Unsupported distributed backend: {accelerator.distributed_type}; use replicated DDP"
+        )
     accelerator.gradient_accumulation_steps = 1
     return accelerator
 
@@ -162,7 +165,7 @@ def _unwrap_model(model: nn.Module, accelerator) -> nn.Module:
 
 def _collect_rng_state() -> dict[str, Any]:
     # convert numpy RNG state to only primitives/lists to be loadable with weights_only=True
-    np_state = list(np.random.get_state())
+    np_state: list[Any] = list(np.random.get_state())
     try:
         # element 1 is the key array
         if hasattr(np_state[1], "tolist"):
@@ -280,14 +283,15 @@ def _tokenize_and_align(
 ):
     # if using DummySequenceDataset, batch is tuples(tokens, labels)
     if tokenizer is None:
-        tokens, labels = zip(*batch)  # type: ignore[arg-type]
+        tokens, labels = zip(*cast(list[tuple[torch.Tensor, torch.Tensor]], batch))
         return torch.stack(tokens, dim=0), torch.stack(labels, dim=0)
 
     # else TokenizedDataset dicts with 'sequence' and optionally 'structure_tokens'
     input_ids = []
     label_ids = []
     coords_batch: list[torch.Tensor] = []
-    for item in batch:  # type: ignore[assignment]
+    batch = cast(list[dict[str, Any]], batch)
+    for item in batch:
         seq: str = item["sequence"]
 
         if pad_id != tokenizer.pad_token_id:
@@ -307,10 +311,12 @@ def _tokenize_and_align(
                     f"Sample {item.get('sequence_id', '?')}: structure_tokens length must match sequence length"
                 )
             if num_classes is not None and (indices >= num_classes).any():
-                raise ValueError(f"Sample {item.get('sequence_id', '?')}: class ID out of range")
+                raise ValueError(
+                    f"Sample {item.get('sequence_id', '?')}: class ID out of range"
+                )
             copy_len = min(len(seq), L - 2)
             values = indices[:copy_len]
-            labels[1:1+copy_len] = values.masked_fill(values < 0, ignore_index)
+            labels[1 : 1 + copy_len] = values.masked_fill(values < 0, ignore_index)
 
         input_ids.append(ids)
         label_ids.append(labels)
@@ -532,17 +538,23 @@ def _build_dataloaders(
     train_configs = _parse_train_configs(cfg)
     objective = "mlm" if is_mlm else "codebook"
     fape_required = not is_mlm and bool(cfg.train.get("fape", {}).get("enabled", False))
+
     def coordinate_setting(options, needed, required=False):
         value = options.get("load_coords", user_load_coords)
         alias = options.get("has_coords")
         if alias is not None:
-            if "load_coords" in options and value is not None and bool(value) != bool(alias):
+            if (
+                "load_coords" in options
+                and value is not None
+                and bool(value) != bool(alias)
+            ):
                 raise ValueError("Conflicting has_coords and load_coords settings")
             value = alias
         if value is False and required:
-            raise ValueError("load_coords=false conflicts with requested structure supervision/metrics")
+            raise ValueError(
+                "load_coords=false conflicts with requested structure supervision/metrics"
+            )
         return bool(needed) if value is None else bool(value), value is True
-
 
     tokenizer: Optional[Tokenizer] = None
     collate_fn = None
@@ -579,14 +591,16 @@ def _build_dataloaders(
                 folder_path=str(p),
                 max_length=max_len,
                 chain_id=chain_id,
-                recursive=recursive, load_coords=load_coords,
+                recursive=recursive,
+                load_coords=load_coords,
             )
             return ds
 
         # heuristic: directory containing parquet shards -> Iterable; else map-style
         if p.is_dir():
             has_parquet = any(
-                f.is_file() and f.suffix.lower() in PARQUET_EXTENSIONS for f in p.iterdir()
+                f.is_file() and f.suffix.lower() in PARQUET_EXTENSIONS
+                for f in p.iterdir()
             )
             if has_parquet:
                 shuffle_shards = bool(getattr(cfg.data, "shuffle_shards", True))
@@ -611,7 +625,8 @@ def _build_dataloaders(
                     folder_path=str(p),
                     max_length=max_len,
                     chain_id=chain_id,
-                    recursive=recursive, load_coords=load_coords,
+                    recursive=recursive,
+                    load_coords=load_coords,
                 )
 
             raise ValueError(f"{p}: expected a directory containing Parquet shards")
@@ -658,36 +673,44 @@ def _build_dataloaders(
 
         if len(train_configs) == 1:
             # Single dataset (backwards compatible)
-            train_load, force_coords = coordinate_setting(train_configs[0], fape_required, fape_required)
+            train_load, force_coords = coordinate_setting(
+                train_configs[0], fape_required, fape_required
+            )
             train_ds = _pick_dataset(
                 str(train_configs[0]["path"]),
                 train_load,
                 require_structure_tokens=not is_mlm,
             )
             if force_coords and not train_ds.has_coords:
-                raise ValueError("load_coords=true requires a coordinate-capable training source")
+                raise ValueError(
+                    "load_coords=true requires a coordinate-capable training source"
+                )
         else:
             # Multiple datasets with fractions
-            ds_pairs: list[tuple[Dataset | IterableDataset, float]] = []
+            ds_pairs = []
             for tcfg in train_configs:
-                t_load_coords, force_coords = coordinate_setting(tcfg, fape_required, fape_required)
+                t_load_coords, force_coords = coordinate_setting(
+                    tcfg, fape_required, fape_required
+                )
                 ds = _pick_dataset(
                     str(tcfg["path"]),
                     t_load_coords,
                     require_structure_tokens=not is_mlm,
                 )
                 if force_coords and not ds.has_coords:
-                    raise ValueError(f"load_coords=true requires coordinates: {tcfg['path']}")
+                    raise ValueError(
+                        f"load_coords=true requires coordinates: {tcfg['path']}"
+                    )
                 ds_pairs.append((ds, float(tcfg["fraction"])))
 
             any_iterable = any(isinstance(ds, IterableDataset) for ds, _ in ds_pairs)
             if any_iterable:
                 # Convert map-style datasets to iterable wrappers, then interleave
-                iterables: list[IterableDataset] = []
+                iterables: list[IterableTokenizedDataset | MapAsIterableDataset] = []
                 fracs: list[float] = []
                 total_samples = 0
                 for ds, frac in ds_pairs:
-                    if isinstance(ds, IterableDataset):
+                    if isinstance(ds, IterableTokenizedDataset):
                         itds = ds
                     else:
                         itds = MapAsIterableDataset(
@@ -709,18 +732,27 @@ def _build_dataloaders(
                 )
             else:
                 # Efficient mixture sampler over a ConcatDataset
-                map_datasets: list[Dataset] = [ds for ds, _ in ds_pairs]  # type: ignore[list-item]
+                map_datasets = [ds for ds, _ in ds_pairs]
                 lengths = [int(len(ds)) for ds in map_datasets]
                 fracs = [float(fr) for _, fr in ds_pairs]
                 concat = ConcatDataset(map_datasets)
                 sampler = MixtureSampler(
                     lengths=lengths,
-                    rank=rank, world_size=world_size,
+                    rank=rank,
+                    world_size=world_size,
                     fractions=fracs,
                     seed=int(cfg.train.get("seed", 1337)),
                 )
-                concat.has_coords = any(getattr(ds, "has_coords", False) for ds in map_datasets)
-                concat.has_labels = any(getattr(ds, "has_labels", True) for ds in map_datasets)
+                setattr(
+                    concat,
+                    "has_coords",
+                    any(getattr(ds, "has_coords", False) for ds in map_datasets),
+                )
+                setattr(
+                    concat,
+                    "has_labels",
+                    any(getattr(ds, "has_labels", True) for ds in map_datasets),
+                )
                 train_ds = concat
                 train_sampler = sampler
     else:
@@ -746,6 +778,7 @@ def _build_dataloaders(
 
             collate_fn = collate
         else:
+            assert codebook_size is not None
             train_ds = DummySequenceDataset(
                 num_samples=512,
                 seq_len=min(max_len, 256),
@@ -797,11 +830,17 @@ def _build_dataloaders(
     if max_len < 3:
         raise ValueError("data.max_len must be >= 3")
     if tokenizer is not None:
-        if tokenizer.pad_token_id != pad_id or len(tokenizer) != int(cfg.model.encoder.vocab_size):
+        if tokenizer.pad_token_id != pad_id or len(tokenizer) != int(
+            cfg.model.encoder.vocab_size
+        ):
             raise ValueError("Model vocabulary and pad_id must match tokenizer")
         for key in ("bos_id", "eos_id"):
-            OmegaConf.update(cfg, f"model.encoder.{key}",
-                             getattr(tokenizer, key.replace("_id", "_token_id")), force_add=True)
+            OmegaConf.update(
+                cfg,
+                f"model.encoder.{key}",
+                getattr(tokenizer, key.replace("_id", "_token_id")),
+                force_add=True,
+            )
 
     def _make_dl_kwargs(batch_sz: int):
         kwargs = {
@@ -815,15 +854,26 @@ def _build_dataloaders(
             kwargs["prefetch_factor"] = prefetch_factor
         return kwargs
 
-    if is_iterable:
+    if isinstance(
+        train_ds,
+        (IterableTokenizedDataset, MapAsIterableDataset, InterleavedIterableDataset),
+    ):
         train_ds.training_batch_size = batch_size
         train_ds.num_workers = num_workers
         dropped = train_ds.num_samples - _usable_samples(train_ds)
         if rank == 0 and dropped:
-            print(f"Training stream drops {dropped} samples per pass for complete rank/worker batches")
+            print(
+                f"Training stream drops {dropped} samples per pass for complete rank/worker batches"
+            )
     elif train_sampler is None:
-        train_sampler = DistributedSampler(train_ds, num_replicas=world_size, rank=rank,
-            shuffle=True, seed=int(cfg.train.get("seed", 1337)), drop_last=True)
+        train_sampler = DistributedSampler(
+            train_ds,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=True,
+            seed=int(cfg.train.get("seed", 1337)),
+            drop_last=True,
+        )
     if train_sampler is not None:
         train_loader = DataLoader(
             train_ds,  # type: ignore[arg-type]
@@ -841,6 +891,7 @@ def _build_dataloaders(
     train_loader.collate_fn = train_collate_fn or train_loader.collate_fn
     if isinstance(train_ds, DummySequenceDataset):
         from torch.utils.data import default_collate
+
         train_loader.collate_fn = default_collate
     eval_loaders: dict[str, DataLoader] = {}
     for name, eval_cfg in eval_configs.items():
@@ -848,9 +899,13 @@ def _build_dataloaders(
         eval_batch_size = int(eval_cfg.get("batch_size", batch_size))
         resolved = resolve_eval_metrics(cfg, name, objective=objective)
         needs_coords = any(METRIC_REGISTRY[key].requires_coords for key in resolved)
-        requires_coords = any(settings["explicit"] and METRIC_REGISTRY[key].requires_coords
-                              for key, settings in resolved.items())
-        eval_load_coords, force_coords = coordinate_setting(eval_cfg, needs_coords, requires_coords)
+        requires_coords = any(
+            settings["explicit"] and METRIC_REGISTRY[key].requires_coords
+            for key, settings in resolved.items()
+        )
+        eval_load_coords, force_coords = coordinate_setting(
+            eval_cfg, needs_coords, requires_coords
+        )
         # Extract structure folder format options
         eval_format = eval_cfg.get("format")
         eval_chain_id = eval_cfg.get("chain_id")
@@ -867,14 +922,24 @@ def _build_dataloaders(
             allow_structure_folders=True,
         )
         if force_coords and not ds.has_coords:
-            raise ValueError(f"Dataset {name}: load_coords=true requires a coordinate-capable source")
+            raise ValueError(
+                f"Dataset {name}: load_coords=true requires a coordinate-capable source"
+            )
         for metric_name, settings in resolved.items():
             if not settings["explicit"]:
                 continue
             if METRIC_REGISTRY[metric_name].requires_coords and not ds.has_coords:
-                raise ValueError(f"Dataset {name}, metric {metric_name}: missing coordinates")
-            if not is_mlm and metric_name in {"accuracy", "perplexity"} and not ds.has_labels:
-                raise ValueError(f"Dataset {name}, metric {metric_name}: missing labels")
+                raise ValueError(
+                    f"Dataset {name}, metric {metric_name}: missing coordinates"
+                )
+            if (
+                not is_mlm
+                and metric_name in {"accuracy", "perplexity"}
+                and not ds.has_labels
+            ):
+                raise ValueError(
+                    f"Dataset {name}, metric {metric_name}: missing labels"
+                )
         eval_cfg["load_coords"] = bool(ds.has_coords)
         if isinstance(ds, IterableDataset):
             ds.shuffle_shards = False
@@ -883,13 +948,23 @@ def _build_dataloaders(
         else:
             eval_sampler = range(rank, len(ds), world_size)
         eval_kwargs = _make_dl_kwargs(eval_batch_size)
-        eval_seed = int(cfg.train.get("eval", {}).get("seed", cfg.train.get("seed", 1337)))
+        eval_seed = int(
+            cfg.train.get("eval", {}).get("seed", cfg.train.get("seed", 1337))
+        )
         eval_kwargs["generator"] = torch.Generator().manual_seed(eval_seed)
         if is_mlm:
-            eval_kwargs["collate_fn"] = partial(mlm_collate, tokenizer=tokenizer,
-                max_len=max_len, mask_prob=mask_prob, mask_token_prob=mask_token_prob,
-                random_token_prob=random_token_prob, pad_id=pad_id,
-                ignore_index=ignore_index, eval_seed=eval_seed, dataset_name=name)
+            eval_kwargs["collate_fn"] = partial(
+                mlm_collate,
+                tokenizer=tokenizer,
+                max_len=max_len,
+                mask_prob=mask_prob,
+                mask_token_prob=mask_token_prob,
+                random_token_prob=random_token_prob,
+                pad_id=pad_id,
+                ignore_index=ignore_index,
+                eval_seed=eval_seed,
+                dataset_name=name,
+            )
         eval_loaders[name] = DataLoader(
             ds,
             sampler=eval_sampler,
@@ -923,7 +998,7 @@ def _maybe_init_wandb(
             try:
                 import wandb
 
-                init_kwargs = dict(
+                init_kwargs: dict[str, Any] = dict(
                     project=cfg.train.wandb.get("project", "stok"),
                     entity=cfg.train.wandb.get("entity"),
                     group=cfg.train.wandb.get("group"),
@@ -959,7 +1034,9 @@ def iter_windows(loader, size: int, accelerator=None):
         if accelerator:
             sizes = gather_object([len(window)])
             if len(set(sizes)) != 1:
-                raise RuntimeError(f"Unequal accumulation window lengths across ranks: {sizes}")
+                raise RuntimeError(
+                    f"Unequal accumulation window lengths across ranks: {sizes}"
+                )
         if not window:
             return
         yield window
@@ -973,18 +1050,28 @@ def _raise_rank_errors(error, accelerator, context: str):
 
 def run_training(cfg: DictConfig):
     if str(cfg.train.get("objective", "codebook")).lower() == "mlm":
-        for key in ("train.fape.enabled", "model.decoder.enabled", "train.decoding.eval_enabled"):
+        for key in (
+            "train.fape.enabled",
+            "model.decoder.enabled",
+            "train.decoding.eval_enabled",
+        ):
             if OmegaConf.select(cfg, key, default=False):
-                raise ValueError(f"{key}=true is unsupported for MLM; geometry requires the codebook objective")
-    for key, supported in (("model.classifier.tie_to_codebook", True),
-                           ("model.codebook.trainable", False),
-                           ("model.decoder.freeze", True)):
+                raise ValueError(
+                    f"{key}=true is unsupported for MLM; geometry requires the codebook objective"
+                )
+    for key, supported in (
+        ("model.classifier.tie_to_codebook", True),
+        ("model.codebook.trainable", False),
+        ("model.decoder.freeze", True),
+    ):
         if OmegaConf.select(cfg, key, default=supported) != supported:
             raise ValueError(f"{key} only supports {supported} in the training CLI")
     if str(cfg.train.optimizer.get("name", "adamw")).lower() != "adamw":
         raise ValueError("train.optimizer.name only supports adamw")
     if OmegaConf.select(cfg, "model.init.std") is not None:
-        raise ValueError("model.init.std is unsupported; initialization follows module defaults")
+        raise ValueError(
+            "model.init.std is unsupported; initialization follows module defaults"
+        )
     for name, value, minimum in (
         ("grad_accum_steps", cfg.train.get("grad_accum_steps", 1), 1),
         ("log_steps", cfg.train.get("log_steps", 1), 1),
@@ -1120,8 +1207,11 @@ def run_training(cfg: DictConfig):
     if not is_mlm:
         want_fape = bool(getattr(cfg.train, "fape", {}).get("enabled", False))
         # default to False; eval-time decoding is opt-in via config/override
-        want_eval_decode = any(METRIC_REGISTRY[name].requires_decoder
-            for loader in eval_loaders.values() for name in loader.metric_configs)
+        want_eval_decode = any(
+            METRIC_REGISTRY[name].requires_decoder
+            for loader in eval_loaders.values()
+            for name in getattr(loader, "metric_configs")
+        )
         # FAPE behavior toggles (with safe defaults)
         log_pred_nan_frac = bool(
             getattr(cfg.train, "fape", {}).get("log_pred_nan_frac", True)
@@ -1162,7 +1252,9 @@ def run_training(cfg: DictConfig):
             # check if d_code matches classifier codebook dim
             with torch.no_grad():
                 inferred_d_code = int(decoder.projector_in.weight.shape[1])  # type: ignore[attr-defined]
-                E = _unwrap_model(model, accelerator).classifier.E
+                E = cast(
+                    CodebookClassifier, _unwrap_model(model, accelerator).classifier
+                ).E
                 if inferred_d_code != int(E.shape[1]):
                     raise RuntimeError(
                         f"Decoder d_code={inferred_d_code} does not match codebook dim "
@@ -1267,7 +1359,9 @@ def run_training(cfg: DictConfig):
     output_error = None
     if is_main:
         try:
-            log_file_handle = (io_dirs["logs"] / "train.log").open("a", encoding="utf-8")
+            log_file_handle = (io_dirs["logs"] / "train.log").open(
+                "a", encoding="utf-8"
+            )
             print(
                 f"Training started. Objective: {objective}",
                 file=log_file_handle,
@@ -1330,8 +1424,9 @@ def run_training(cfg: DictConfig):
     world_size = accelerator.num_processes if accelerator else 1
     optimizer.zero_grad(set_to_none=True)
     while global_step < max_steps and (epoch_limit is None or epoch < int(epoch_limit)):
-        if hasattr(train_loader.sampler, "set_epoch"):
-            train_loader.sampler.set_epoch(epoch)
+        set_epoch = getattr(train_loader.sampler, "set_epoch", None)
+        if callable(set_epoch):
+            set_epoch(epoch)
         epoch += 1
         batches_in_pass = 0
         updates_before_pass = global_step
@@ -1339,7 +1434,11 @@ def run_training(cfg: DictConfig):
             batches_in_pass += len(window)
             current_step = global_step + 1
             current_epoch = (epoch - 1) + batches_in_pass / max(1, len(train_loader))
-            active_fape = decoder is not None and want_fape and global_step >= int(cfg.train.fape.start_step)
+            active_fape = (
+                decoder is not None
+                and want_fape
+                and global_step >= int(cfg.train.fape.start_step)
+            )
             # Denominators precede forwards; only input batches are buffered.
             n_tokens = sum(int((batch[1] != ignore_index).sum()) for batch in window)
             n_structures = 0
@@ -1348,45 +1447,86 @@ def run_training(cfg: DictConfig):
                 tokens = batch[0]
                 processed_tokens += int((tokens != int(cfg.model.encoder.pad_id)).sum())
                 if active_fape and len(batch) == 3:
-                    mask = residue_mask_from_tokens(tokens, pad_id=int(cfg.model.encoder.pad_id),
-                        bos_id=int(cfg.model.encoder.get("bos_id", 0)), eos_id=int(cfg.model.encoder.get("eos_id", 2)))
-                    n_structures += int((mask & torch.isfinite(batch[2]).all((-2, -1))).any(1).sum())
-            counts = torch.tensor([n_tokens, n_structures, processed_tokens], device=device, dtype=torch.long)
+                    mask = residue_mask_from_tokens(
+                        tokens,
+                        pad_id=int(cfg.model.encoder.pad_id),
+                        bos_id=int(cfg.model.encoder.get("bos_id", 0)),
+                        eos_id=int(cfg.model.encoder.get("eos_id", 2)),
+                    )
+                    n_structures += int(
+                        (mask & torch.isfinite(batch[2]).all((-2, -1))).any(1).sum()
+                    )
+            counts = torch.tensor(
+                [n_tokens, n_structures, processed_tokens],
+                device=device,
+                dtype=torch.long,
+            )
             if accelerator:
                 counts = accelerator.reduce(counts, reduction="sum")
             global_tokens, global_structures, processed_tokens = counts.tolist()
             total_tokens += processed_tokens
             micro_step += len(window)
-            if global_tokens == 0 and (global_structures == 0 or float(cfg.train.fape.weight) == 0):
+            if global_tokens == 0 and (
+                global_structures == 0 or float(cfg.train.fape.weight) == 0
+            ):
                 continue
             window_ce = 0.0
             window_fape = 0.0
             window_correct = 0
             for micro_index, batch in enumerate(window):
-                sync = accelerator.no_sync(model) if accelerator and micro_index < len(window)-1 else nullcontext()
+                sync = (
+                    accelerator.no_sync(model)
+                    if accelerator and micro_index < len(window) - 1
+                    else nullcontext()
+                )
                 with sync:
                     tokens, labels = (t.to(device) for t in batch[:2])
                     coords = batch[2].to(device) if len(batch) == 3 else None
                     error = None
                     try:
                         outputs = model(tokens=tokens)
-                        ce_sum = token_ce_loss(outputs["logits"], labels, ignore_index, reduction="sum")
+                        ce_sum = token_ce_loss(
+                            outputs["logits"], labels, ignore_index, reduction="sum"
+                        )
                         fape_sum = ce_sum * 0.0
                         if active_fape and coords is not None:
-                            mask = residue_mask_from_tokens(tokens, pad_id=int(cfg.model.encoder.pad_id),
-                                bos_id=int(cfg.model.encoder.get("bos_id", 0)), eos_id=int(cfg.model.encoder.get("eos_id", 2)))
-                            eligible = (mask & torch.isfinite(coords).all((-2, -1))).any(1)
+                            mask = residue_mask_from_tokens(
+                                tokens,
+                                pad_id=int(cfg.model.encoder.pad_id),
+                                bos_id=int(cfg.model.encoder.get("bos_id", 0)),
+                                eos_id=int(cfg.model.encoder.get("eos_id", 2)),
+                            )
+                            eligible = (
+                                mask & torch.isfinite(coords).all((-2, -1))
+                            ).any(1)
                             if eligible.any():
-                                soft_codes = logits_to_soft_codes_gumbel(outputs["logits"],
-                                    _unwrap_model(model, accelerator).classifier.E,
-                                    tau=_anneal_tau(global_step), hard=bool(cfg.train.gumbel.get("hard", False)))
-                                pred_coords = decode_token_aligned_coords(decoder, soft_codes, mask)
-                                fape_sum = fape_loss(pred_coords, coords, mask) * eligible.sum()
+                                soft_codes = logits_to_soft_codes_gumbel(
+                                    outputs["logits"],
+                                    cast(
+                                        CodebookClassifier,
+                                        _unwrap_model(model, accelerator).classifier,
+                                    ).E,
+                                    tau=_anneal_tau(global_step),
+                                    hard=bool(cfg.train.gumbel.get("hard", False)),
+                                )
+                                pred_coords = decode_token_aligned_coords(
+                                    decoder, soft_codes, mask
+                                )
+                                fape_sum = (
+                                    fape_loss(pred_coords, coords, mask)
+                                    * eligible.sum()
+                                )
                                 if log_pred_nan_frac:
-                                    running_pred_nan_frac_sum += float(torch.isnan(pred_coords[mask]).float().mean())
+                                    running_pred_nan_frac_sum += float(
+                                        torch.isnan(pred_coords[mask]).float().mean()
+                                    )
                                     running_pred_nan_frac_count += 1
-                        loss = ce_sum * (world_size / global_tokens if global_tokens else 0.)
-                        loss = loss + float(cfg.train.fape.weight) * fape_sum * (world_size / global_structures if global_structures else 0.)
+                        loss = ce_sum * (
+                            world_size / global_tokens if global_tokens else 0.0
+                        )
+                        loss = loss + float(cfg.train.fape.weight) * fape_sum * (
+                            world_size / global_structures if global_structures else 0.0
+                        )
                         if not torch.isfinite(loss):
                             raise FloatingPointError("Nonfinite training loss")
                     except Exception as exc:
@@ -1400,7 +1540,9 @@ def run_training(cfg: DictConfig):
                     window_fape += float(fape_sum.detach())
                     with torch.no_grad():
                         valid = labels != ignore_index
-                        window_correct += int(((outputs["logits"].argmax(-1) == labels) & valid).sum())
+                        window_correct += int(
+                            ((outputs["logits"].argmax(-1) == labels) & valid).sum()
+                        )
             if grad_clip > 0:
                 if accelerator:
                     accelerator.clip_grad_norm_(model.parameters(), grad_clip)
@@ -1412,7 +1554,11 @@ def run_training(cfg: DictConfig):
             if skipped:
                 continue
             scheduler.step()
-            sums = torch.tensor([window_ce, window_fape, window_correct], device=device, dtype=torch.float64)
+            sums = torch.tensor(
+                [window_ce, window_fape, window_correct],
+                device=device,
+                dtype=torch.float64,
+            )
             if accelerator:
                 sums = accelerator.reduce(sums, reduction="sum")
             cls_mean = float(sums[0]) / max(1, global_tokens)
@@ -1469,7 +1615,11 @@ def run_training(cfg: DictConfig):
                     msg += f" | lr {lr:.2e}"
                 else:
                     # Codebook-specific logging
-                    msg += f" | acc {acc:.4f}" if running_masked_acc_count else " | acc unavailable"
+                    msg += (
+                        f" | acc {acc:.4f}"
+                        if running_masked_acc_count
+                        else " | acc unavailable"
+                    )
                     msg += f" | lr {lr:.2e}"
                     if avg_cls_loss is not None:
                         msg += f" | cls {avg_cls_loss:.4f} | ppl {ppl:.2f}"
@@ -1502,7 +1652,9 @@ def run_training(cfg: DictConfig):
                         "train/loss": float(avg_total_loss),
                         "lr": float(lr),
                         "train/micro_step": float(micro_step),
-                        f"train/{'mask_acc' if is_mlm else 'acc'}/num_valid": float(running_masked_acc_count),
+                        f"train/{'mask_acc' if is_mlm else 'acc'}/num_valid": float(
+                            running_masked_acc_count
+                        ),
                         "train/fape_loss/num_valid": float(running_fape_count),
                     }
 
@@ -1587,15 +1739,26 @@ def run_training(cfg: DictConfig):
                 if is_main:
                     try:
                         _save_checkpoint(
-                            step_path, model=model, optimizer=optimizer,
-                            scheduler=scheduler, global_step=global_step,
-                            cfg=cfg, accelerator=accelerator, micro_step=micro_step,
+                            step_path,
+                            model=model,
+                            optimizer=optimizer,
+                            scheduler=scheduler,
+                            global_step=global_step,
+                            cfg=cfg,
+                            accelerator=accelerator,
+                            micro_step=micro_step,
                         )
-                        with _atomic_destination(io_dirs["checkpoints"] / "latest.pt") as temporary:
+                        with _atomic_destination(
+                            io_dirs["checkpoints"] / "latest.pt"
+                        ) as temporary:
                             shutil.copyfile(step_path, temporary)
                     except Exception as exc:
                         checkpoint_error = f"{type(exc).__name__}: {exc}"
-                errors = gather_object([checkpoint_error]) if accelerator else [checkpoint_error]
+                errors = (
+                    gather_object([checkpoint_error])
+                    if accelerator
+                    else [checkpoint_error]
+                )
                 if any(errors):
                     raise RuntimeError(f"Checkpoint failed: {errors}")
             if global_step >= max_steps:
@@ -1608,9 +1771,16 @@ def run_training(cfg: DictConfig):
     checkpoint_error = None
     if is_main:
         try:
-            _save_checkpoint(io_dirs["model"] / "final.pt", model=model, optimizer=optimizer,
-                scheduler=scheduler, global_step=global_step, micro_step=micro_step,
-                cfg=cfg, accelerator=accelerator)
+            _save_checkpoint(
+                io_dirs["model"] / "final.pt",
+                model=model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                global_step=global_step,
+                micro_step=micro_step,
+                cfg=cfg,
+                accelerator=accelerator,
+            )
         except Exception as exc:
             checkpoint_error = f"{type(exc).__name__}: {exc}"
     errors = gather_object([checkpoint_error]) if accelerator else [checkpoint_error]

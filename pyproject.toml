@@ -53,7 +53,7 @@ stok = "stok.cli.cli:cli"
 
 
 [project.optional-dependencies]
-dev = ["pytest", "ruff"]
+dev = ["pytest", "ruff==0.16.6", "ty==0.0.78"]
 
 [tool.ruff]
 target-version = "py310"

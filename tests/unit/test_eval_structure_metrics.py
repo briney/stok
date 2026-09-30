@@ -84,8 +84,20 @@ class TestLDDTMetric:
         tokens = torch.full((B, L), 4, dtype=torch.long)
 
         # Two batches with identical structures
-        metric.update({"pred_coords": coords.clone()}, tokens, torch.zeros_like(tokens), coords, cfg)
-        metric.update({"pred_coords": coords.clone()}, tokens, torch.zeros_like(tokens), coords, cfg)
+        metric.update(
+            {"pred_coords": coords.clone()},
+            tokens,
+            torch.zeros_like(tokens),
+            coords,
+            cfg,
+        )
+        metric.update(
+            {"pred_coords": coords.clone()},
+            tokens,
+            torch.zeros_like(tokens),
+            coords,
+            cfg,
+        )
         result = metric.compute()
 
         assert abs(result["lddt"] - 1.0) < 0.01
@@ -243,46 +255,59 @@ class TestPredNaNFracMetric:
         assert abs(result["pred_nan_frac"] - 0.5) < 0.01
 
 
-
 def test_structure_scores_are_protein_weighted_and_report_missing():
     import pytest
+
     true = _stable_ncac_coords(5, 6)
-    pred = true + torch.arange(5)[:, None, None, None] * torch.randn_like(true) * .1
-    true[-1] = float('nan')
+    pred = true + torch.arange(5)[:, None, None, None] * torch.randn_like(true) * 0.1
+    true[-1] = float("nan")
     tokens = torch.full((5, 6), 4)
     for metric_type in (LDDTMetric, TMScoreMetric, RMSDMetric, FAPEMetric):
         results = []
         for size in (1, 2, 3):
             metric = metric_type()
             for start in range(0, 5, size):
-                metric.update({'pred_coords': pred[start:start+size]}, tokens[start:start+size],
-                              None, true[start:start+size], _make_cfg())
+                metric.update(
+                    {"pred_coords": pred[start : start + size]},
+                    tokens[start : start + size],
+                    None,
+                    true[start : start + size],
+                    _make_cfg(),
+                )
             result = metric.compute()
-            assert result[f'{metric.name}/num_valid'] == 4
-            assert result[f'{metric.name}/num_skipped'] == 1
+            assert result[f"{metric.name}/num_valid"] == 4
+            assert result[f"{metric.name}/num_skipped"] == 1
             results.append(result[metric.name])
-        assert results == pytest.approx([results[0]]*3)
+        assert results == pytest.approx([results[0]] * 3)
 
 
 def test_bad_structure_predictions_raise_and_count_failure():
     import pytest
+
     true = _stable_ncac_coords(1, 6)
-    pred = torch.full_like(true, float('nan'))
+    pred = torch.full_like(true, float("nan"))
     tokens = torch.full((1, 6), 4)
     for metric_type in (LDDTMetric, TMScoreMetric, RMSDMetric, FAPEMetric):
         metric = metric_type()
-        with pytest.raises(ValueError, match='Nonfinite predictions'):
-            metric.update({'pred_coords': pred}, tokens, None, true, _make_cfg())
+        with pytest.raises(ValueError, match="Nonfinite predictions"):
+            metric.update({"pred_coords": pred}, tokens, None, true, _make_cfg())
         assert metric.num_failed == 1
         assert metric.name not in metric.compute()
 
 
 def test_partial_structure_failure_cannot_report_favorable_subset():
     import pytest
+
     true = _stable_ncac_coords(1, 6)
     tokens = torch.full((1, 6), 4)
     metric = RMSDMetric()
-    metric.update({'pred_coords': true}, tokens, None, true, _make_cfg())
+    metric.update({"pred_coords": true}, tokens, None, true, _make_cfg())
     with pytest.raises(ValueError):
-        metric.update({'pred_coords': torch.full_like(true, float('nan'))}, tokens, None, true, _make_cfg())
-    assert 'rmsd' not in metric.compute()
+        metric.update(
+            {"pred_coords": torch.full_like(true, float("nan"))},
+            tokens,
+            None,
+            true,
+            _make_cfg(),
+        )
+    assert "rmsd" not in metric.compute()

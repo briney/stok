@@ -218,9 +218,20 @@ def test_shards_with_missing_optional_coordinates(tmp_path, load_coords):
         (1.0, pa.float64()),
         ([1.0, 2.0, 3.0], pa.list_(pa.float64())),
         ([[1.0, 2.0, 3.0]] * 4, pa.list_(pa.list_(pa.float64()))),
-        ([[[[1.0, 2.0, 3.0]]] * 3] * 4, pa.list_(pa.list_(pa.list_(pa.list_(pa.float64()))))),
+        (
+            [[[[1.0, 2.0, 3.0]]] * 3] * 4,
+            pa.list_(pa.list_(pa.list_(pa.list_(pa.float64())))),
+        ),
     ],
-    ids=["numeric-strings", "strings", "booleans", "scalar", "one-list", "two-lists", "four-lists"],
+    ids=[
+        "numeric-strings",
+        "strings",
+        "booleans",
+        "scalar",
+        "one-list",
+        "two-lists",
+        "four-lists",
+    ],
 )
 def test_coordinate_schema_checked_only_when_loaded(
     tmp_path, sharded, load_coords, coordinates, coordinate_type

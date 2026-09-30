@@ -180,17 +180,4 @@ def _get_one_letter_code(res_name: str) -> str:
     Returns:
         1-letter amino acid code, or 'X' for unknown residues.
     """
-    # First check our mapping
-    if res_name in AA3TO1:
-        return AA3TO1[res_name]
-
-    # Try Biopython's three_to_one for standard residues
-    try:
-        from Bio.PDB.Polypeptide import three_to_one
-
-        return three_to_one(res_name)
-    except KeyError:
-        pass
-
-    # Unknown residue
-    return "X"
+    return AA3TO1.get(res_name, "X")

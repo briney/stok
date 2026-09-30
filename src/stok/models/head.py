@@ -27,6 +27,9 @@ class CodebookClassifier(nn.Module):
     A small linear projector maps encoder features to code space.
     """
 
+    E: torch.Tensor
+    code_bias: torch.Tensor
+
     def __init__(
         self,
         d_in: int,

@@ -129,4 +129,3 @@ def test_metric_class_attributes():
     assert DummyMetric.objectives == {"test"}
     assert DummyMetric.requires_decoder is False
     assert DummyMetric.requires_coords is False
-

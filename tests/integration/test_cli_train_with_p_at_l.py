@@ -69,7 +69,10 @@ def test_cli_train_mlm_with_p_at_l_enabled(tmp_path):
         {
             "sequence_id": [f"train_{i}" for i in range(10)],
             "sequence": [seq for _ in range(10)],
-            "coordinates": [np.random.default_rng(42).normal(size=(len(seq), 3, 3)).tolist() for _ in range(10)],
+            "coordinates": [
+                np.random.default_rng(42).normal(size=(len(seq), 3, 3)).tolist()
+                for _ in range(10)
+            ],
         }
     )
     train_data.to_parquet(train_parquet, index=False)
@@ -78,7 +81,10 @@ def test_cli_train_mlm_with_p_at_l_enabled(tmp_path):
         {
             "sequence_id": [f"eval_{i}" for i in range(5)],
             "sequence": [seq for _ in range(5)],
-            "coordinates": [np.random.default_rng(42).normal(size=(len(seq), 3, 3)).tolist() for _ in range(5)],
+            "coordinates": [
+                np.random.default_rng(42).normal(size=(len(seq), 3, 3)).tolist()
+                for _ in range(5)
+            ],
         }
     )
     eval_data.to_parquet(eval_parquet, index=False)
@@ -167,4 +173,3 @@ def test_p_at_l_metric_config_override(tmp_path):
     result = runner.invoke(cli, ["train", *overrides])
     assert result.exit_code == 0, result.output
     assert "Training complete." in result.output
-

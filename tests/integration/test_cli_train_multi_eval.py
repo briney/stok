@@ -13,7 +13,13 @@ def _write_parquet(path: Path, n_rows: int, seq_min_len: int, seq_max_len: int):
     rows = []
     for i in range(n_rows):
         seq = random_protein_sequence(seq_min_len, seq_max_len)
-        rows.append({"sequence_id": f"p{i}", "sequence": seq, "structure_tokens": [0] * len(seq)})
+        rows.append(
+            {
+                "sequence_id": f"p{i}",
+                "sequence": seq,
+                "structure_tokens": [0] * len(seq),
+            }
+        )
     pq.write_table(pa.Table.from_pylist(rows), path)
 
 
@@ -108,4 +114,3 @@ def test_cli_train_with_single_eval_dataset_via_data_eval_equals(tmp_path):
     assert result.exit_code == 0, result.output
     assert "eval/default | step 2 | epoch" in result.output
     assert "Training complete." in result.output
-

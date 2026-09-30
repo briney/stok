@@ -4,7 +4,9 @@ from stok.utils.metrics import lddt_ca, tm_score, rmsd, true_aligned_error
 from stok.utils.geometry import Affine3D, RotationMatrix
 
 
-def _stable_ncac_coords(batch: int, length: int, device: torch.device = torch.device("cpu")) -> torch.Tensor:
+def _stable_ncac_coords(
+    batch: int, length: int, device: torch.device = torch.device("cpu")
+) -> torch.Tensor:
     """Generate geometrically stable random N–CA–C coordinates [B, L, 3, 3]."""
     g = torch.Generator(device=device).manual_seed(1234)
 
@@ -25,8 +27,12 @@ def test_lddt_identity_one():
     pred = true.clone()
     mask = torch.ones((B, L), dtype=torch.bool)
     lddt_b, per_res = lddt_ca(pred, true, residue_mask=mask, return_per_residue=True)
-    assert torch.allclose(lddt_b, torch.ones_like(lddt_b)), "lDDT should be 1.0 for identical structures"
-    assert per_res is not None and torch.allclose(per_res[mask], torch.ones_like(per_res[mask]))
+    assert torch.allclose(lddt_b, torch.ones_like(lddt_b)), (
+        "lDDT should be 1.0 for identical structures"
+    )
+    assert per_res is not None and torch.allclose(
+        per_res[mask], torch.ones_like(per_res[mask])
+    )
 
 
 def test_tm_and_rmsd_identity_and_rigid_invariance():
@@ -100,25 +106,23 @@ def test_noise_effects_on_metrics():
     r_high = rmsd(pred_high_noise, true, residue_mask=mask, align=True, atom_set="CA")
 
     assert (lddt_low >= lddt_high).all()  # lDDT decreases with noise
-    assert (tm_low >= tm_high).all()      # TM decreases with noise
-    assert (r_low <= r_high).all()        # RMSD increases with noise
-
-
+    assert (tm_low >= tm_high).all()  # TM decreases with noise
+    assert (r_low <= r_high).all()  # RMSD increases with noise
 
 
 def test_alignment_nan_padding_and_reflection():
     true = _stable_ncac_coords(1, 6)
-    pred = true + .2 * torch.randn_like(true)
+    pred = true + 0.2 * torch.randn_like(true)
     reference_r = rmsd(pred[:, :5], true[:, :5])
     reference_tm = tm_score(pred[:, :5], true[:, :5])[0]
-    true[:, -1] = float('nan')
-    pred[:, -1] = float('nan')
+    true[:, -1] = float("nan")
+    pred[:, -1] = float("nan")
     mask = torch.ones(1, 6, dtype=torch.bool)
     torch.testing.assert_close(rmsd(pred, true, mask), reference_r)
     torch.testing.assert_close(tm_score(pred, true, mask)[0], reference_tm)
     reflected = true[:, :5].clone()
     reflected[..., 0] *= -1
-    assert rmsd(reflected, true[:, :5]).item() > .01
+    assert rmsd(reflected, true[:, :5]).item() > 0.01
 
 
 def test_alignment_requires_adequate_targets_but_scores_collapsed_predictions():
@@ -134,11 +138,12 @@ def test_alignment_requires_adequate_targets_but_scores_collapsed_predictions():
 
 def test_structure_metrics_reject_bad_predictions():
     import pytest
+
     true = _stable_ncac_coords(1, 5)
     pred = true.clone()
-    pred[:, 2] = float('nan')
+    pred[:, 2] = float("nan")
     for metric in (rmsd, tm_score, lddt_ca, true_aligned_error):
-        with pytest.raises(ValueError, match='Nonfinite predictions'):
+        with pytest.raises(ValueError, match="Nonfinite predictions"):
             metric(pred, true)
 
 
@@ -149,15 +154,16 @@ def test_fixed_cameo_subset_matches_independent_ca_references():
     from Bio.SVDSuperimposer import SVDSuperimposer
     from stok.utils.structure_parser import parse_structure
     from stok.eval.metrics.contact import _compute_contact_map
-    root = Path(__file__).parents[1] / 'test_data/cameo'
-    for filename in ('7YPD_B.pdb', '8JVC_A.pdb'):
+
+    root = Path(__file__).parents[1] / "test_data/cameo"
+    for filename in ("7YPD_B.pdb", "8JVC_A.pdb"):
         true = torch.as_tensor(parse_structure(root / filename).coords[:48]).float()
-        true[7] = float('nan')
+        true[7] = float("nan")
         ca = true[:, 1].double().numpy()
         valid = np.isfinite(ca).all(-1)
         predicted_ca = ca.copy()
-        predicted_ca[:, 0] += np.sin(np.arange(len(ca))) * .7
-        predicted_ca += np.array([2., -3., 1.])
+        predicted_ca[:, 0] += np.sin(np.arange(len(ca))) * 0.7
+        predicted_ca += np.array([2.0, -3.0, 1.0])
         pred = true.clone()
         pred[:, 1] = torch.tensor(predicted_ca, dtype=torch.float32)
         reference = SVDSuperimposer()
@@ -165,8 +171,12 @@ def test_fixed_cameo_subset_matches_independent_ca_references():
         reference.run()
         distance = np.linalg.norm(reference.get_transformed() - ca[valid], axis=-1)
         assert np.isclose(rmsd(pred, true).item(), reference.get_rms(), atol=2e-5)
-        d0 = max(.5, 1.24 * max(int(valid.sum()) - 15, 1) ** (1/3) - 1.8)
-        assert np.isclose(tm_score(pred, true)[0].item(), np.mean(1/(1+(distance/d0)**2)), atol=2e-5)
+        d0 = max(0.5, 1.24 * max(int(valid.sum()) - 15, 1) ** (1 / 3) - 1.8)
+        assert np.isclose(
+            tm_score(pred, true)[0].item(),
+            np.mean(1 / (1 + (distance / d0) ** 2)),
+            atol=2e-5,
+        )
         dt = np.linalg.norm(ca[:, None] - ca[None, :], axis=-1)
         dp = np.linalg.norm(predicted_ca[:, None] - predicted_ca[None, :], axis=-1)
         local = []
@@ -174,7 +184,9 @@ def test_fixed_cameo_subset_matches_independent_ca_references():
             neighbors = valid & (dt[i] <= 15) & (np.arange(len(ca)) != i)
             if neighbors.any():
                 errors = abs(dp[i, neighbors] - dt[i, neighbors])
-                local.append(np.mean(errors[:, None] < np.array([.5, 1., 2., 4.])))
+                local.append(np.mean(errors[:, None] < np.array([0.5, 1.0, 2.0, 4.0])))
         assert np.isclose(lddt_ca(pred, true)[0].item(), np.mean(local), atol=2e-5)
         expected_contacts = np.isfinite(dt) & (dt < 8)
-        assert np.array_equal(_compute_contact_map(true[None])[0].numpy(), expected_contacts)
+        assert np.array_equal(
+            _compute_contact_map(true[None])[0].numpy(), expected_contacts
+        )

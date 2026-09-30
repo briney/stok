@@ -11,9 +11,25 @@ def _make_state_dict(preset: str, d_code: int = 64):
     from stok.models.decoder import GeometricDecoder
 
     if preset == "base":
-        arch = dict(d_model=1024, ffn_mult=4.0, n_layers=16, n_heads=16, attn_kv_heads=1, num_memory_tokens=0, max_length=1280)
+        arch = dict(
+            d_model=1024,
+            ffn_mult=4.0,
+            n_layers=16,
+            n_heads=16,
+            attn_kv_heads=1,
+            num_memory_tokens=0,
+            max_length=1280,
+        )
     elif preset == "lite":
-        arch = dict(d_model=1024, ffn_mult=4.0, n_layers=12, n_heads=8, attn_kv_heads=2, num_memory_tokens=0, max_length=1280)
+        arch = dict(
+            d_model=1024,
+            ffn_mult=4.0,
+            n_layers=12,
+            n_heads=8,
+            attn_kv_heads=2,
+            num_memory_tokens=0,
+            max_length=1280,
+        )
     else:
         raise ValueError(preset)
 
@@ -37,7 +53,9 @@ def test_path_override_and_freeze(tmp_path):
     ckpt_path = tmp_path / "decoder-base.pt"
     torch.save(ckpt, ckpt_path)
 
-    model = load_pretrained_decoder(preset="base", path=str(ckpt_path), device="cpu", freeze=True)
+    model = load_pretrained_decoder(
+        preset="base", path=str(ckpt_path), device="cpu", freeze=True
+    )
 
     assert model.training is False
     assert all(not p.requires_grad for p in model.parameters())
@@ -61,9 +79,13 @@ def test_download_and_cache_reuse(tmp_path, monkeypatch):
         calls["n"] += 1
         torch.save(fake_ckpt, dst)
 
-    monkeypatch.setenv("STOK_DECODER_LITE_URL", "https://example.invalid/decoder-lite.pt")
+    monkeypatch.setenv(
+        "STOK_DECODER_LITE_URL", "https://example.invalid/decoder-lite.pt"
+    )
     monkeypatch.setenv("STOK_DECODER_LITE_SHA256", "")
-    monkeypatch.setenv("STOK_DECODER_BASE_URL", "https://example.invalid/decoder-base.pt")
+    monkeypatch.setenv(
+        "STOK_DECODER_BASE_URL", "https://example.invalid/decoder-base.pt"
+    )
     monkeypatch.setenv("STOK_DECODER_BASE_SHA256", "")
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
 
@@ -91,5 +113,3 @@ def test_download_and_cache_reuse(tmp_path, monkeypatch):
             hub.download_url_to_file = _orig
         except Exception:
             pass
-
-

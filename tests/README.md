@@ -418,6 +418,21 @@ Install the project with `python -m pip install -e '.[dev]'`. Use
 Distributed regression tests launch two local processes and require loopback
 sockets; their subprocess timeouts prevent hangs from blocking the suite.
 
+The code quality workflow runs `ty` on `src/` and checks Ruff's default
+Black-compatible formatting across all Python files. The `dev` extra pins both
+tools. Run the same checks locally in your project environment:
+
+```bash
+python -m ty check src --python "$(command -v python)" --error-on-warning
+python -m ruff format --check .
+```
+
+Apply formatting with `python -m ruff format .`.
+
+The initial type-checking pass adds unknown-residue fallback coverage in
+`unit/test_structure_parser.py` and verifies that integer tuple dimensions
+preserve GCP scalar/vector outputs in `unit/test_gcpnet.py`.
+
 The September 29 completion audit adds numeric nested Arrow coordinate-schema
 checks for both Parquet loaders, raw label-length rejection before truncation,
 FP16 empty-loss reduction overflow, two-rank output-directory/configuration/log

@@ -6,9 +6,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from graphein.protein.tensor.angles import alpha, dihedrals, kappa
-from graphein.protein.tensor.data import Protein, ProteinBatch, get_random_batch
-from graphein.protein.tensor.types import AtomTensor, CoordTensor, EdgeTensor
-from torch_geometric.data import Batch, Data
+from graphein.protein.tensor.data import get_random_batch
+from torch_geometric.data import Data
 from torch_geometric.nn.encoding import PositionalEncoding
 
 
@@ -70,7 +69,7 @@ class ProteinFeaturiser(nn.Module):
         if "sequence_positional_encoding" in self.scalar_node_features:
             self.positional_encoding = PositionalEncoding(16)
 
-    def forward(self, batch: Batch | ProteinBatch) -> Batch | ProteinBatch:
+    def forward(self, batch: Data) -> Data:
         """Compute features and edges for a protein batch.
 
         Given a batch with fields like ``coords``, ``residue_type`` and
@@ -92,10 +91,15 @@ class ProteinFeaturiser(nn.Module):
             Batch | ProteinBatch: The same object with features populated.
         """
         # scalar node features
-        batch.x = self.positional_encoding(batch.seq_pos)
+        positional_features = self.positional_encoding(batch.seq_pos)
+        batch.x = positional_features
         scalar_features = compute_scalar_node_features(batch, self.scalar_node_features)
-        batch.x = torch.cat([batch.x, scalar_features], dim=-1)
-        batch.x = torch.nan_to_num(batch.x, nan=0.0, posinf=0.0, neginf=0.0)
+        batch.x = torch.nan_to_num(
+            torch.cat([positional_features, scalar_features], dim=-1),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        )
 
         # transform representation
         batch.pos = batch.coords[:, 1, :]
@@ -114,11 +118,13 @@ class ProteinFeaturiser(nn.Module):
 
         # scalar edge features
         if self.scalar_edge_features:
+            assert batch.pos is not None and batch.edge_index is not None
             scalars = [_edge_distance(batch.pos, batch.edge_index)]
             batch.edge_attr = torch.cat(scalars, dim=1)
 
         # vector edge features
         if self.vector_edge_features:
+            assert batch.pos is not None and batch.edge_index is not None
             diff = batch.pos[batch.edge_index[0]] - batch.pos[batch.edge_index[1]]
             vectors = [_normalize(diff).unsqueeze(-2)]
             batch.edge_vector_attr = torch.cat(vectors, dim=0)
@@ -152,7 +158,7 @@ class ProteinFeaturiser(nn.Module):
         return repr
 
 
-def compute_edges(batch: Batch) -> tuple[torch.Tensor, torch.Tensor]:
+def compute_edges(batch: Data) -> tuple[torch.Tensor, torch.Tensor]:
     """Ensure edge metadata exists for a batch.
 
     This helper assumes ``edge_index`` has been computed upstream (e.g., k-NN).
@@ -168,6 +174,7 @@ def compute_edges(batch: Batch) -> tuple[torch.Tensor, torch.Tensor]:
         ``edge_type``).
     """
     edge_index = batch.edge_index
+    assert edge_index is not None
     edge_type = getattr(batch, "edge_type", None)
     if edge_type is None or edge_type.numel() == 0:
         edge_type = torch.zeros(
@@ -177,7 +184,7 @@ def compute_edges(batch: Batch) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 def compute_scalar_node_features(
-    x: Batch | Data | Protein | ProteinBatch,
+    x: Data,
     node_features: list[str],
 ) -> torch.Tensor:
     """Factory for scalar node features.
@@ -221,11 +228,14 @@ def compute_scalar_node_features(
             raise ValueError(f"Node feature {feature} not recognised.")
     feats = [feat.unsqueeze(1) if feat.ndim == 1 else feat for feat in feats]
 
-    return torch.cat(feats, dim=1) if feats else x.x
+    if feats:
+        return torch.cat(feats, dim=1)
+    assert x.x is not None
+    return x.x
 
 
 def orientations(
-    X: CoordTensor | AtomTensor, coords_slice_index: torch.Tensor, ca_idx: int = 1
+    X: torch.Tensor, coords_slice_index: torch.Tensor, ca_idx: int = 1
 ) -> torch.Tensor:
     """Compute forward and backward orientation unit vectors per residue.
 
@@ -288,8 +298,8 @@ def orientations(
 
 
 def _edge_distance(
-    pos: CoordTensor,
-    edge_index: EdgeTensor,
+    pos: torch.Tensor,
+    edge_index: torch.Tensor,
 ) -> torch.Tensor:
     """Compute Euclidean distances for edges.
 
