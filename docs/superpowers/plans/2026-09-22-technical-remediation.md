@@ -353,7 +353,7 @@ The probe accepts `--case coverage|eval-tail`, `--output PATH`, `--workers N`, a
 
 **Interfaces:** introduce `resolve_eval_metrics(cfg, eval_name: str, *, objective: str) -> dict[str, dict]` in registry, returning requested configurations before resource filtering, with an `explicit` marker consumed internally. Whitelist entries and per-dataset `enabled=true` are explicit requests; default classification eligibility is not. Nondefault true structure settings are also explicit. Dataset instances expose `has_coords` and `has_labels` based on actual source content; mixtures combine availability, while per-example validity still controls denominators. Pass resolved configurations/capabilities into metric construction, not a second independent interpretation. Implement the null/boolean global structure defaults specified in the design section.
 
-- [ ] Compose the real default YAML in tests. Verify whitelist selection, explicit per-dataset disables, null/true/false coordinates, legacy aliases, and unknown names. The core contract is:
+- [x] Compose the real default YAML in tests. Verify whitelist selection, explicit per-dataset disables, null/true/false coordinates, legacy aliases, and unknown names. The core contract is:
 
   ```python
   cfg.train.eval.metrics.lddt.enabled = False
@@ -364,10 +364,10 @@ The probe accepts `--case coverage|eval-tail`, `--output PATH`, `--workers N`, a
   assert selected["lddt"]["explicit"] is True
   ```
 
-- [ ] Run registry and auto-enable integration tests and confirm the globally disabled whitelist failure.
-- [ ] Resolve request precedence as specified above, then required resources, then actual availability. Construct datasets with the resolved loading flags and decoder only when explicitly requested or needed. Save the effective config snapshot after this resolution so auto-enabled resources and resolved tokenizer IDs are recorded. For label-free codebook eval, pass `labels=None` to the model and omit classification metrics; MLM retains its generated labels. Reject explicitly requested classification on a dataset with no VQ labels.
-- [ ] Upgrade FAPE integration to assert loaded coordinates, finite FAPE, and different gradients with FAPE weight zero versus positive under fixed randomness. Use a tiny differentiable decoder stub for orchestration assertions; retain real loader/checkpoint compatibility coverage separately. Test decoder enabled alone and per-dataset metric overrides without global decoding flags.
-- [ ] Run `pytest tests/unit/test_eval_registry.py tests/integration/test_structure_folder_eval.py tests/integration/test_eval_decoding_auto_enable.py tests/integration/test_train_with_decoder_fape.py -q`. Commit: `fix: activate requested evaluation and structure supervision`.
+- [x] Run registry and auto-enable integration tests and confirm the globally disabled whitelist failure.
+- [x] Resolve request precedence as specified above, then required resources, then actual availability. Construct datasets with the resolved loading flags and decoder only when explicitly requested or needed. Save the effective config snapshot after this resolution so auto-enabled resources and resolved tokenizer IDs are recorded. For label-free codebook eval, pass `labels=None` to the model and omit classification metrics; MLM retains its generated labels. Reject explicitly requested classification on a dataset with no VQ labels.
+- [x] Upgrade FAPE integration to assert loaded coordinates, finite FAPE, and different gradients with FAPE weight zero versus positive under fixed randomness. Use a tiny differentiable decoder stub for orchestration assertions; retain real loader/checkpoint compatibility coverage separately. Test decoder enabled alone and per-dataset metric overrides without global decoding flags.
+- [x] Run `pytest tests/unit/test_eval_registry.py tests/integration/test_structure_folder_eval.py tests/integration/test_eval_decoding_auto_enable.py tests/integration/test_train_with_decoder_fape.py -q`. Commit: `fix: activate requested evaluation and structure supervision`.
 
 ## Task 8 — Report failures and aggregate the intended evaluation population
 
@@ -711,3 +711,4 @@ verification is recorded below and committed separately.
 | 4 | Retained connected zero loss/gradients for empty supervision, class bounds, and mean/sum CE. Added the explicitly requested finite-FP16 reduction-overflow regression for both reductions; it passes the existing multiply-before-sum implementation. | CE, MLM model, and Parquet modules: **94 passed**. |
 | 5 | Verified native sampler/stream ownership, rank/worker batching, mixture streams, persistent-worker epoch shuffling, unpadded evaluation, supported backends, and restored model mode. Existing implementation retained. | Task 1's real distributed checks cover ownership and uneven/empty evaluation ranks; iterable and multi-train/multi-eval modules: **6 passed**. |
 | 6 | Verified globally normalized accumulation, independent CE/FAPE counts, partial windows, empty-rank participation, skipped-update handling, and optimizer-update budgets/artifacts. Existing update implementation retained. | Task 1 progress/distributed/checkpoint evidence and Task 3 FAPE-only updates; scheduler/window/config helper module: **21 passed**. |
+| 7 | Verified requested-metric precedence, actual label/coordinate capabilities, decoder auto-activation, aliases/conflicts, and effective configuration snapshots. Existing implementation retained. | Registry and decoder auto-enable modules: **30 passed**; Task 2 structure-folder and Task 3 FAPE checks also passed. |
