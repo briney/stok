@@ -10,7 +10,7 @@
 
 **Spec:** [Technical analysis](../../TECHNICAL_ANALYSIS.md), findings F01–F19, committed in `5e80556`, supplies the historical requirements baseline. The [current input contract](../../../README.md#training-data-format), introduced in `1e59137` and preserved through the merge in `4d34046`, governs the schema and examples below.
 
-**Status:** Implemented and merged into `main`: remediation via PR #5 (`9a0d9dd`), followed by the Parquet schema changes via PR #6 (`53b3dec`). Updated September 29, 2026 for the current input contract. Task checklists retain the original execution instructions; completion and validation evidence is recorded below and in the technical analysis. Pre-fix failure instructions describe the historical baseline, not expected failures in the current code.
+**Status:** Implemented and merged into `main`: remediation via PR #5 (`9a0d9dd`), followed by the Parquet schema changes via PR #6 (`53b3dec`). Updated September 29, 2026 for the current input contract. Coordinate-type validation remains an open follow-up identified in the September 29 plan review; see Task 2 and the review record below. Task checklists retain the original execution instructions; completion and validation evidence is recorded below and in the technical analysis. Pre-fix failure instructions describe the historical baseline, not expected failures in the current code.
 
 ## Scope and design decisions
 
@@ -30,6 +30,7 @@ The default scope corrects existing behavior and rejects unsupported options. It
   | `coordinates` | Nested numeric lists, `[L,3,3]`, atoms ordered N–CA–C | Optional |
 
 - Validate required names and types in every shard and read only the selected columns. Each supplied `structure_tokens` list must have exactly one element per source residue before truncation. IDs must be nonnegative and fit int64; use null elements for unlabeled residues. Reject whole null lists, string/float token encodings, and negative input IDs. Store no padding or special tokens in source lists.
+- When loading a supplied `coordinates` column, validate its nested Arrow list structure and numeric element type in every file/shard before conversion to a tensor. Reject string and boolean elements rather than coercing them to floats. Retain per-row `[L,3,3]` shape validation and the existing missing-coordinate behavior.
 - Dataset items use `sequence_id`, `sequence`, and optional `structure_tokens` tensors. The loader converts null token elements to internal `-1` sentinels; collation converts those sentinels to `ignore_index` without deleting positions. The source `coordinates` column becomes the existing `coords` tensor key; structure-folder items use the same identity/sequence keys and omit `structure_tokens`.
 - Preserve `(tokens, labels)` and `(tokens, labels, coords)` batches, with shapes `[B,T]`, `[B,T]`, and `[B,T,3,3]`.
 - `data.max_len` remains a **token** budget. A sequence contributes at most `T-2` residues. Require `max_len >= 3`.
@@ -205,6 +206,7 @@ Execute the listed order for a simple serial workflow. Tasks 4, 5, and 11 are in
 
 **Interfaces:** implement the mask/decoder signatures in the file map. Dataset constructors use `require_structure_tokens: bool = True`; set false for sequence-only MLM or label-free evaluation. Collators consume `sequence_id`, `sequence`, optional `structure_tokens`, and optional `coords`. Add optional `num_classes: int | None = None` to `_tokenize_and_align` for class-boundary validation; CLI supplies the actual codebook size. Retain existing positional arguments and tuple returns. Add one shared coordinate-alignment function in `collate.py`: `align_coords(coords: Tensor | None, *, residue_count: int, token_length: int) -> Tensor[token_length,3,3]`.
 
+- [ ] **Open follow-up — September 29 plan review:** enforce coordinate Arrow-type validation in the shared `_parquet_columns` helper. Both dataset classes currently accept nested string coordinates and silently convert them to floats. Extend `test_parquet_dataset.py` to reject nested strings (including numeric-looking strings), booleans, and malformed nesting for single files and a malformed later shard; retain acceptance tests for numeric coordinates and missing optional coordinates. Validate only selected coordinate columns so `load_coords=false` continues to omit them. Report the source path and column in schema errors.
 - [ ] Add the failing alignment test and mixed-coordinate batches for both collators. Reuse `test_parquet_dataset.py` for null-element alignment and truncation, typed integer lists, sequence-only MLM, negative-ID/whole-null-list/length/type rejection, legacy-header/CSV rejection, required columns in every shard, and shards with missing optional coordinates. Update synthetic integration datasets whose label lengths currently disagree with their sequence lengths; do not relax the validation to accommodate those fixtures. The collator-level example below uses the loader's internal `-1` sentinel; the source Parquet list is `[7, null, 9]`.
 
   ```python
@@ -292,7 +294,7 @@ Execute the listed order for a simple serial workflow. Tasks 4, 5, and 11 are in
 
 **Files:** modify `src/stok/data/dataset.py`, `src/stok/cli/train.py`, `src/stok/eval/evaluator.py`; extend `tests/unit/test_iterable_vqindices_dataset.py`, `tests/integration/test_distributed_training.py`; create `tests/utils/distributed_probe.py`.
 
-**Interfaces:** retain the current Parquet dataset constructors and add optional training partition settings. The schema migration renames `require_indices` to `require_structure_tokens`; it does not retain legacy source/header aliases. Add `rank`/`world_size` to `MixtureSampler` with defaults 0/1 and `set_epoch(epoch: int)`; its `__len__` reports local emitted samples. Loader lengths report actual local batches. Evaluator uses unwrapped replicated model and ordinary final state reduction, not `gather_for_metrics` on accumulated states.
+**Interfaces:** retain the current Parquet dataset constructors and add optional training partition settings. The schema migration renames `require_indices` to `require_structure_tokens`; it does not retain legacy source/header aliases. Add `rank`/`world_size` to `MixtureSampler` with defaults 0/1 and `set_epoch(epoch: int)`; its `__len__` reports local emitted samples. Training loader lengths report actual local batches. Iterable evaluation loader lengths remain estimates because workers can each emit a partial final batch; count yielded batches and actual metric observations instead of using `len(eval_loader)` for population accounting. Evaluator uses unwrapped replicated model and ordinary final state reduction, not `gather_for_metrics` on accumulated states.
 
 The probe accepts `--case coverage|eval-tail`, `--output PATH`, `--workers N`, and `--accum N`, and writes `rank_{rank}.json` with `ids`, `micro_steps`, and `optimizer_steps`. Task 6 adds `empty-labels` when its implementation exists. Create source data once before launching ranks; every process must consume the same fixture.
 
@@ -640,6 +642,34 @@ the two-worker path. A separate finite-FP16 check reproduced NaN from
 `logits.sum() * 0.0` and zero loss/gradients from `(logits * 0.0).sum()`.
 
 The full suite, distributed checks, builds, and accelerator checks were not
-rerun during this review. Repeat the blocked worker test and the Task 14
-release checks in a compatible environment before treating September 22's
-complete-suite evidence as validation of the combined schema revision.
+rerun during that focused schema review. The subsequent plan review below
+supplies current CPU-suite evidence; builds and accelerator checks still need
+fresh validation for the combined schema revision.
+
+### Plan review and CPU validation — September 29, 2026
+
+Reviewed checkout: `8abe04e`. Direct reproduction confirmed that both
+`TokenizedDataset` and `IterableTokenizedDataset` accept
+`list<list<list<string>>>` coordinates containing numeric-looking strings.
+Task 2 now records the missing type check and regression coverage as open work;
+this documentation update does not implement the fix. Task 5 now limits its
+exact loader-length guarantee to training, matching the accepted iterable
+evaluation behavior in the completion record.
+
+The initial CPU-suite run stopped after **387 passed, 3 failed** because the
+sandbox blocked local sockets used by workers and distributed tests. Rerunning
+with local sockets available used:
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=src ACCELERATE_USE_CPU=true \
+  CUDA_VISIBLE_DEVICES='' HIP_VISIBLE_DEVICES='' ROCR_VISIBLE_DEVICES='' \
+  OMP_NUM_THREADS=1 TOKENIZERS_PARALLELISM=false \
+  /tmp/stok-parquet-venv/bin/python -m pytest tests/unit tests/integration \
+  -q --disable-warnings --maxfail=3
+```
+
+Result: **457 passed, 2 skipped, 102 warnings** in **217.38 seconds**. This run
+includes the previously blocked worker test and real two-process CPU distributed
+checks. The two skips are accelerator-only cases. It closes the CPU-suite
+validation gap for the combined Parquet revision, but does not validate the
+pending coordinate-type rejection, package builds, or accelerator behavior.
