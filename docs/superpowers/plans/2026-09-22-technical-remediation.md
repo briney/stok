@@ -423,7 +423,7 @@ The probe accepts `--case coverage|eval-tail`, `--output PATH`, `--workers N`, a
 
 **Interfaces:** keep `mlm_collate` tuple returns; allow optional `generator: torch.Generator | None = None` and `eval_seed: int | None = None`, `dataset_name: str = ''`. Explicit mask/pad arguments must match tokenizer metadata; omitted values derive from it. Random replacement IDs are the IDs for the 20 standard amino-acid token strings, validated as single known tokens.
 
-- [ ] Add a reordered vocabulary fixture, special-token-only input, zero-mask probability, and invalid-probability cases. The eval determinism contract should be tested directly:
+- [x] Add a reordered vocabulary fixture, special-token-only input, zero-mask probability, and invalid-probability cases. The eval determinism contract should be tested directly:
 
   ```python
   kwargs = dict(max_len=12, eval_seed=123, dataset_name="validation")
@@ -434,10 +434,10 @@ The probe accepts `--case coverage|eval-tail`, `--output PATH`, `--workers N`, a
   ```
 
   Repeat with p in different batch positions and worker counts; verify train collation stays stochastic.
-- [ ] Run MLM tests and establish vocabulary/determinism failures.
-- [ ] Derive IDs and replacement candidates; validate probability ranges and `mask_token_prob + random_token_prob <= 1`. For eval, form a local per-sample generator with `hashlib.blake2b` over unambiguous encoded seed/dataset/sequence_id/sequence components (use JSON serialization), not Python `hash()`. Replace every masking/random-replacement draw with the local generator.
-- [ ] Wrap the entire evaluation traversal, including iterator creation, in saved/restored Python/NumPy/torch CPU and active CUDA RNG state. Seed optional stochastic decoding explicitly for repeatability at a fixed evaluation configuration; document that batching-invariant top-p sampling is not guaranteed. Use a dedicated DataLoader generator for eval worker initialization. Test that inserting evaluation does not change the next training random draws.
-- [ ] Run MLM unit/integration suites and an evaluation-with-workers regression. Commit: `fix: derive MLM token semantics and isolate eval randomness`.
+- [x] Run MLM tests and establish vocabulary/determinism failures.
+- [x] Derive IDs and replacement candidates; validate probability ranges and `mask_token_prob + random_token_prob <= 1`. For eval, form a local per-sample generator with `hashlib.blake2b` over unambiguous encoded seed/dataset/sequence_id/sequence components (use JSON serialization), not Python `hash()`. Replace every masking/random-replacement draw with the local generator.
+- [x] Wrap the entire evaluation traversal, including iterator creation, in saved/restored Python/NumPy/torch CPU and active CUDA RNG state. Seed optional stochastic decoding explicitly for repeatability at a fixed evaluation configuration; document that batching-invariant top-p sampling is not guaranteed. Use a dedicated DataLoader generator for eval worker initialization. Test that inserting evaluation does not change the next training random draws.
+- [x] Run MLM unit/integration suites and an evaluation-with-workers regression. Commit: `fix: derive MLM token semantics and isolate eval randomness`.
 
 ## Task 11 — Fix additive-plus-padding attention masks
 
@@ -714,3 +714,4 @@ verification is recorded below and committed separately.
 | 7 | Verified requested-metric precedence, actual label/coordinate capabilities, decoder auto-activation, aliases/conflicts, and effective configuration snapshots. Existing implementation retained. | Registry and decoder auto-enable modules: **30 passed**; Task 2 structure-folder and Task 3 FAPE checks also passed. |
 | 8 | Retained exact evaluation populations and coordinated failures. Training now omits unavailable token accuracy for FAPE-only windows, emits token/protein observation counts, and handles perplexity exponent overflow without aborting valid updates. | Both new logging assertions failed before the fix. Evaluation/base/logger/harness and FAPE/progress modules: **95 passed, 2 accelerator-only skipped**; Task 1 also exercised real distributed metric failures and tails. |
 | 9 | Verified biological and finite-coordinate candidates, original sequence separation, masked APC, unique pairs, protein-level weighting, local logistic randomness, stable ordering, and retained duplicates. Existing estimator implementation retained. | Contact module: **45 passed**; Task 2 already exercised MLM structure evaluation and Task 1 exercised distributed logistic aggregation. |
+| 10 | Verified tokenizer-derived masking/replacement IDs, probability validation, stable sample-identity evaluation masks across batching/workers, stochastic training, and restored evaluation RNG/model state. Existing implementation retained. | MLM collator and CLI modules: **17 passed**; Task 8 evaluator cases also verified repeatability and RNG restoration. |
