@@ -10,7 +10,7 @@
 
 **Spec:** [Technical analysis](../../TECHNICAL_ANALYSIS.md), findings F01–F19, committed in `5e80556`, supplies the historical requirements baseline. The [current input contract](../../../README.md#training-data-format), introduced in `1e59137` and preserved through the merge in `4d34046`, governs the schema and examples below.
 
-**Status:** Implemented and merged into `main`: remediation via PR #5 (`9a0d9dd`), followed by the Parquet schema changes via PR #6 (`53b3dec`). Updated September 29, 2026 for the current input contract. Coordinate-type validation remains an open follow-up identified in the September 29 plan review; see Task 2 and the review record below. Task checklists retain the original execution instructions; completion and validation evidence is recorded below and in the technical analysis. Pre-fix failure instructions describe the historical baseline, not expected failures in the current code.
+**Status:** Implemented and merged into `main`: remediation via PR #5 (`9a0d9dd`), followed by the Parquet schema changes via PR #6 (`53b3dec`). Updated September 29, 2026 for the current input contract. The coordinate-type validation follow-up identified in the September 29 plan review is implemented locally on `fix/parquet-coordinate-schema`; see Task 2 and the follow-up record below. Task checklists retain the original execution instructions; completion and validation evidence is recorded below and in the technical analysis. Pre-fix failure instructions describe the historical baseline, not expected failures in the current code.
 
 ## Scope and design decisions
 
@@ -206,7 +206,7 @@ Execute the listed order for a simple serial workflow. Tasks 4, 5, and 11 are in
 
 **Interfaces:** implement the mask/decoder signatures in the file map. Dataset constructors use `require_structure_tokens: bool = True`; set false for sequence-only MLM or label-free evaluation. Collators consume `sequence_id`, `sequence`, optional `structure_tokens`, and optional `coords`. Add optional `num_classes: int | None = None` to `_tokenize_and_align` for class-boundary validation; CLI supplies the actual codebook size. Retain existing positional arguments and tuple returns. Add one shared coordinate-alignment function in `collate.py`: `align_coords(coords: Tensor | None, *, residue_count: int, token_length: int) -> Tensor[token_length,3,3]`.
 
-- [ ] **Open follow-up — September 29 plan review:** enforce coordinate Arrow-type validation in the shared `_parquet_columns` helper. Both dataset classes currently accept nested string coordinates and silently convert them to floats. Extend `test_parquet_dataset.py` to reject nested strings (including numeric-looking strings), booleans, and malformed nesting for single files and a malformed later shard; retain acceptance tests for numeric coordinates and missing optional coordinates. Validate only selected coordinate columns so `load_coords=false` continues to omit them. Report the source path and column in schema errors.
+- [x] **Completed follow-up — September 29 plan review:** enforce coordinate Arrow-type validation in the shared `_parquet_columns` helper. The reviewed baseline accepted nested string coordinates and silently converted them to floats in both dataset classes. Extended `test_parquet_dataset.py` to reject nested strings (including numeric-looking strings), booleans, and malformed nesting for single files and a malformed later shard; retained acceptance tests for numeric coordinates and missing optional coordinates. Validate only selected coordinate columns so `load_coords=false` continues to omit them. Report the source path and column in schema errors.
 - [ ] Add the failing alignment test and mixed-coordinate batches for both collators. Reuse `test_parquet_dataset.py` for null-element alignment and truncation, typed integer lists, sequence-only MLM, negative-ID/whole-null-list/length/type rejection, legacy-header/CSV rejection, required columns in every shard, and shards with missing optional coordinates. Update synthetic integration datasets whose label lengths currently disagree with their sequence lengths; do not relax the validation to accommodate those fixtures. The collator-level example below uses the loader's internal `-1` sentinel; the source Parquet list is `[7, null, 9]`.
 
   ```python
@@ -673,3 +673,24 @@ includes the previously blocked worker test and real two-process CPU distributed
 checks. The two skips are accelerator-only cases. It closes the CPU-suite
 validation gap for the combined Parquet revision, but does not validate the
 pending coordinate-type rejection, package builds, or accelerator behavior.
+
+### Coordinate-schema follow-up — September 29, 2026
+
+Implemented the remaining Task 2 follow-up on `fix/parquet-coordinate-schema`,
+based on `5e52a35`. Both Parquet loaders now validate selected coordinates in
+`_parquet_columns` before reading rows: exactly three nested Arrow list levels
+with integer or floating-point elements. Standard, large, fixed-size, and mixed
+list representations remain supported. Row-shape checks and missing-coordinate
+handling remain in place; `load_coords=false` omits malformed coordinate columns.
+Schema errors identify the source file and `coordinates` column.
+
+The existing Parquet module passed **25 tests** before changes. New regressions
+first reproduced **14 schema-validation failures**; after the fix, **69 tests
+passed**. An independent review also ran all 69 tests and found no issues.
+
+Final CPU validation used the same environment and full-suite command recorded
+above: **501 passed, 2 skipped, 102 warnings** in **219.06 seconds**. This includes
+the alignment, structure-folder, mixed-shard, worker, and two-process distributed
+regressions. Ruff, compileall, and whitespace checks also passed. The two skips
+remain accelerator-only cases; package builds and accelerator checks were not
+rerun for this follow-up. No push or merge was performed.

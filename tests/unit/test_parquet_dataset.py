@@ -205,3 +205,99 @@ def test_shards_with_missing_optional_coordinates(tmp_path, load_coords):
     else:
         assert "coords" not in first
         assert "coords" not in second
+
+
+@pytest.mark.parametrize("sharded", [False, True])
+@pytest.mark.parametrize("load_coords", [False, True])
+@pytest.mark.parametrize(
+    "coordinates,coordinate_type",
+    [
+        ([[["1", "2", "3"]] * 3] * 4, pa.list_(pa.list_(pa.list_(pa.string())))),
+        ([[["x", "y", "z"]] * 3] * 4, pa.list_(pa.list_(pa.list_(pa.large_string())))),
+        ([[[True, False, True]] * 3] * 4, pa.list_(pa.list_(pa.list_(pa.bool_())))),
+        (1.0, pa.float64()),
+        ([1.0, 2.0, 3.0], pa.list_(pa.float64())),
+        ([[1.0, 2.0, 3.0]] * 4, pa.list_(pa.list_(pa.float64()))),
+        ([[[[1.0, 2.0, 3.0]]] * 3] * 4, pa.list_(pa.list_(pa.list_(pa.list_(pa.float64()))))),
+    ],
+    ids=["numeric-strings", "strings", "booleans", "scalar", "one-list", "two-lists", "four-lists"],
+)
+def test_coordinate_schema_checked_only_when_loaded(
+    tmp_path, sharded, load_coords, coordinates, coordinate_type
+):
+    if sharded:
+        write_parquet(tmp_path / "a.parquet")
+    path = tmp_path / "b.parquet"
+    write_parquet(path)
+    table = pq.read_table(path).append_column(
+        "coordinates", pa.array([coordinates], type=coordinate_type)
+    )
+    pq.write_table(table, path)
+    cls = IterableTokenizedDataset if sharded else TokenizedDataset
+    source = str(tmp_path if sharded else path)
+    if load_coords:
+        with pytest.raises(ValueError, match="coordinates") as exc:
+            cls(source, max_length=8, load_coords=True)
+        assert str(path) in str(exc.value)
+    else:
+        ds = cls(source, max_length=8, load_coords=False)
+        items = list(ds) if sharded else [ds[0]]
+        assert len(items) == (2 if sharded else 1)
+        assert all("coords" not in item for item in items)
+
+
+@pytest.mark.parametrize("sharded", [False, True])
+@pytest.mark.parametrize(
+    "coordinate_type",
+    [
+        pa.list_(pa.list_(pa.list_(pa.int32()))),
+        pa.list_(pa.list_(pa.list_(pa.int64()))),
+        pa.list_(pa.list_(pa.list_(pa.float32()))),
+        pa.list_(pa.list_(pa.list_(pa.float64()))),
+        pa.large_list(pa.large_list(pa.large_list(pa.float32()))),
+        pa.list_(pa.large_list(pa.list_(pa.float64()))),
+        pa.list_(pa.list_(pa.list_(pa.float32(), 3), 3)),
+    ],
+)
+def test_numeric_coordinate_schema_preserves_values_and_missing_rows(
+    tmp_path, sharded, coordinate_type
+):
+    path = tmp_path / "data.parquet"
+    table = pa.table(
+        {
+            "sequence_id": ["p1", "missing"],
+            "sequence": ["ACDE", "ACDE"],
+            "structure_tokens": [[1, 2, 3, 4], [1, 2, 3, 4]],
+            "coordinates": pa.array(
+                [[[[1, 2, 3]] * 3] * 4, None], type=coordinate_type
+            ),
+        }
+    )
+    pq.write_table(table, path)
+    if sharded:
+        ds = IterableTokenizedDataset(
+            str(tmp_path), max_length=8, shuffle_shards=False, shuffle_rows=False
+        )
+        present, missing = list(ds)
+    else:
+        ds = TokenizedDataset(str(path), max_length=8)
+        present, missing = ds[0], ds[1]
+    torch.testing.assert_close(
+        present["coords"][:4], torch.tensor([[[1.0, 2.0, 3.0]] * 3] * 4)
+    )
+    assert torch.isnan(present["coords"][4:]).all()
+    assert torch.isnan(missing["coords"]).all()
+
+
+@pytest.mark.parametrize("sharded", [False, True])
+def test_numeric_coordinate_rows_still_require_backbone_shape(tmp_path, sharded):
+    path = tmp_path / "data.parquet"
+    write_parquet(path)
+    table = pq.read_table(path).append_column(
+        "coordinates", pa.array([[[[1.0, 2.0]] * 3] * 4])
+    )
+    pq.write_table(table, path)
+    cls = IterableTokenizedDataset if sharded else TokenizedDataset
+    ds = cls(str(tmp_path if sharded else path), max_length=8)
+    with pytest.raises(ValueError, match="p1: coordinates.*shape"):
+        next(iter(ds)) if sharded else ds[0]
