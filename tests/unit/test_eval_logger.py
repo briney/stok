@@ -1,6 +1,5 @@
 """Unit tests for the MetricLogger class."""
 
-import pytest
 
 from stok.eval.logger import MetricLogger
 
@@ -312,3 +311,12 @@ def test_log_eval_epoch_in_metrics_not_duplicated():
     # P@L should be logged
     assert "P@L" in msg or "p_at_l" in msg
 
+
+
+def test_unavailable_metric_diagnostics_remain_visible():
+    logger = MetricLogger(console=None, wandb=None, log_file=None, is_main=True)
+    message = logger._format_eval_message('validation',
+        {'rmsd/num_valid': 0., 'rmsd/num_skipped': 5., 'rmsd/num_failed': 0.}, 1, None)
+    assert 'rmsd unavailable' in message
+    assert 'rmsd/num_skipped' in message
+    assert 'RMSD 0.000' not in message

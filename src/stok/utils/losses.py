@@ -1,11 +1,12 @@
 import torch
 import torch.nn.functional as F
 
-from .geometry import frames_from_ncac
+from .geometry import frames_from_ncac, sanitize_coordinates, fp32_autocast_context
 
 
 def token_ce_loss(
-    logits: torch.Tensor, labels: torch.Tensor, ignore_index: int = -100
+    logits: torch.Tensor, labels: torch.Tensor, ignore_index: int = -100,
+    *, reduction: str = "mean",
 ) -> torch.Tensor:
     """Compute cross-entropy loss over structure tokens.
 
@@ -17,19 +18,17 @@ def token_ce_loss(
     Returns:
         Scalar loss tensor.
     """
+    if reduction not in {"mean", "sum"}:
+        raise ValueError("reduction must be mean or sum")
     C = int(logits.size(-1))
-    logits_flat = logits.view(-1, C)
-    labels_flat = labels.view(-1)
-    # Treat any label outside [0, C) as ignore_index to avoid device asserts
-    invalid = (labels_flat < 0) | (labels_flat >= C)
-    if invalid.any():
-        labels_flat = labels_flat.clone()
-        labels_flat[invalid] = ignore_index
-    return F.cross_entropy(
-        logits_flat,
-        labels_flat,
-        ignore_index=ignore_index,
-    )
+    labels_flat = labels.reshape(-1)
+    supervised = labels_flat != ignore_index
+    if (supervised & ((labels_flat < 0) | (labels_flat >= C))).any():
+        raise ValueError(f"Target class IDs must be in [0, {C}) or ignore_index")
+    if not supervised.any():
+        return logits.sum() * 0.0
+    return F.cross_entropy(logits.reshape(-1, C), labels_flat,
+                           ignore_index=ignore_index, reduction=reduction)
 
 
 def fape_loss(
@@ -64,55 +63,38 @@ def fape_loss(
     if pred_coords.ndim != 4 or pred_coords.shape[-2:] != (3, 3):
         raise ValueError("coords must be shaped [B, L, 3, 3] with atoms (N, CA, C)")
 
-    # 1) Per-residue frames for predicted and true
-    T_pred = frames_from_ncac(pred_coords)
-    T_true = frames_from_ncac(true_coords)
+    with fp32_autocast_context(pred_coords.device.type):
+        pred_coords, true_coords, residue_valid = sanitize_coordinates(
+            pred_coords, true_coords, residue_mask)
+        T_pred = frames_from_ncac(pred_coords)
+        T_true = frames_from_ncac(true_coords)
+        pair_mask = residue_valid[:, :, None] & residue_valid[:, None, :]
+        full_mask = pair_mask[..., None].expand(-1, -1, -1, 3)
 
-    # 2) Build masks (valid residues/atoms). Default: infer from GT finiteness
-    if residue_mask is None:
-        residue_valid_true = torch.isfinite(true_coords).all(dim=(-2, -1))  # [B, L]
-        residue_valid = residue_valid_true
-    else:
-        residue_valid = residue_mask.to(torch.bool)
+        # 3) Transform all atoms j into all frames i (global pairwise)
+        Ti_pred_inv = T_pred.invert()
+        Ti_true_inv = T_true.invert()
 
-    # Also require predicted residues to be finite
-    residue_valid_pred = torch.isfinite(pred_coords).all(dim=(-2, -1))  # [B, L]
-    residue_valid = residue_valid & residue_valid_pred
+        # Broadcast transforms across all j, atoms by arranging dims so that
+        # the transform's batch dims [B, Li] are the trailing ellipsis dims.
+        # Shapes through the pipeline:
+        #   pred_coords: [B, Lj, 3a, 3]
+        #   p_in:        [Lj, 3a, B, 1, 3]  (the 1 will broadcast to Li)
+        #   applied:     [Lj, 3a, B, Li, 3]
+        #   permuted:    [B, Li, Lj, 3a, 3]
+        p_pred_in = pred_coords.permute(1, 2, 0, 3).unsqueeze(-2)
+        p_true_in = true_coords.permute(1, 2, 0, 3).unsqueeze(-2)
 
-    # Set invalid frames to identity to avoid NaNs in transforms
-    T_pred = T_pred.mask(~residue_valid)
-    T_true = T_true.mask(~residue_valid)
+        P_pred_local = Ti_pred_inv.apply(p_pred_in).permute(2, 3, 0, 1, 4)
+        P_true_local = Ti_true_inv.apply(p_true_in).permute(2, 3, 0, 1, 4)
 
-    pair_mask = residue_valid[:, :, None] & residue_valid[:, None, :]  # [B, L, L]
-    # Atom validity requires both true and predicted atoms to be finite
-    atom_valid_true = torch.isfinite(true_coords).all(dim=-1)  # [B, L, 3]
-    atom_valid_pred = torch.isfinite(pred_coords).all(dim=-1)  # [B, L, 3]
-    atom_valid = atom_valid_true & atom_valid_pred  # [B, L, 3]
-    full_mask = pair_mask[:, :, :, None] & atom_valid[:, None, :, :]  # [B, Li, Lj, 3]
+        # 4) Per-pair atom errors with clamping and length scaling
+        d = torch.linalg.norm(P_pred_local - P_true_local, dim=-1)  # [B, Li, Lj, 3]
+        per = torch.clamp(d, max=clamp) / (length_scale + eps)
 
-    # 3) Transform all atoms j into all frames i (global pairwise)
-    Ti_pred_inv = T_pred.invert()
-    Ti_true_inv = T_true.invert()
-
-    # Broadcast transforms across all j, atoms by arranging dims so that
-    # the transform's batch dims [B, Li] are the trailing ellipsis dims.
-    # Shapes through the pipeline:
-    #   pred_coords: [B, Lj, 3a, 3]
-    #   p_in:        [Lj, 3a, B, 1, 3]  (the 1 will broadcast to Li)
-    #   applied:     [Lj, 3a, B, Li, 3]
-    #   permuted:    [B, Li, Lj, 3a, 3]
-    p_pred_in = pred_coords.permute(1, 2, 0, 3).unsqueeze(-2)
-    p_true_in = true_coords.permute(1, 2, 0, 3).unsqueeze(-2)
-
-    P_pred_local = Ti_pred_inv.apply(p_pred_in).permute(2, 3, 0, 1, 4)
-    P_true_local = Ti_true_inv.apply(p_true_in).permute(2, 3, 0, 1, 4)
-
-    # 4) Per-pair atom errors with clamping and length scaling
-    d = torch.linalg.norm(P_pred_local - P_true_local, dim=-1)  # [B, Li, Lj, 3]
-    per = torch.clamp(d, max=clamp) / (length_scale + eps)
-
-    # 5) Reductions: per-example mean over valid pairs/atoms, then batch mean
-    per = torch.where(full_mask, per, torch.zeros_like(per))
-    denom = full_mask.sum(dim=(1, 2, 3)).clamp_min(1).to(per.dtype)
-    loss_b = per.sum(dim=(1, 2, 3)) / denom  # [B]
-    return loss_b.mean()
+        # 5) Reductions: per-example mean over valid pairs/atoms, then batch mean
+        per = torch.where(full_mask, per, torch.zeros_like(per))
+        denom = full_mask.sum(dim=(1, 2, 3)).clamp_min(1).to(per.dtype)
+        loss_b = per.sum(dim=(1, 2, 3)) / denom  # [B]
+        eligible = residue_valid.any(dim=1)
+        return loss_b.sum() / eligible.sum().clamp_min(1)

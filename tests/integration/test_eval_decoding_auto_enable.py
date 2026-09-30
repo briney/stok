@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 
 import numpy as np
@@ -25,14 +24,13 @@ def _make_coords(L: int) -> list[list[list[float]]]:
 def _write_parquet_with_coords(path: Path, n_rows: int, seq_min_len: int, seq_max_len: int, indices_len: int):
     path.parent.mkdir(parents=True, exist_ok=True)
     rows = []
-    indices_val = [0] * indices_len
     for i in range(n_rows):
         L = np.random.randint(seq_min_len, seq_max_len + 1)
         seq = "".join(np.random.choice(list("ACDEFGHIKLMNPQRSTVWY"), size=L))
         rows.append({
             "pid": f"pc{i}",
             "protein_sequence": seq,
-            "indices": indices_val,
+            "indices": [0] * len(seq),
             "coordinates": _make_coords(L),
         })
     df = pd.DataFrame(rows)
@@ -44,10 +42,8 @@ def _make_decoder_ckpt(tmp_path: Path, preset: str = "lite") -> Path:
     # match d_code to codebook preset
     codebook = load_codebook(preset=preset)
     d_code = int(codebook.shape[1])
-    if preset == "base":
-        arch = dict(d_model=1024, ffn_mult=4.0, n_layers=16, n_heads=16, attn_kv_heads=1, num_memory_tokens=0, max_length=1280)
-    else:
-        arch = dict(d_model=1024, ffn_mult=4.0, n_layers=12, n_heads=8, attn_kv_heads=2, num_memory_tokens=0, max_length=1280)
+    from stok.models.decoder import _DECODER_ARCH
+    arch = _DECODER_ARCH[preset]
     model = GeometricDecoder(
         d_model=arch["d_model"],
         n_heads=arch["n_heads"],
@@ -63,7 +59,28 @@ def _make_decoder_ckpt(tmp_path: Path, preset: str = "lite") -> Path:
     return ckpt_path
 
 
-def test_eval_decoding_auto_enables_decoder(tmp_path):
+@pytest.mark.parametrize("activation", ["auto", "whitelist", "decoder_only", "label_free", "label_free_mmcif", "metrics_example"])
+def test_eval_decoding_auto_enables_decoder(tmp_path, monkeypatch, activation):
+    from stok.eval import Evaluator
+    import importlib
+    train_module = importlib.import_module("stok.cli.train")
+    original_load = train_module.load_pretrained_decoder
+    loaded = []
+    def load(**kwargs):
+        decoder = original_load(**kwargs)
+        loaded.append(decoder)
+        return decoder
+    monkeypatch.setattr(train_module, "load_pretrained_decoder", load)
+    evaluated = []
+    original_evaluate = Evaluator.evaluate
+    def evaluate(self, *args, **kwargs):
+        metrics = original_evaluate(self, *args, **kwargs)
+        evaluated.append(metrics)
+        return metrics
+    monkeypatch.setattr(Evaluator, "evaluate", evaluate)
+    from stok.models.decoder import _DECODER_ARCH
+    monkeypatch.setitem(_DECODER_ARCH, "lite", dict(d_model=32, ffn_mult=1.,
+        n_layers=1, n_heads=2, attn_kv_heads=1, num_memory_tokens=0, max_length=32))
     runner = CliRunner()
 
     max_len = 16
@@ -74,6 +91,16 @@ def test_eval_decoding_auto_enables_decoder(tmp_path):
     _write_parquet_with_coords(train_pq, n_rows=4, seq_min_len=12, seq_max_len=18, indices_len=indices_len)
     _write_parquet_with_coords(eval_pq, n_rows=2, seq_min_len=12, seq_max_len=18, indices_len=indices_len)
 
+    if activation.startswith("label_free"):
+        from tests.integration.test_structure_folder_eval import _create_structure_folder
+        eval_pq = _create_structure_folder(tmp_path, n_files=2)
+        if activation == "label_free_mmcif":
+            from Bio.PDB import PDBParser, MMCIFIO
+            for pdb in eval_pq.glob('*.pdb'):
+                writer = MMCIFIO()
+                writer.set_structure(PDBParser(QUIET=True).get_structure('test', pdb))
+                writer.save(str(pdb.with_suffix('.cif')))
+                pdb.unlink()
     ckpt_path = _make_decoder_ckpt(tmp_path, preset="lite")
 
     overrides = [
@@ -108,8 +135,35 @@ def test_eval_decoding_auto_enables_decoder(tmp_path):
         f"train.project_path={tmp_path.as_posix()}",
     ]
 
+    if activation == "metrics_example":
+        import re
+        import shlex
+        readme = (Path(__file__).parents[2] / 'README.md').read_text()
+        recipe = re.search(r'# enable decoder but metrics-only \(no FAPE\)\n(.*?)\n\n', readme, re.S).group(1)
+        recipe = recipe.replace("\\\n", " ").replace('/abs/path/eval.parquet', str(eval_pq))
+        overrides = [x for x in overrides if not x.startswith(('data.eval=', 'train.decoding.eval_enabled='))]
+        overrides += shlex.split(recipe)[2:]
+
+    if activation == "whitelist":
+        overrides = [x for x in overrides if not x.startswith("data.eval=")]
+        overrides += ["train.decoding.eval_enabled=false", f"+data.eval.val.path={eval_pq}",
+                      "+data.eval.val.metrics.only=[lddt]"]
+    elif activation == "decoder_only":
+        overrides += ["train.decoding.eval_enabled=false", "model.decoder.enabled=true"]
     result = runner.invoke(cli, ["train", *overrides])  # type: ignore[arg-type]
     assert result.exit_code == 0, result.output
     assert "Training complete." in result.output
 
 
+
+    snapshot = (tmp_path/'configs/run.yaml').read_text()
+    assert len(loaded) == 1
+    assert evaluated
+    if activation == "decoder_only":
+        assert "lddt" not in evaluated[0]
+    else:
+        assert 'load_coords: true' in snapshot
+        assert 0 < evaluated[0]["lddt"] <= 1
+
+    if activation.startswith("label_free"):
+        assert "acc" not in evaluated[0] and "ppl" not in evaluated[0]

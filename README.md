@@ -235,7 +235,7 @@ When training from Parquet, you can optionally include a `coordinates` column co
 - If present, the dataset yields an additional tensor `coords` with shape `[max_len, 3, 3]`, padded/truncated to `data.max_len` with `NaN`s.
 - If absent, the dataset omits the `coords` key; CSV inputs never include `coords`.
 
-When FAPE is enabled, the geometric decoder is auto‑enabled and the training loop decodes predicted structure tokens into coordinates to compute a FAPE loss against the provided `coords`. When eval‑time decoding is enabled, the decoder is also auto‑enabled to produce coordinates for structure metrics (lDDT/TM/RMSD). If neither FAPE nor eval‑time decoding is enabled, the decoder remains disabled.
+When FAPE is enabled, the geometric decoder is auto‑enabled and the training loop decodes predicted structure tokens into coordinates to compute a FAPE loss against the provided `coords`. When eval‑time decoding is enabled, the decoder is also auto‑enabled to produce coordinates for structure metrics (lDDT/TM/RMSD). With neither feature requested, the decoder stays disabled unless explicitly enabled with `model.decoder.enabled=true`; loading it alone does not select metrics.
 
 ### learning rate schedule
 
@@ -300,11 +300,11 @@ Notes:
 
 ## using the pre-trained decoder (FAPE and eval metrics)
 
-The decoder is optional and is auto‑enabled whenever you enable FAPE or eval‑time decoding. You can also enable it explicitly if you want eval‑time structure metrics without FAPE:
+The decoder is optional and is auto‑enabled whenever you enable FAPE or eval‑time decoding. For eval‑time structure metrics without FAPE, enable evaluation decoding and provide a coordinate-capable evaluation source:
 
 ```bash
 # enable decoder but metrics-only (no FAPE)
-stok train model.decoder.enabled=true train.fape.enabled=false
+stok train train.decoding.eval_enabled=true train.fape.enabled=false data.eval=/abs/path/eval.parquet
 
 # two-stage training: start with token CE only, then add FAPE
 stok train \
@@ -615,3 +615,63 @@ stok train \
   train.eval.metrics.p_at_l.enabled=true \
   train.eval.metrics.p_at_l.contact_threshold=6.0
 ```
+
+### Remediation compatibility notes
+
+Training progress is measured in **successful optimizer updates**. `train.num_steps`,
+logging/evaluation/checkpoint intervals, and scheduler steps use that unit;
+`grad_accum_steps` controls input batches per update. Checkpoints include
+`global_step`, `micro_step` (consumed input batches), and
+`step_unit: optimizer_update`. Older runs used inconsistent counters and should
+not be compared by step number. A final partial accumulation window is flushed;
+empty supervision never advances the optimizer or scheduler. A completely empty
+or unsupervised training pass fails clearly.
+
+MLM rejects enabled FAPE or decoder/structure-decoding options.
+Only AdamW, a frozen codebook with its tied classifier, and a frozen training
+CLI decoder are supported. Unsupported option values raise before initialization.
+The standalone decoder loader still supports `freeze=False` for external callers.
+Checkpoint **resume is unsupported**: running in an existing project directory
+starts a new run and may replace its artifacts. Use a new project path to preserve
+an old run. Writes use a temporary sibling followed by atomic replacement,
+including `latest.pt`; this prevents a failed write from replacing a valid file,
+but does not provide full crash recovery or power-loss durability.
+
+`model.init.std` was unused and has been removed. Token embeddings use a normal
+distribution with standard deviation 0.02; other layers use their module
+initializers. `STokModel.forward(coords=...)` now rejects ignored geometry inputs;
+the training loop owns decoder/FAPE supervision. The legacy `gcpnet.py` module
+is not integrated into this training path.
+
+Sequences must encode one token per residue. Coordinates and labels retain
+biological positions, with ignored/NaN boundary and padding slots. Missing labels
+stay ignored in place; invalid nonignored class IDs and malformed lengths fail
+validation. Missing coordinates exclude observations; nonfinite predictions on
+valid targets fail evaluation/training rather than disappear from a score.
+
+Evaluation resolves global settings, then each dataset's `metrics.only`, then
+its individual metric overrides. `enabled: null` selects defaults from decoding
+intent and available data. Requested coordinate metrics automatically load
+coordinates unless `load_coords: false` explicitly forbids it, which raises for
+required work. Unlabeled structure evaluation omits classification metrics;
+explicit requests for unavailable resources fail. Numeric metric aliases remain,
+with `num_valid`, `num_skipped`, and `num_failed` diagnostics. Unavailable scores
+are omitted, never replaced by a favorable zero.
+
+Accuracy and perplexity aggregate supervised tokens. Structural scores and
+contact P@L average eligible proteins. P@L uses finite C-alpha coordinates,
+biological positions, original sequence separation, and unique upper-triangle
+pairs. Its top-k size is the smaller of observed residues and eligible pairs.
+Attention mode requires attention; similarity is selected explicitly with
+`use_attention: false`. Logistic mode averages held-out scores within each protein
+before averaging proteins, using a stable content ordering across ranks; insufficient structures use a disclosed mean-attention
+fallback. The retained feature/label limit defaults to 1 GiB across ranks
+(`train.eval.metrics.p_at_l.logreg_max_feature_bytes`), divided evenly without
+borrowing. It does **not** bound model or attention peak memory.
+
+MLM validation masking is seeded by dataset and sample identity, independently
+of batching/workers; training masking remains stochastic. Evaluation restores
+Python, NumPy, and torch RNG state. Top-p decoding repeats for a fixed evaluation
+configuration; invariance to changed batch sizes is not promised. Scores from
+older runs affected by alignment, missing data, aggregation, or contact-candidate
+errors are not directly comparable to corrected scores.

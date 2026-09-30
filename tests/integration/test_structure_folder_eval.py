@@ -1,8 +1,6 @@
 """Integration tests for structure folder evaluation datasets."""
 
-import numpy as np
 import pandas as pd
-import pytest
 from click.testing import CliRunner
 from pathlib import Path
 
@@ -65,7 +63,7 @@ def _create_train_csv(tmp_path: Path, n_rows: int, seq_len: int, indices_len: in
     rows = []
     for i in range(n_rows):
         seq = random_protein_sequence(seq_len, seq_len)
-        indices = " ".join(str(j % 128) for j in range(indices_len))
+        indices = " ".join(str(j % 128) for j in range(len(seq)))
         rows.append({"pid": f"train_{i}", "protein_sequence": seq, "indices": indices})
     
     df = pd.DataFrame(rows)
@@ -257,8 +255,8 @@ class TestStructureFolderMetricWhitelist:
         ]
 
         result = runner.invoke(cli, ["train", *overrides])
-        assert result.exit_code == 0, result.output
-        assert "Training complete." in result.output
+        assert result.exit_code != 0
+        assert "missing labels" in str(result.exception)
 
 
 class TestStructureFolderChainId:

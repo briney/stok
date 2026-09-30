@@ -54,6 +54,36 @@ def test_checkpointing_artifacts(tmp_path):
     assert (logs_dir / "train.log").is_file()
     assert (model_dir / "final.pt").is_file()
 
-    # No auto-resume behavior is tested here; starting a new run should be explicit in future updates.
+    import torch
+    first = torch.load(model_dir / "final.pt", weights_only=False)
+    assert first["global_step"] == 3 and first["micro_step"] == 3
+    assert first["step_unit"] == "optimizer_update"
+    # Existing artifacts never silently resume the next run.
+    cfg.train.num_steps = 1
+    run_training(cfg)
+    second = torch.load(model_dir / "final.pt", weights_only=False)
+    assert second["global_step"] == 1 and second["micro_step"] == 1
 
 
+
+
+def test_interrupted_checkpoint_preserves_previous_file(tmp_path, monkeypatch):
+    import pytest
+    import torch
+    from omegaconf import OmegaConf
+    from stok.cli.train import _save_checkpoint
+    path = tmp_path / 'latest.pt'
+    torch.save({'old': True}, path)
+    model = torch.nn.Linear(1, 1)
+    optimizer = torch.optim.AdamW(model.parameters())
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _: 1.)
+    def interrupted(payload, target):
+        with open(target, 'wb') as handle:
+            handle.write(b'partial')
+        raise OSError('interrupted checkpoint')
+    monkeypatch.setattr(torch, 'save', interrupted)
+    with pytest.raises(OSError, match='interrupted checkpoint'):
+        _save_checkpoint(path, model=model, optimizer=optimizer, scheduler=scheduler,
+                         global_step=1, cfg=OmegaConf.create({}), accelerator=None)
+    assert torch.load(path, weights_only=False) == {'old': True}
+    assert list(tmp_path.iterdir()) == [path]

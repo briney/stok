@@ -1,11 +1,45 @@
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Optional
 
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 import torch
 from torch.utils.data import Dataset, IterableDataset, get_worker_info
+
+
+def distributed_rank() -> tuple[int, int]:
+    import torch.distributed as dist
+    if dist.is_available() and dist.is_initialized():
+        return dist.get_rank(), dist.get_world_size()
+    return 0, 1
+
+
+def _usable_samples(dataset) -> int:
+    total = dataset.num_samples
+    batch_size = getattr(dataset, "training_batch_size", None)
+    if batch_size is not None:
+        quantum = dataset.world_size * batch_size * max(1, getattr(dataset, "num_workers", 0))
+        total = total // quantum * quantum
+    return total
+
+
+def _partition_length(dataset) -> int:
+    return len(range(dataset.rank, _usable_samples(dataset), dataset.world_size))
+
+
+def _partition_stream(dataset):
+    """Assign positions once, outside any nested mixture streams."""
+    dataset._epoch += 1
+    worker = get_worker_info()
+    worker_id, workers = (worker.id, worker.num_workers) if worker else (0, 1)
+    usable = _usable_samples(dataset)
+    # ponytail: each rank scans the deterministic stream; index shards if parsing becomes a bottleneck.
+    for position, item in enumerate(dataset._iter_unsharded(dataset._epoch)):
+        if position >= usable:
+            break
+        if position % dataset.world_size == dataset.rank and (position // dataset.world_size) % workers == worker_id:
+            yield item
 
 
 class BaseTokenizedDataset:
@@ -44,9 +78,9 @@ class BaseTokenizedDataset:
         if require_indices or "indices" in row.index:
             raw = row.get("indices")
             if raw is None or (isinstance(raw, float) and pd.isna(raw)):
-                indices = []
+                indices = [] if require_indices else [-1] * len(seq)
             elif isinstance(raw, (list, tuple, np.ndarray)):
-                indices = [int(i) for i in list(raw) if i is not None]
+                indices = [-1 if i is None or pd.isna(i) else int(i) for i in list(raw)]
             elif isinstance(raw, str):
                 s = raw.strip()
                 indices = [int(i) for i in s.split()] if s else []
@@ -58,6 +92,9 @@ class BaseTokenizedDataset:
                 except Exception:
                     indices = []
 
+            if len(indices) != len(seq):
+                raise ValueError(f"Sample {pid}: indices length {len(indices)} != sequence length {len(seq)}")
+            indices = indices[:max_length]
             idx_length = len(indices)
             pad_length = max(0, max_length - idx_length)
 
@@ -170,6 +207,9 @@ class BaseTokenizedDataset:
                 else:
                     coords_arr = None
 
+            missing_coords = raw_coords is None or (isinstance(raw_coords, float) and pd.isna(raw_coords))
+            if not missing_coords and (coords_arr is None or len(coords_arr) != len(seq)):
+                raise ValueError(f"Sample {pid}: invalid coordinates shape or length")
             if coords_arr is None:
                 coords_arr = np.empty((0, 3, 3), dtype=np.float32)
 
@@ -227,6 +267,7 @@ class TokenizedDataset(Dataset, BaseTokenizedDataset):
 
         self.max_length = max_length
         self.require_indices = require_indices
+        self.has_labels = "indices" in self.data.columns
 
         # Validate required columns
         required_cols = {"pid", "protein_sequence"}
@@ -281,6 +322,8 @@ class DummySequenceDataset(Dataset):
         self.seq_len = seq_len
         self.vocab_size = vocab_size
         self.num_classes = num_classes
+        self.has_labels = True
+        self.has_coords = False
         self.pad_id = pad_id
 
     def __len__(self) -> int:
@@ -388,6 +431,7 @@ class IterableTokenizedDataset(IterableDataset, BaseTokenizedDataset):
         self.shuffle_rows = bool(shuffle_rows)
         self.seed = int(seed)
         self._epoch = -1
+        self.rank, self.world_size = distributed_rank()
         # user-intent flag for whether to load coordinates at all
         self._load_coords = bool(load_coords)
         self._require_indices = bool(require_indices)
@@ -405,122 +449,58 @@ class IterableTokenizedDataset(IterableDataset, BaseTokenizedDataset):
 
         self._shards: list[Path] = []
         self._rows_per_shard: list[int] = []
+        self._columns_per_shard: list[set[str]] = []
         cols_union: set[str] = set()
         for sp in shard_paths:
             pf = pq.ParquetFile(sp.as_posix())
             self._shards.append(sp)
             self._rows_per_shard.append(int(pf.metadata.num_rows))
-            try:
-                schema = pf.schema_arrow
-                cols_union.update([f.name for f in schema])
-            except Exception:
-                # best-effort
-                pass
+            columns = set(pf.schema_arrow.names)
+            self._columns_per_shard.append(columns)
+            required = {"pid", "protein_sequence"} | ({"indices"} if require_indices else set())
+            if required - columns:
+                raise ValueError(f"Shard {sp}: missing columns {sorted(required - columns)}")
+            cols_union.update(columns)
         self._offsets = np.cumsum([0] + self._rows_per_shard[:-1]).tolist()
         self._total_rows = int(sum(self._rows_per_shard))
+        self.num_samples = self._total_rows
 
         # Track whether the directory has coordinates and indices columns
-        self.has_coords = ("coordinates" in cols_union) if len(cols_union) > 0 else True
+        self.has_coords = bool(load_coords) and "coordinates" in cols_union
+        self.has_labels = "indices" in cols_union
         self._has_indices_col = (
             ("indices" in cols_union) if len(cols_union) > 0 else True
         )
 
     def __len__(self) -> int:
-        # Per-rank sample cap to keep equal sample counts across ranks
-        world_size = 1
-        try:
-            import torch.distributed as dist  # local import to avoid hard dep at import time
+        return _partition_length(self)
 
-            if dist.is_available() and dist.is_initialized():
-                world_size = dist.get_world_size()
-        except Exception:
-            world_size = 1
-        return self._total_rows // max(1, int(world_size))
+    def __iter__(self):
+        return _partition_stream(self)
 
-    def __iter__(self) -> Iterator[dict[str, torch.Tensor]]:
-        # epoch counter for deterministic shuffles
-        self._epoch += 1
-        seed_base = (0x9E3779B97F4A7C15 ^ self.seed) + (self._epoch * 0x1000003)
-
-        # rank/world from torch.distributed if available
-        rank = 0
-        world_size = 1
-        try:
-            import torch.distributed as dist
-
-            if dist.is_available() and dist.is_initialized():
-                world_size = dist.get_world_size()
-                rank = dist.get_rank()
-        except Exception:
-            rank, world_size = 0, 1
-
-        # dataloader workers
-        wi = get_worker_info()
-        if wi is None:
-            num_workers, worker_id = 1, 0
-        else:
-            num_workers, worker_id = wi.num_workers, wi.id
-
-        # per-epoch shard order
+    def _iter_unsharded(self, epoch: int):
+        seed_base = (0x9E3779B97F4A7C15 ^ self.seed) + epoch * 0x1000003
         shard_indices = list(range(len(self._shards)))
         if self.shuffle_shards:
-            rng = np.random.RandomState(seed_base & 0xFFFFFFFF)
-            rng.shuffle(shard_indices)
-
-        # equalize per-rank sample counts (drop global remainder)
-        per_rank_cap = self._total_rows // max(1, world_size)
-        emitted = 0
-
+            np.random.RandomState(seed_base & 0xFFFFFFFF).shuffle(shard_indices)
         for s_idx in shard_indices:
-            if emitted >= per_rank_cap:
-                break
-            spath = self._shards[s_idx]
-            nrows = int(self._rows_per_shard[s_idx])
-            start = int(self._offsets[s_idx])
-
-            # rows assigned to this rank (global striping)
-            rank_rows = [
-                i for i in range(nrows) if ((start + i) % max(1, world_size)) == rank
-            ]
-            if not rank_rows:
-                continue
-
-            if self.shuffle_rows:
-                rng_rows = np.random.RandomState(
-                    (seed_base + 1009 + s_idx) & 0xFFFFFFFF
-                )
-                rng_rows.shuffle(rank_rows)
-
-            # within-rank worker striping
-            rank_rows = rank_rows[worker_id :: max(1, num_workers)]
-            if not rank_rows:
-                continue
-
-            # read only required columns
-            want_cols = ["pid", "protein_sequence"]
-            # Only include indices if required and present
-            if self._require_indices and self._has_indices_col:
-                want_cols.append("indices")
-            elif self._has_indices_col:
-                # Include indices if present even if not required
-                want_cols.append("indices")
-
-            use_coords = self.has_coords and self._load_coords
+            columns = self._columns_per_shard[s_idx]
+            want = ["pid", "protein_sequence"]
+            if "indices" in columns:
+                want.append("indices")
+            use_coords = self._load_coords and "coordinates" in columns
             if use_coords:
-                want_cols.append("coordinates")
-            df = pd.read_parquet(spath.as_posix(), columns=want_cols)
-
-            for i in rank_rows:
-                if emitted >= per_rank_cap:
-                    break
-                row = df.iloc[i]
-                yield BaseTokenizedDataset._build_output_from_row(
-                    row,
-                    max_length=self.max_length,
-                    has_coords=use_coords,
-                    require_indices=self._require_indices,
-                )
-                emitted += 1
+                want.append("coordinates")
+            df = pd.read_parquet(self._shards[s_idx], columns=want)
+            rows = list(range(len(df)))
+            if self.shuffle_rows:
+                np.random.RandomState((seed_base + 1009 + s_idx) & 0xFFFFFFFF).shuffle(rows)
+            for i in rows:
+                try:
+                    yield self._build_output_from_row(df.iloc[i], max_length=self.max_length,
+                        has_coords=use_coords, require_indices=self._require_indices)
+                except ValueError as exc:
+                    raise ValueError(f"Shard {self._shards[s_idx]}: {exc}") from exc
 
 
 class MapAsIterableDataset(IterableDataset):
@@ -542,34 +522,25 @@ class MapAsIterableDataset(IterableDataset):
     ):
         super().__init__()
         self.dataset = dataset
+        self.has_labels = getattr(dataset, "has_labels", True)
+        self.has_coords = getattr(dataset, "has_coords", False)
         self.num_samples = int(num_samples) if num_samples is not None else len(dataset)
         self.seed = int(seed)
         self._epoch = -1
+        self.rank, self.world_size = distributed_rank()
 
     def __len__(self) -> int:
-        return int(self.num_samples)
+        return _partition_length(self)
 
     def __iter__(self):
-        self._epoch += 1
-        wi = get_worker_info()
-        if wi is None:
-            num_workers, worker_id = 1, 0
-        else:
-            num_workers, worker_id = wi.num_workers, wi.id
+        return _partition_stream(self)
 
-        # Deterministic per-epoch, per-worker RNG
-        seed_base = (0x9E3779B97F4A7C15 ^ self.seed) + (self._epoch * 0x1000003)
-        rng = np.random.RandomState((seed_base + worker_id) & 0xFFFFFFFF)
-
-        n = int(self.num_samples)
-        L = int(len(self.dataset))
-        if L <= 0 or n <= 0:
-            return iter(())
-
-        # worker striping over sample positions (keeps global sample count ~num_samples)
-        for _pos in range(worker_id, n, max(1, num_workers)):
-            j = int(rng.randint(0, L))
-            yield self.dataset[j]
+    def _iter_unsharded(self, epoch: int):
+        rng = np.random.RandomState(((0x9E3779B97F4A7C15 ^ self.seed) + epoch * 0x1000003) & 0xFFFFFFFF)
+        if len(self.dataset) == 0:
+            return
+        for _ in range(self.num_samples):
+            yield self.dataset[int(rng.randint(0, len(self.dataset)))]
 
 
 class InterleavedIterableDataset(IterableDataset):
@@ -608,16 +579,19 @@ class InterleavedIterableDataset(IterableDataset):
         fr = fr / float(fr.sum())
 
         self.datasets = datasets
+        self.has_labels = any(getattr(ds, "has_labels", True) for ds in datasets)
+        self.has_coords = any(getattr(ds, "has_coords", False) for ds in datasets)
         self.fractions = fr.tolist()
         self.seed = int(seed)
         self._epoch = -1
+        self.rank, self.world_size = distributed_rank()
 
         if num_samples is None:
             # best-effort: sum dataset lengths if available
             total = 0
             for ds in datasets:
                 try:
-                    total += int(len(ds))  # type: ignore[arg-type]
+                    total += ds.num_samples
                 except Exception:
                     total = 0
                     break
@@ -625,33 +599,24 @@ class InterleavedIterableDataset(IterableDataset):
         self.num_samples = int(num_samples)
 
     def __len__(self) -> int:
-        return int(self.num_samples)
+        return _partition_length(self)
 
     def __iter__(self):
-        self._epoch += 1
-        wi = get_worker_info()
-        if wi is None:
-            num_workers, worker_id = 1, 0
-        else:
-            num_workers, worker_id = wi.num_workers, wi.id
+        return _partition_stream(self)
 
-        n = int(self.num_samples)
-        if n <= 0:
-            return iter(())
-
-        # Deterministic per-epoch, per-worker RNG
-        seed_base = (0x9E3779B97F4A7C15 ^ self.seed) + (self._epoch * 0x1000003)
-        rng = np.random.RandomState((seed_base + worker_id) & 0xFFFFFFFF)
-
-        # Create iterators; we re-create an iterator when it is exhausted.
-        iters = [iter(ds) for ds in self.datasets]
-        fr = np.asarray(self.fractions, dtype=np.float64)
-
-        for _pos in range(worker_id, n, max(1, num_workers)):
-            # Choose dataset id according to fractions
-            ds_idx = int(rng.choice(len(iters), p=fr))
+    def _iter_unsharded(self, epoch: int):
+        seed_base = (0x9E3779B97F4A7C15 ^ self.seed) + epoch * 0x1000003
+        rng = np.random.RandomState(seed_base & 0xFFFFFFFF)
+        cycles = [epoch] * len(self.datasets)
+        iters = [ds._iter_unsharded(epoch) for ds in self.datasets]
+        for _ in range(self.num_samples):
+            ds_idx = int(rng.choice(len(iters), p=self.fractions))
             try:
                 yield next(iters[ds_idx])
             except StopIteration:
-                iters[ds_idx] = iter(self.datasets[ds_idx])
-                yield next(iters[ds_idx])
+                cycles[ds_idx] += 1
+                iters[ds_idx] = self.datasets[ds_idx]._iter_unsharded(cycles[ds_idx])
+                try:
+                    yield next(iters[ds_idx])
+                except StopIteration as exc:
+                    raise ValueError("Cannot sample an empty mixture source") from exc

@@ -52,7 +52,6 @@ class TestApplyAPC:
 
     def test_apc_formula_correctness(self):
         """Test that APC formula is correctly implemented."""
-        B, L = 1, 4
         matrix = torch.tensor([[[1.0, 2.0, 3.0, 4.0],
                                  [2.0, 3.0, 4.0, 5.0],
                                  [3.0, 4.0, 5.0, 6.0],
@@ -699,6 +698,7 @@ class TestPrecisionAtLLogisticRegression:
             assert "seq_len" in struct
             # Features should be [n_pairs, n_layers * n_heads]
             assert struct["features"].shape[1] == n_layers * H
+            assert len(struct["sample_key"]) == 64
 
     def test_logreg_reset(self):
         """Test that reset clears accumulated structures."""
@@ -764,7 +764,7 @@ class TestPrecisionAtLLogisticRegression:
         # With correlated features, should get reasonable precision
         assert result["p_at_l"] >= 0.0
 
-    def test_logreg_state_tensors_returns_empty(self):
+    def test_logreg_state_tensors_includes_population(self):
         """Test that state_tensors returns empty list for logreg mode (uses objects)."""
         metric = PrecisionAtLMetric(use_logistic_regression=True)
         
@@ -776,7 +776,8 @@ class TestPrecisionAtLLogisticRegression:
         tensors = metric.state_tensors()
         
         # Logreg mode uses object gathering, not tensor gathering
-        assert len(tensors) == 0
+        assert len(tensors) == 1
+        assert tensors[0].numel() == 5
 
     def test_logreg_state_objects_returns_structures(self):
         """Test that state_objects returns the accumulated structures."""
@@ -922,3 +923,79 @@ class TestPrecisionAtLLogisticRegressionConfig:
         assert p_at_l.logreg_lambda == 0.15
         assert p_at_l.logreg_n_iterations == 5
 
+
+
+def test_contact_population_ignores_specials_missing_coords_and_keeps_gaps():
+    from omegaconf import OmegaConf
+    cfg = OmegaConf.create({'model': {'encoder': {'pad_id': 1}}})
+    # Two observed residues separated by three original positions: one evaluable pair.
+    tokens = torch.tensor([[0, 4, 4, 4, 4, 2, 1]])
+    coords = torch.full((1, 7, 3, 3), float('nan'))
+    coords[0, 1] = 0.
+    coords[0, 4] = 1.
+    attention = torch.ones(1, 1, 7, 7)
+    metric = PrecisionAtLMetric(min_seq_sep=3)
+    metric.update({'attentions': [attention], 'residue_mask': (tokens == 4)}, tokens, None, coords, cfg)
+    result = metric.compute()
+    assert result['p_at_l'] == 1.
+    assert result['p_at_l/num_valid'] == 1
+    # All specials and no eligible residue pair is unavailable, not precision zero.
+    metric.reset()
+    metric.update({'attentions': [attention], 'residue_mask': (tokens == 4)}, tokens, None,
+                  torch.full_like(coords, float('nan')), cfg)
+    assert 'p_at_l' not in metric.compute()
+    assert metric.compute()['p_at_l/num_skipped'] == 1
+
+
+def test_contact_attention_apc_excludes_boundary_values():
+    from stok.eval.metrics.contact import _extract_attention_contacts
+    raw = torch.tensor([[[[0., 9., 2.], [9., 0., 1.], [2., 1., 0.]]]])
+    base = _extract_attention_contacts({'attentions': [raw], 'residue_mask': torch.ones(1, 3, dtype=torch.bool)})
+    padded = torch.full((1, 1, 6, 6), 1000.)
+    padded[:, :, 1:4, 1:4] = raw
+    mask = torch.tensor([[False, True, True, True, False, False]])
+    actual = _extract_attention_contacts({'attentions': [padded], 'residue_mask': mask})
+    torch.testing.assert_close(actual[:, 1:4, 1:4], base)
+
+
+def test_logreg_fallback_is_protein_weighted():
+    import pytest
+    metric = PrecisionAtLMetric(use_logistic_regression=True)
+    metric._logreg_structures = [
+        {'features': torch.tensor([[10.], [1.]]), 'labels': torch.tensor([1., 0.]), 'seq_len': 1},
+        {'features': torch.tensor([[10.], [9.], [8.], [1.]]), 'labels': torch.zeros(4), 'seq_len': 3},
+    ]
+    with pytest.warns(UserWarning, match='Not enough structures'):
+        result = metric.compute()
+    assert result['p_at_l'] == .5
+    assert result['p_at_l/num_valid'] == 2
+
+
+def test_logreg_rejects_projected_feature_storage_before_collection():
+    metric = PrecisionAtLMetric(use_logistic_regression=True, min_seq_sep=1,
+                               logreg_max_feature_bytes=100)
+    tokens = torch.full((1, 8), 4)
+    coords = torch.zeros(1, 8, 3, 3)
+    cfg = OmegaConf.create({'model': {'encoder': {'pad_id': 1}}})
+    with pytest.raises(ValueError, match='logreg_max_feature_bytes'):
+        metric.update({'attentions': [torch.ones(1, 2, 8, 8)]}, tokens, None, coords, cfg)
+    assert metric._logreg_structures == []
+
+
+def test_fitted_logreg_is_order_invariant_and_preserves_duplicates():
+    generator = torch.Generator().manual_seed(19)
+    structures = []
+    for i in range(8):
+        features = torch.randn(30, 3, generator=generator)
+        structures.append({'features': features, 'labels': (features[:, i % 3] > 0).float(),
+                           'seq_len': 8, 'sample_key': str(i)})
+    results = []
+    for order in (list(range(8)), [0, 2, 4, 6, 1, 3, 5, 7]):
+        metric = PrecisionAtLMetric(use_logistic_regression=True, logreg_n_train=2,
+                                   logreg_n_iterations=5)
+        metric._logreg_structures = [structures[i] for i in order]
+        results.append(metric.compute())
+    assert results[0] == results[1]
+    metric._logreg_structures = structures + structures
+    metric.compute()
+    assert len(metric._logreg_structures) == 16

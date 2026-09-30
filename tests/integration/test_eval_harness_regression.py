@@ -20,7 +20,7 @@ def test_eval_harness_produces_expected_metrics_codebook(tmp_path):
         {
             "pid": [f"train_{i}" for i in range(10)],
             "protein_sequence": ["MKTAYIAKQRQISFVKSHFSRQ" for _ in range(10)],
-            "indices": ["0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20" for _ in range(10)],
+            "indices": [" ".join(map(str, range(len("MKTAYIAKQRQISFVKSHFSRQ")))) for _ in range(10)],
         }
     )
     train_data.to_csv(train_csv, index=False)
@@ -29,7 +29,7 @@ def test_eval_harness_produces_expected_metrics_codebook(tmp_path):
         {
             "pid": [f"eval_{i}" for i in range(5)],
             "protein_sequence": ["MKTAYIAKQRQISFVKSHFS" for _ in range(5)],
-            "indices": ["0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17" for _ in range(5)],
+            "indices": [" ".join(map(str, range(len("MKTAYIAKQRQISFVKSHFS")))) for _ in range(5)],
         }
     )
     eval_data.to_csv(eval_csv, index=False)
@@ -134,7 +134,7 @@ def test_eval_harness_multiple_eval_datasets(tmp_path):
         {
             "pid": [f"train_{i}" for i in range(10)],
             "protein_sequence": ["MKTAYIAKQRQISFVKSHFSRQ" for _ in range(10)],
-            "indices": ["0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20" for _ in range(10)],
+            "indices": [" ".join(map(str, range(len("MKTAYIAKQRQISFVKSHFSRQ")))) for _ in range(10)],
         }
     )
     train_data.to_csv(train_csv, index=False)
@@ -143,7 +143,7 @@ def test_eval_harness_multiple_eval_datasets(tmp_path):
         {
             "pid": [f"val_{i}" for i in range(5)],
             "protein_sequence": ["MKTAYIAKQRQISFVKSHFS" for _ in range(5)],
-            "indices": ["0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17" for _ in range(5)],
+            "indices": [" ".join(map(str, range(len("MKTAYIAKQRQISFVKSHFS")))) for _ in range(5)],
         }
     )
     eval_val_data.to_csv(eval_val_csv, index=False)
@@ -152,7 +152,7 @@ def test_eval_harness_multiple_eval_datasets(tmp_path):
         {
             "pid": [f"test_{i}" for i in range(5)],
             "protein_sequence": ["MKTAYIAKQRQISFVKSHFS" for _ in range(5)],
-            "indices": ["0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17" for _ in range(5)],
+            "indices": [" ".join(map(str, range(len("MKTAYIAKQRQISFVKSHFS")))) for _ in range(5)],
         }
     )
     eval_test_data.to_csv(eval_test_csv, index=False)

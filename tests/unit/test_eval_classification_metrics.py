@@ -120,7 +120,8 @@ class TestAccuracyMetric:
         metric.reset()
 
         result = metric.compute()
-        assert result["acc"] == 0.0  # No data after reset
+        assert "acc" not in result
+        assert result["acc/num_valid"] == 0
 
 
 class TestMaskedAccuracyMetric:
@@ -206,5 +207,32 @@ class TestPerplexityMetric:
         """Test perplexity with no data returns inf."""
         metric = PerplexityMetric()
         result = metric.compute()
-        assert result["ppl"] == float("inf")
+        assert "ppl" not in result
+        assert result["ppl/num_valid"] == 0
 
+
+
+def test_perplexity_weights_supervised_tokens():
+    metric = PerplexityMetric()
+    cfg = _make_cfg()
+    for n, ce in [(1, 1.), (9, 3.)]:
+        labels = torch.zeros(1, n, dtype=torch.long)
+        metric.update({'classification_loss': torch.tensor(ce)}, labels, labels, None, cfg)
+    assert math.isclose(metric.compute()['ppl'], math.exp(2.8), rel_tol=1e-6)
+    assert metric.compute()['ppl/num_valid'] == 10
+
+
+def test_perplexity_rebatching_real_logits_and_missing_population():
+    logits = torch.randn(5, 4, 3)
+    labels = torch.randint(3, (5, 4))
+    labels[::2, 2:] = -100
+    values = []
+    for size in (1, 2, 3):
+        metric = PerplexityMetric()
+        for start in range(0, 5, size):
+            metric.update({'logits': logits[start:start+size]}, labels[start:start+size],
+                          labels[start:start+size], None, _make_cfg())
+        values.append(metric.compute()['ppl'])
+    assert max(values)-min(values) < 1e-6
+    assert 'ppl' not in PerplexityMetric().compute()
+    assert 'acc' not in AccuracyMetric().compute()

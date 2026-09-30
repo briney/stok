@@ -22,6 +22,9 @@ class Metric(Protocol):
     """
 
     name: ClassVar[str]
+    num_valid: int
+    num_skipped: int
+    num_failed: int
     objectives: ClassVar[set[str] | None]
     requires_decoder: ClassVar[bool]
     requires_coords: ClassVar[bool]
@@ -102,7 +105,24 @@ class MetricBase(ABC):
         Args:
             **kwargs: Metric-specific configuration parameters.
         """
-        pass
+        self.reset_population()
+
+    def reset_population(self):
+        self.num_valid = self.num_skipped = self.num_failed = 0
+
+    def diagnostics(self) -> dict[str, float]:
+        return {f"{self.name}/{key}": float(getattr(self, key))
+                for key in ("num_valid", "num_skipped", "num_failed")}
+
+    def population_values(self):
+        return [self.num_valid, self.num_skipped, self.num_failed]
+
+    def load_population(self, tensor, default_valid=0):
+        if tensor.numel() >= 5:
+            self.num_valid, self.num_skipped, self.num_failed = map(int, tensor[-3:].tolist())
+        else:
+            self.num_valid, self.num_skipped, self.num_failed = int(default_valid), 0, 0
+
 
     @abstractmethod
     def update(

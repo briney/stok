@@ -92,7 +92,7 @@ class MultiheadAttention(nn.Module):
                     sdpa_mask = sdpa_mask | kpm
                 else:
                     # assume additive mask; add -inf where kpm is True
-                    sdpa_mask = sdpa_mask + kpm.to(sdpa_mask.dtype) * float("-inf")
+                    sdpa_mask = sdpa_mask.masked_fill(kpm, float("-inf"))
 
         # convert boolean mask to additive mask expected by SDPA
         if sdpa_mask is not None and sdpa_mask.dtype == torch.bool:
@@ -147,7 +147,9 @@ class MultiheadAttention(nn.Module):
         if attn_mask is not None:
             attn_scores = attn_scores + attn_mask
 
-        attn_weights = F.softmax(attn_scores, dim=-1)
+        fully_blocked = torch.isneginf(attn_scores).all(dim=-1, keepdim=True)
+        attn_scores = attn_scores.masked_fill(fully_blocked, 0)
+        attn_weights = F.softmax(attn_scores, dim=-1).masked_fill(fully_blocked, 0)
 
         # Apply dropout during training
         attn_weights_dropped = F.dropout(

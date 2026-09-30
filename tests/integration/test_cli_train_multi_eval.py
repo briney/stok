@@ -12,10 +12,9 @@ def _write_csv(path: Path, n_rows: int, seq_min_len: int, seq_max_len: int, indi
     with path.open("w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["pid", "protein_sequence", "indices"])  # header
-        indices_str = " ".join(["0"] * indices_len)
         for i in range(n_rows):
             seq = random_protein_sequence(seq_min_len, seq_max_len)
-            writer.writerow([f"p{i}", seq, indices_str])
+            writer.writerow([f"p{i}", seq, " ".join(["0"] * len(seq))])
 
 
 def test_cli_train_with_multiple_eval_datasets(tmp_path):

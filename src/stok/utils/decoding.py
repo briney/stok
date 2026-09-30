@@ -123,3 +123,14 @@ def decode_coords(
     return bb.view(bb.size(0), bb.size(1), 3, 3)
 
 
+
+def decode_token_aligned_coords(decoder, codes: torch.Tensor,
+                                residue_mask: torch.Tensor) -> torch.Tensor:
+    """Decode residue slots only, then restore the full token-aligned shape."""
+    result = codes.new_full((*codes.shape[:2], 3, 3), float("nan"))
+    active = residue_mask.any(dim=1)
+    if active.any():
+        decoded = decode_coords(decoder, codes[active, 1:-1], residue_mask[active, 1:-1])
+        result[active, 1:-1] = decoded.masked_fill(
+            ~residue_mask[active, 1:-1, None, None], float("nan"))
+    return result

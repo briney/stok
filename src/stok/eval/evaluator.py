@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-import warnings
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
+import random
+
+import numpy as np
 
 import torch
 import torch.nn as nn
@@ -11,8 +13,9 @@ from accelerate.utils import gather_object
 from omegaconf import DictConfig
 from torch.utils.data import DataLoader
 
+from stok.utils.masking import residue_mask_from_tokens
 from stok.eval.base import Metric
-from stok.eval.registry import build_metrics
+from stok.eval.registry import build_metrics, resolve_eval_metrics
 
 if TYPE_CHECKING:
     pass
@@ -76,6 +79,7 @@ class Evaluator:
 
         # Cache for metrics per eval dataset
         self._metrics_cache: dict[str, list[Metric]] = {}
+        self._capabilities: dict[str, tuple[bool, bool, dict]] = {}
 
         # Cache for whether attention weights are needed per eval dataset
         self._needs_attentions_cache: dict[str, bool] = {}
@@ -91,18 +95,23 @@ class Evaluator:
         """
         cache_key = eval_name or "__default__"
         if cache_key not in self._metrics_cache:
+            has_coords, has_labels, resolved = self._capabilities.get(cache_key,
+                (self.has_coords, True, resolve_eval_metrics(self.cfg, eval_name, objective=self.objective)))
             metrics = build_metrics(
                 cfg=self.cfg,
                 objective=self.objective,
                 decoder=self.decoder,
-                has_coords=self.has_coords,
+                has_coords=has_coords,
+                has_labels=has_labels,
+                resolved=resolved,
                 eval_name=eval_name,
             )
             self._metrics_cache[cache_key] = metrics
 
             # Check if any metric needs attention weights (e.g., p_at_l)
             self._needs_attentions_cache[cache_key] = any(
-                getattr(m, "name", "") == "p_at_l" for m in metrics
+                getattr(m, "name", "") == "p_at_l" and
+                (m.use_attention or m.use_logistic_regression) for m in metrics
             )
 
         return self._metrics_cache[cache_key]
@@ -139,19 +148,18 @@ class Evaluator:
         if self.decoder is None:
             return None
 
-        if not self.eval_decode_enabled:
-            return None
-
         # Import decoding utilities
         from stok.utils.decoding import (
-            decode_coords,
+            decode_token_aligned_coords,
             indices_to_codes,
             sample_indices_top_p,
         )
 
         logits = outputs["logits"]
         pad_id = int(self.cfg.model.encoder.pad_id)
-        res_mask = tokens != pad_id
+        res_mask = residue_mask_from_tokens(tokens, pad_id=pad_id,
+            bos_id=int(self.cfg.model.encoder.get("bos_id", 0)),
+            eos_id=int(self.cfg.model.encoder.get("eos_id", 2)))
 
         # Get codebook from model
         unwrapped = _unwrap_model(self.model, self.accelerator)
@@ -168,160 +176,131 @@ class Evaluator:
                 idx = logits.argmax(dim=-1)
 
             codes = indices_to_codes(codebook, idx)
-            pred_coords = decode_coords(self.decoder, codes, res_mask)
+            pred_coords = decode_token_aligned_coords(self.decoder, codes, res_mask)
 
         return pred_coords
 
     def _gather_metric_states(self, metrics: list[Metric]) -> None:
-        """Aggregate metric states across distributed processes.
-
-        Supports two gathering modes:
-        1. Tensor-based gathering (default): For metrics with fixed-size state.
-           Uses accelerator.gather_for_metrics() which requires identical shapes.
-        2. Object-based gathering: For metrics with variable-length state.
-           Uses accelerator.gather_object() which handles arbitrary Python objects.
-
-        Args:
-            metrics: List of metrics to aggregate.
-        """
         if self.accelerator is None:
             return
-
-        device = self.accelerator.device
-
+        states = []
         for metric in metrics:
-            # Check if metric uses object-based gathering (for variable-length data)
-            if hasattr(metric, "state_objects"):
-                objects = metric.state_objects()
-                if objects is not None:
-                    # Use gather_object for variable-length data like lists of dicts
-                    # gather_object is a standalone function from accelerate.utils
-                    gathered = gather_object(objects)
-                    # gathered is a list containing state_objects() from each process
-                    if hasattr(metric, "load_state_objects"):
-                        metric.load_state_objects(gathered)
-                    continue
+            objects = metric.state_objects()
+            if objects is not None:
+                size = sum(s["features"].numel() * s["features"].element_size() +
+                           s["labels"].numel() * s["labels"].element_size() for s in objects)
+                total = self.accelerator.gather(torch.tensor([size], device=self.accelerator.device)).sum().item()
+                if total > metric.logreg_max_feature_bytes:
+                    raise ValueError(f"P@L total feature bytes {total} exceed logreg_max_feature_bytes")
+                metric.load_state_objects(gather_object(objects))
+            tensors = metric.state_tensors()
+            if tensors:
+                states.append((metric, tensors))
+        if not states:
+            return
+        flat = torch.cat([t.flatten().double() for _, tensors in states for t in tensors]).to(self.accelerator.device)
+        gathered = self.accelerator.gather(flat)
+        summed = gathered.reshape(-1, flat.numel()).sum(0)
+        offset = 0
+        for metric, tensors in states:
+            restored = []
+            for tensor in tensors:
+                restored.append(summed[offset:offset+tensor.numel()].reshape(tensor.shape))
+                offset += tensor.numel()
+            metric.load_state_tensors(restored)
 
-            # Fall back to tensor-based gathering for fixed-size state
-            state_tensors = metric.state_tensors()
-            if not state_tensors:
-                continue
+    def _raise_eval_errors(self, error, eval_name):
+        errors = gather_object([error]) if self.accelerator else [error]
+        if any(errors):
+            raise RuntimeError(f"Evaluation dataset {eval_name}: {errors}")
 
-            # Gather and sum each state tensor separately
-            gathered_tensors = []
-            for t in state_tensors:
-                t_device = t.to(device)
-                gathered = self.accelerator.gather_for_metrics(t_device)
+    def evaluate(self, eval_loader: DataLoader, eval_name: str) -> dict[str, float]:
+        """Isolate all evaluation randomness, including DataLoader iteration.
 
-                # Sum across processes
-                # Accelerate's gather_for_metrics concatenates tensors along dim=0,
-                # so a tensor of shape [2] becomes [N*2] with N processes (flattened).
-                # We need to reshape back to [N, *original_shape] before summing.
-                original_size = t_device.numel()
-                gathered_size = gathered.numel()
-
-                if gathered_size == original_size:
-                    # Single process, no aggregation needed
-                    summed = gathered
-                else:
-                    # Multi-process: reshape to [num_processes, *original_shape] then sum
-                    num_processes = gathered_size // original_size
-                    reshaped = gathered.view(num_processes, *t_device.shape)
-                    summed = reshaped.sum(dim=0)
-
-                gathered_tensors.append(summed)
-
-            metric.load_state_tensors(gathered_tensors)
-
-    def evaluate(
-        self,
-        eval_loader: DataLoader,
-        eval_name: str,
-    ) -> dict[str, float]:
-        """Run evaluation on a dataset.
-
-        Args:
-            eval_loader: DataLoader for the evaluation dataset.
-            eval_name: Name of the evaluation dataset.
-
-        Returns:
-            Dictionary mapping metric names to values.
+        Stochastic decoding is repeatable at a fixed configuration; changing
+        batching can change top-p draws. MLM masking is per-sample invariant.
         """
-        metrics = self._get_metrics(eval_name)
+        python_state, numpy_state = random.getstate(), np.random.get_state()
+        devices = list(range(torch.cuda.device_count())) if torch.cuda.is_initialized() else []
+        seed = int(self.cfg.train.get("eval", {}).get("seed", self.cfg.train.get("seed", 1337)))
+        try:
+            with torch.random.fork_rng(devices=devices):
+                torch.default_generator.manual_seed(seed)
+                if devices:
+                    torch.cuda.manual_seed_all(seed)
+                random.seed(seed)
+                np.random.seed(seed % (2**32))
+                return self._evaluate(eval_loader, eval_name)
+        finally:
+            random.setstate(python_state)
+            np.random.set_state(numpy_state)
 
-        # Reset all metrics
+    def _evaluate(self, eval_loader: DataLoader, eval_name: str) -> dict[str, float]:
+        dataset = eval_loader.dataset
+        has_labels = self.objective == "mlm" or getattr(dataset, "has_labels", True)
+        self._capabilities[eval_name] = (getattr(dataset, "has_coords", self.has_coords), has_labels,
+            getattr(eval_loader, "metric_configs", resolve_eval_metrics(self.cfg, eval_name, objective=self.objective)))
+        self._metrics_cache.pop(eval_name, None)
+        metrics = self._get_metrics(eval_name)
         for metric in metrics:
             metric.reset()
-
-        # Check if any metrics require decoding
-        needs_decoding = any(
-            getattr(m, "requires_decoder", False)
-            or getattr(m, "requires_coords", False)
-            for m in metrics
-        )
-
-        # Check if any metrics need attention weights (e.g., p_at_l)
+        needs_decoding = any(metric.requires_decoder for metric in metrics)
         needs_attentions = self._needs_attentions(eval_name)
-
+        n_layers = int(self.cfg.model.encoder.get("n_layers", 12))
+        attention_indices = tuple(sorted({i for m in metrics if m.name == "p_at_l"
+            for i in m.required_attention_layers(n_layers)}))
+        incoming_training = self.model.training
         self.model.eval()
+        eval_model = _unwrap_model(self.model, self.accelerator)
         ignore_index = int(self.cfg.model.classifier.get("ignore_index", -100))
-
-        with torch.no_grad():
-            for batch in eval_loader:
-                # Unpack batch
-                if isinstance(batch, (list, tuple)) and len(batch) == 3:
-                    tokens, labels, coords = batch
-                else:
-                    tokens, labels = batch
-                    coords = None
-
-                # Move to device if not using accelerator
-                if self.accelerator is None:
-                    device = _get_model_device(self.model, self.accelerator)
-                    tokens = tokens.to(device)
-                    labels = labels.to(device)
-                    if coords is not None:
-                        coords = coords.to(device)
-
-                # Forward pass (request attention weights if needed for metrics like p_at_l)
-                outputs = self.model(
-                    tokens=tokens,
-                    labels=labels,
-                    ignore_index=ignore_index,
-                    output_attentions=needs_attentions,
-                )
-
-                # Decode predictions for structure metrics
-                if (
-                    needs_decoding
-                    and self.decoder is not None
-                    and "pred_coords" not in outputs
-                ):
-                    pred_coords = self._decode_predictions(outputs, tokens)
-                    if pred_coords is not None:
-                        outputs["pred_coords"] = pred_coords
-
-                # Update all metrics
-                for metric in metrics:
-                    try:
-                        metric.update(outputs, tokens, labels, coords, self.cfg)
-                    except Exception as e:
-                        warnings.warn(f"Metric '{metric.name}' update failed: {e}")
-
-        # Aggregate across distributed processes
-        self._gather_metric_states(metrics)
-
-        # Compute final metric values
-        results: dict[str, float] = {}
-        for metric in metrics:
+        device = _get_model_device(self.model, self.accelerator)
+        context = "loader/forward"
+        error = None
+        try:
             try:
-                computed = metric.compute()
-                results.update(computed)
-            except Exception as e:
-                warnings.warn(f"Metric '{metric.name}' compute failed: {e}")
-
-        self.model.train()
-        return results
+                with torch.no_grad():
+                    for batch in eval_loader:
+                        context = "forward"
+                        tokens, labels = (t.to(device) for t in batch[:2])
+                        coords = batch[2].to(device) if len(batch) == 3 else None
+                        outputs = eval_model(tokens=tokens, labels=labels if has_labels else None,
+                            ignore_index=ignore_index, output_attentions=needs_attentions,
+                            **({"attention_layer_indices": attention_indices} if needs_attentions else {}))
+                        outputs["residue_mask"] = residue_mask_from_tokens(tokens,
+                            pad_id=int(self.cfg.model.encoder.pad_id),
+                            bos_id=int(self.cfg.model.encoder.get("bos_id", 0)),
+                            eos_id=int(self.cfg.model.encoder.get("eos_id", 2)))
+                        if needs_decoding and "pred_coords" not in outputs:
+                            outputs["pred_coords"] = self._decode_predictions(outputs, tokens)
+                        for metric in metrics:
+                            context = metric.name
+                            failed_before = metric.num_failed
+                            try:
+                                metric.update(outputs, tokens, labels if has_labels else None, coords, self.cfg)
+                            except Exception:
+                                if metric.num_failed == failed_before:
+                                    metric.num_failed += 1
+                                raise
+            except Exception as exc:
+                error = f"{context}: {type(exc).__name__}: {exc}"
+            self._raise_eval_errors(error, eval_name)
+            self._gather_metric_states(metrics)
+            results = {}
+            error = None
+            try:
+                for metric in metrics:
+                    context = metric.name
+                    computed = metric.compute()
+                    results.update(computed)
+                    if getattr(metric, "explicit", False) and metric.num_valid == 0:
+                        raise ValueError(f"{metric.name} unavailable (num_valid=0, "
+                            f"num_skipped={metric.num_skipped}, num_failed={metric.num_failed})")
+            except Exception as exc:
+                error = f"{context}: {type(exc).__name__}: {exc}"
+            self._raise_eval_errors(error, eval_name)
+            return results
+        finally:
+            self.model.train(incoming_training)
 
     def evaluate_all(
         self,

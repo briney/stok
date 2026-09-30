@@ -70,27 +70,27 @@ def test_cli_train_mlm_with_p_at_l_enabled(tmp_path):
     or hidden states from the model.
     """
     # Create minimal data with coords
-    train_csv = tmp_path / "train.csv"
-    eval_csv = tmp_path / "eval.csv"
+    train_csv = tmp_path / "train.parquet"
+    eval_csv = tmp_path / "eval.parquet"
     seq = "MKTAYIAKQRQISFVK"
 
     train_data = pd.DataFrame(
         {
             "pid": [f"train_{i}" for i in range(10)],
             "protein_sequence": [seq for _ in range(10)],
-            "coords": [_generate_coords_string(len(seq)) for _ in range(10)],
+            "coordinates": [np.random.default_rng(42).normal(size=(len(seq), 3, 3)).tolist() for _ in range(10)],
         }
     )
-    train_data.to_csv(train_csv, index=False)
+    train_data.to_parquet(train_csv, index=False)
 
     eval_data = pd.DataFrame(
         {
             "pid": [f"eval_{i}" for i in range(5)],
             "protein_sequence": [seq for _ in range(5)],
-            "coords": [_generate_coords_string(len(seq)) for _ in range(5)],
+            "coordinates": [np.random.default_rng(42).normal(size=(len(seq), 3, 3)).tolist() for _ in range(5)],
         }
     )
-    eval_data.to_csv(eval_csv, index=False)
+    eval_data.to_parquet(eval_csv, index=False)
 
     runner = CliRunner()
     overrides = [
@@ -120,10 +120,9 @@ def test_cli_train_mlm_with_p_at_l_enabled(tmp_path):
     ]
 
     result = runner.invoke(cli, ["train", *overrides])
-    # Note: P@L may not produce output if attention weights aren't exposed
-    # The test primarily verifies no errors are raised
     assert result.exit_code == 0, result.output
     assert "Training complete." in result.output
+    assert "P@L" in result.output
 
 
 def test_p_at_l_metric_config_override(tmp_path):

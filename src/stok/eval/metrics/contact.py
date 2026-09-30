@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from typing import ClassVar
+import hashlib
 
 import torch
 from omegaconf import DictConfig
 
+from stok.utils.masking import residue_mask_from_tokens
 from stok.eval.base import MetricBase
 from stok.eval.registry import register_metric
 
@@ -51,15 +53,11 @@ def _apply_apc(matrix: torch.Tensor) -> torch.Tensor:
     Returns:
         APC-corrected matrix [B, L, L].
     """
-    # Compute row means (average over columns for each row)
-    row_mean = matrix.mean(dim=-1, keepdim=True)  # [B, L, 1]
-    # Compute column means (average over rows for each column)
-    col_mean = matrix.mean(dim=-2, keepdim=True)  # [B, 1, L]
-    # Compute global mean
-    global_mean = matrix.mean(dim=(-1, -2), keepdim=True)  # [B, 1, 1]
-
-    # Compute APC correction term
-    correction = (row_mean * col_mean) / (global_mean + 1e-8)
+    # Sums make correction invariant to excluded (zeroed) boundary positions.
+    row_sum = matrix.sum(dim=-1, keepdim=True)
+    col_sum = matrix.sum(dim=-2, keepdim=True)
+    total = matrix.sum(dim=(-1, -2), keepdim=True)
+    correction = row_sum * col_sum / (total + 1e-8)
 
     return matrix - correction
 
@@ -90,6 +88,10 @@ def _extract_per_layer_head_attention(
     # Rearrange to [B, n_layers, H, L, L]
     stacked = stacked.permute(1, 0, 2, 3, 4)
 
+    mask = outputs.get("residue_mask")
+    if mask is not None:
+        pairs = mask[:, None, None, :, None] & mask[:, None, None, None, :]
+        stacked = stacked.masked_fill(~pairs, 0)
     B, n_layers, n_heads, L, _ = stacked.shape
 
     # Symmetrize and apply APC per layer/head
@@ -139,24 +141,21 @@ def _extract_attention_contacts(
     if attentions is None:
         return None
 
-    # attentions should be a tuple/list of [B, H, L, L] tensors, one per layer
     if isinstance(attentions, (list, tuple)):
+        indices = outputs.get("attention_layer_indices", tuple(range(len(attentions))))
         if layer == "mean":
-            # Average all layers
-            attn = torch.stack(attentions, dim=0).mean(dim=0)
+            selected = attentions
         elif isinstance(layer, int):
-            # Use specific layer by index
-            attn = attentions[layer]
+            original = layer if layer >= 0 else outputs.get("num_attention_layers", len(attentions)) + layer
+            if original not in indices:
+                raise ValueError(f"Missing attention layer {original}")
+            selected = [attentions[indices.index(original)]]
         elif layer == "last":
-            # Use final num_layers layers
-            n = min(num_layers, len(attentions))
-            if n <= 1:
-                attn = attentions[-1]
-            else:
-                # Stack and average the final n layers
-                attn = torch.stack(attentions[-n:], dim=0).mean(dim=0)
+            ordered = sorted(zip(indices, attentions), key=lambda pair: pair[0])
+            selected = [value for _, value in ordered[-num_layers:]]
         else:
-            attn = attentions[-1]
+            raise ValueError(f"Unknown attention_layer: {layer}")
+        attn = selected[0] if len(selected) == 1 else torch.stack(selected).mean(0)
     else:
         attn = attentions
 
@@ -167,6 +166,10 @@ def _extract_attention_contacts(
         contact_probs = attn.max(dim=1).values  # [B, L, L]
     else:
         contact_probs = attn.mean(dim=1)
+
+    mask = outputs.get("residue_mask")
+    if mask is not None:
+        contact_probs = contact_probs.masked_fill(~(mask[:, :, None] & mask[:, None, :]), 0)
 
     # Symmetrize (contacts are symmetric)
     contact_probs = (contact_probs + contact_probs.transpose(-1, -2)) / 2
@@ -185,8 +188,8 @@ class PrecisionAtLMetric(MetricBase):
     sequence length. This is a standard metric for evaluating protein contact
     prediction from language model representations.
 
-    The metric can use attention weights as contact predictions (if available)
-    or fall back to using hidden state similarity.
+    Attention mode requires attention weights; similarity mode is explicit.
+    Scores are averaged over eligible proteins, not over contact pairs.
     """
 
     name: ClassVar[str] = "p_at_l"
@@ -206,6 +209,7 @@ class PrecisionAtLMetric(MetricBase):
         logreg_n_train: int = 20,
         logreg_lambda: float = 0.15,
         logreg_n_iterations: int = 5,
+        logreg_max_feature_bytes: int = 1024**3,
         **kwargs,
     ):
         """Initialize Precision@L metric.
@@ -244,6 +248,10 @@ class PrecisionAtLMetric(MetricBase):
         self.logreg_n_train = logreg_n_train
         self.logreg_lambda = logreg_lambda
         self.logreg_n_iterations = logreg_n_iterations
+        self.logreg_max_feature_bytes = int(logreg_max_feature_bytes)
+        if self.logreg_max_feature_bytes <= 0:
+            raise ValueError("logreg_max_feature_bytes must be positive")
+        self._feature_bytes = 0
 
         # Standard mode accumulators
         self._correct_sum: float = 0.0
@@ -263,185 +271,94 @@ class PrecisionAtLMetric(MetricBase):
     ) -> None:
         """Accumulate precision@L from a batch."""
         if coords is None:
+            self.num_skipped += len(tokens)
             return
-
         with torch.no_grad():
-            # Compute true contact map
-            true_contacts = _compute_contact_map(coords, self.contact_threshold)
-
-            B, L = tokens.shape
-            pad_id = cfg.model.encoder.get("pad_id", 1)
-
-            # Create mask for valid positions and sequence separation
-            valid_mask = tokens != pad_id  # [B, L]
-            pair_mask = valid_mask.unsqueeze(-1) & valid_mask.unsqueeze(-2)  # [B, L, L]
-
-            # Apply sequence separation constraint
-            idx = torch.arange(L, device=tokens.device)
-            sep = (idx.unsqueeze(0) - idx.unsqueeze(1)).abs()  # [L, L]
-            sep_mask = sep >= self.min_seq_sep  # [L, L]
-            pair_mask = pair_mask & sep_mask.unsqueeze(0)  # [B, L, L]
-
-            # Exclude diagonal
-            diag_mask = ~torch.eye(L, dtype=torch.bool, device=tokens.device)
-            pair_mask = pair_mask & diag_mask.unsqueeze(0)
-
-            if self.use_logistic_regression:
-                # Logistic regression mode: accumulate per-structure features
-                self._update_logreg(
-                    outputs, tokens, true_contacts, pair_mask, valid_mask
-                )
-            else:
-                # Standard mode: direct attention-based P@L
-                self._update_standard(
-                    outputs, tokens, true_contacts, pair_mask, valid_mask
-                )
-
-    def _update_logreg(
-        self,
-        outputs: dict,
-        tokens: torch.Tensor,
-        true_contacts: torch.Tensor,
-        pair_mask: torch.Tensor,
-        valid_mask: torch.Tensor,
-    ) -> None:
-        """Accumulate features for logistic regression mode.
-
-        Extracts attention weights from all layers/heads and stores them
-        along with contact labels for each structure.
-        """
-        # Extract per-layer/head attention features
-        attn_features = _extract_per_layer_head_attention(outputs)
-        if attn_features is None:
-            return
-
-        B, n_layers, n_heads, L, _ = attn_features.shape
-
-        for b in range(B):
-            # Get upper triangle mask for this structure (avoid double counting)
-            upper_mask = torch.triu(pair_mask[b], diagonal=1)
-            if upper_mask.sum() == 0:
-                continue
-
-            seq_len = valid_mask[b].sum().item()
-            if seq_len < self.min_seq_sep + 1:
-                continue
-
-            # Extract features for valid pairs
-            # attn_features[b] has shape [n_layers, n_heads, L, L]
-            # We need to flatten to [n_layers * n_heads, L, L] then extract valid pairs
-
-            # Get indices of valid pairs
-            pair_indices = upper_mask.nonzero(as_tuple=False)  # [n_pairs, 2]
-            n_pairs = pair_indices.shape[0]
-            if n_pairs == 0:
-                continue
-
-            i_idx = pair_indices[:, 0]  # [n_pairs]
-            j_idx = pair_indices[:, 1]  # [n_pairs]
-
-            # Extract features: [n_layers, n_heads, n_pairs]
-            # Use advanced indexing to get attention values at (i, j) positions
-            features = attn_features[
-                b, :, :, i_idx, j_idx
-            ]  # [n_layers, n_heads, n_pairs]
-
-            # Reshape to [n_pairs, n_layers * n_heads]
-            features = features.permute(2, 0, 1).reshape(n_pairs, -1)
-
-            # Extract contact labels for valid pairs
-            contact_labels = true_contacts[b, i_idx, j_idx].float()  # [n_pairs]
-
-            # Store on CPU in float32 (required for numpy/sklearn compatibility)
-            self._logreg_structures.append(
-                {
-                    "features": features.float().cpu(),
-                    "labels": contact_labels.float().cpu(),
-                    "seq_len": int(seq_len),
-                }
-            )
-
-    def _update_standard(
-        self,
-        outputs: dict,
-        tokens: torch.Tensor,
-        true_contacts: torch.Tensor,
-        pair_mask: torch.Tensor,
-        valid_mask: torch.Tensor,
-    ) -> None:
-        """Standard P@L computation without logistic regression."""
-        # Get predicted contact probabilities
-        if self.use_attention:
-            pred_contacts = _extract_attention_contacts(
-                outputs,
-                layer=self.attention_layer,
-                head_aggregation=self.head_aggregation,
-                num_layers=self.num_layers,
-            )
-        else:
-            pred_contacts = None
-
-        # Fall back to hidden state similarity if attention not available
-        if pred_contacts is None:
-            hidden = outputs.get("hidden_states")
-            if hidden is None:
-                # Last resort: use logits similarity (not ideal)
-                logits = outputs["logits"]
-                hidden = logits
-
-            # Compute pairwise similarity
-            hidden_norm = hidden / (hidden.norm(dim=-1, keepdim=True) + 1e-8)
-            pred_contacts = torch.bmm(hidden_norm, hidden_norm.transpose(-1, -2))
-
-        B, L = tokens.shape
-
-        for b in range(B):
-            mask_b = pair_mask[b]
-            if mask_b.sum() == 0:
-                continue
-
-            # Get sequence length for this example (excluding padding)
-            seq_len = valid_mask[b].sum().item()
-            if seq_len < self.min_seq_sep + 1:
-                continue
-
-            # Get top-L predictions
-            pred_b = pred_contacts[b].clone()
-            pred_b[~mask_b] = float("-inf")
-
-            # Flatten and get top-L indices
-            flat_pred = pred_b.flatten()
-            # Use upper triangle only to avoid double counting
-            upper_mask = torch.triu(mask_b, diagonal=1).flatten()
-            flat_pred[~upper_mask] = float("-inf")
-
-            k = min(int(seq_len), int(upper_mask.sum().item()))
-            if k <= 0:
-                continue
-
-            top_k_vals, top_k_idx = torch.topk(flat_pred, k=k)
-
-            # Convert flat indices back to 2D
-            top_i = top_k_idx // L
-            top_j = top_k_idx % L
-
-            # Check how many of top-L predictions are true contacts
-            true_b = true_contacts[b]
-            correct = 0
-            for i, j in zip(top_i.tolist(), top_j.tolist()):
-                if true_b[i, j]:
-                    correct += 1
-
-            self._correct_sum += correct
-            self._total_sum += k
+            mask = outputs.get("residue_mask")
+            if mask is None:
+                enc = cfg.model.encoder
+                mask = residue_mask_from_tokens(tokens, pad_id=int(enc.get("pad_id", 1)),
+                    bos_id=int(enc.get("bos_id", 0)), eos_id=int(enc.get("eos_id", 2)))
+            valid = mask & torch.isfinite(coords[:, :, 1]).all(-1)
+            positions = torch.arange(tokens.size(1), device=tokens.device)
+            pairs = valid[:, :, None] & valid[:, None, :]
+            pairs &= (positions[:, None] - positions[None, :]).abs() >= self.min_seq_sep
+            pairs = torch.triu(pairs, diagonal=1)
+            eligible = pairs.flatten(1).any(-1)
+            self.num_skipped += int((~eligible).sum())
+            if not eligible.any():
+                return
+            masked_outputs = dict(outputs, residue_mask=valid)
+            try:
+                if self.use_logistic_regression:
+                    attentions = outputs.get("attentions")
+                    if attentions:
+                        feature_count = sum(a.shape[1] for a in attentions)
+                        projected = self._feature_bytes + int(pairs.sum()) * (feature_count + 1) * 4
+                        world = torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
+                        if projected > self.logreg_max_feature_bytes // world:
+                            raise ValueError(f"P@L projected feature bytes {projected} exceed rank budget "
+                                f"{self.logreg_max_feature_bytes // world}; increase logreg_max_feature_bytes "
+                                "or evaluate fewer/shorter structures")
+                    predictions = _extract_per_layer_head_attention(masked_outputs)
+                elif self.use_attention:
+                    predictions = _extract_attention_contacts(masked_outputs,
+                        layer=self.attention_layer, head_aggregation=self.head_aggregation,
+                        num_layers=self.num_layers)
+                else:
+                    hidden = outputs.get("hidden_states", outputs.get("logits"))
+                    if hidden is None:
+                        raise ValueError("P@L similarity requires hidden_states or logits")
+                    hidden = torch.nn.functional.normalize(hidden.float(), dim=-1)
+                    predictions = hidden @ hidden.transpose(-1, -2)
+                if predictions is None:
+                    raise ValueError("P@L attention mode requires attention weights")
+                contacts = _compute_contact_map(coords, self.contact_threshold)
+                for b in eligible.nonzero().flatten().tolist():
+                    seq_len = int(valid[b].sum())
+                    if self.use_logistic_regression:
+                        features = predictions[b, :, :, pairs[b]].flatten(0, 1).T.float().cpu()
+                        if not torch.isfinite(features).all():
+                            raise ValueError("Nonfinite contact features")
+                        self._feature_bytes += features.numel() * features.element_size() + features.shape[0] * 4
+                        # Content identity survives rank/worker traversal order. Keep duplicates.
+                        identity = hashlib.sha256()
+                        biological_tokens = tokens[b][mask[b]].detach().cpu().long().numpy()
+                        biological_coords = coords[b][mask[b]].detach().cpu().float()
+                        identity.update(len(biological_tokens).to_bytes(8, "big"))
+                        identity.update(biological_tokens.tobytes())
+                        identity.update(torch.isfinite(biological_coords).numpy().tobytes())
+                        identity.update(torch.nan_to_num(biological_coords, nan=0., posinf=0., neginf=0.).numpy().tobytes())
+                        self._logreg_structures.append({"features": features,
+                            "labels": contacts[b][pairs[b]].float().cpu(), "seq_len": seq_len,
+                            "sample_key": identity.hexdigest()})
+                    else:
+                        scores = predictions[b][pairs[b]]
+                        if not torch.isfinite(scores).all():
+                            raise ValueError("Nonfinite contact predictions")
+                        k = min(seq_len, scores.numel())
+                        selected = scores.topk(k).indices
+                        self._correct_sum += contacts[b][pairs[b]][selected].float().mean().item()
+                        self._total_sum += 1
+                        self.num_valid += 1
+            except Exception:
+                self.num_failed += 1
+                raise
 
     def compute(self) -> dict[str, float]:
         """Compute precision@L."""
+        if self.num_failed:
+            return self.diagnostics()
         if self.use_logistic_regression:
-            return self._compute_logreg()
-        else:
-            precision = self._correct_sum / max(1.0, self._total_sum)
-            return {self.name: precision}
+            try:
+                return self._compute_logreg()
+            except Exception:
+                self.num_failed += 1
+                raise
+        result = self.diagnostics()
+        if self._total_sum:
+            result[self.name] = self._correct_sum / self._total_sum
+        return result
 
     def _compute_logreg(self) -> dict[str, float]:
         """Compute P@L using logistic regression with random train/test splits.
@@ -456,10 +373,20 @@ class PrecisionAtLMetric(MetricBase):
         import random
         import warnings
 
+        def order_key(structure):
+            # Tie-break identical inputs without dropping duplicate observations.
+            content = hashlib.sha256()
+            content.update(int(structure["seq_len"]).to_bytes(8, "big"))
+            for key in ("features", "labels"):
+                content.update(structure[key].detach().cpu().float().numpy().tobytes())
+            digest = content.hexdigest()
+            return structure.get("sample_key", digest), digest
+
+        self._logreg_structures.sort(key=order_key)
         n_structures = len(self._logreg_structures)
 
         if n_structures == 0:
-            return {self.name: 0.0}
+            return self.diagnostics()
 
         # Need at least n_train + 1 structures (1 for testing)
         if n_structures <= self.logreg_n_train:
@@ -471,24 +398,14 @@ class PrecisionAtLMetric(MetricBase):
             # Fall back to computing P@L using mean attention weights
             return self._compute_logreg_fallback()
 
-        # Try to import sklearn
-        try:
-            from sklearn.linear_model import LogisticRegression
-        except ImportError:
-            warnings.warn(
-                "sklearn not available for logistic regression P@L. "
-                "Install scikit-learn or disable use_logistic_regression."
-            )
-            return {self.name: 0.0}
+        from sklearn.linear_model import LogisticRegression
 
-        # Run multiple iterations with random train/test splits
-        all_p_at_l_scores: list[float] = []
+        protein_scores: list[list[float]] = [[] for _ in range(n_structures)]
 
         for iteration in range(self.logreg_n_iterations):
             # Randomly sample train/test structures
             indices = list(range(n_structures))
-            random.seed(42 + iteration)  # Reproducible across runs
-            random.shuffle(indices)
+            random.Random(42 + iteration).shuffle(indices)
 
             train_indices = indices[: self.logreg_n_train]
             test_indices = indices[self.logreg_n_train :]
@@ -522,11 +439,7 @@ class PrecisionAtLMetric(MetricBase):
                 random_state=42,
             )
 
-            try:
-                model.fit(train_features, train_labels)
-            except Exception as e:
-                warnings.warn(f"Logistic regression fitting failed: {e}")
-                continue
+            model.fit(train_features, train_labels)
 
             # Evaluate on test structures
             for test_idx in test_indices:
@@ -540,11 +453,7 @@ class PrecisionAtLMetric(MetricBase):
 
                 # Get contact probabilities from logistic regression
                 # Use predict_proba to get probability of contact (class 1)
-                try:
-                    probs = model.predict_proba(test_features)[:, 1]
-                except Exception:
-                    # Fallback if predict_proba fails
-                    probs = model.decision_function(test_features)
+                probs = model.predict_proba(test_features)[:, 1]
 
                 # Compute P@L: precision of top-L predictions
                 k = min(seq_len, len(probs))
@@ -556,13 +465,15 @@ class PrecisionAtLMetric(MetricBase):
                 correct = test_labels[top_k_indices].sum()
                 precision = correct / k
 
-                all_p_at_l_scores.append(precision)
+                protein_scores[test_idx].append(float(precision))
 
-        if len(all_p_at_l_scores) == 0:
-            return {self.name: 0.0}
-
-        avg_precision = sum(all_p_at_l_scores) / len(all_p_at_l_scores)
-        return {self.name: avg_precision}
+        scored = [sum(scores) / len(scores) for scores in protein_scores if scores]
+        self.num_valid = len(scored)
+        result = self.diagnostics()
+        result[f"{self.name}/num_unscored"] = float(n_structures - len(scored))
+        if scored:
+            result[self.name] = sum(scored) / len(scored)
+        return result
 
     def _compute_logreg_fallback(self) -> dict[str, float]:
         """Fallback P@L computation when not enough structures for logreg.
@@ -571,7 +482,7 @@ class PrecisionAtLMetric(MetricBase):
         directly on accumulated structures.
         """
         if len(self._logreg_structures) == 0:
-            return {self.name: 0.0}
+            return self.diagnostics()
 
         total_correct = 0.0
         total_k = 0.0
@@ -596,41 +507,47 @@ class PrecisionAtLMetric(MetricBase):
             top_k_indices = contact_scores.argsort(descending=True)[:k]
             correct = labels[top_k_indices].sum().item()
 
-            total_correct += correct
-            total_k += k
+            total_correct += correct / k
+            total_k += 1
 
-        precision = total_correct / max(1.0, total_k)
-        return {self.name: precision}
+        self.num_valid = int(total_k)
+        result = self.diagnostics()
+        result[f"{self.name}/fallback"] = 1.0
+        if total_k:
+            result[self.name] = total_correct / total_k
+        return result
 
     def reset(self) -> None:
         """Reset accumulated state."""
+        self.reset_population()
+        self._feature_bytes = 0
         self._correct_sum = 0.0
         self._total_sum = 0.0
         self._logreg_structures = []
 
-    def state_tensors(self) -> list[torch.Tensor]:
-        """Return state as tensors for distributed aggregation.
+    def required_attention_layers(self, n_layers: int) -> tuple[int, ...]:
+        if self.use_logistic_regression or self.attention_layer == "mean":
+            return tuple(range(n_layers))
+        if not self.use_attention:
+            return ()
+        if isinstance(self.attention_layer, int):
+            index = self.attention_layer if self.attention_layer >= 0 else n_layers + self.attention_layer
+            if not 0 <= index < n_layers:
+                raise ValueError("attention_layer outside encoder")
+            return (index,)
+        if self.attention_layer != "last" or self.num_layers <= 0:
+            raise ValueError("Invalid attention layer selection")
+        return tuple(range(max(0, n_layers - self.num_layers), n_layers))
 
-        For standard mode, returns simple accumulators.
-        For logistic regression mode, returns empty list (uses object gathering).
-        """
-        if self.use_logistic_regression:
-            # Use object-based gathering for logreg mode
-            return []
-        return [torch.tensor([self._correct_sum, self._total_sum])]
+    def state_tensors(self) -> list[torch.Tensor]:
+        return [torch.tensor([self._correct_sum, self._total_sum, *self.population_values()],
+                             dtype=torch.float64)]
 
     def load_state_tensors(self, tensors: list[torch.Tensor]) -> None:
-        """Load state from gathered tensors.
-
-        For standard mode, loads simple accumulators.
-        For logistic regression mode, this is not used (object gathering instead).
-        """
-        if self.use_logistic_regression:
-            return  # Uses object gathering
         if tensors:
             t = tensors[0]
-            self._correct_sum = float(t[0].item())
-            self._total_sum = float(t[1].item())
+            self._correct_sum, self._total_sum = map(float, t[:2])
+            self.load_population(t, self._total_sum)
 
     def state_objects(self) -> list[dict] | None:
         """Return accumulated structures for object-based distributed gathering.

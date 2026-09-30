@@ -17,7 +17,7 @@ def _write_csv_varlen(path: Path, n_rows: int, seq_min_len: int, seq_max_len: in
             seq = random_protein_sequence(seq_min_len, seq_max_len)
             k = lengths[i % len(lengths)]
             k = max(0, min(k, max_len_minus_special))
-            indices_str = " ".join(["0"] * k)
+            indices_str = " ".join(["0"] * k + ["-1"] * (len(seq) - k))
             writer.writerow([f"p{i}", seq, indices_str])
 
 
