@@ -705,7 +705,7 @@ verification is recorded below and committed separately.
 
 | Task | Current acceptance and follow-up | Verification |
 |---|---|---|
-| 1 | Propagate main-rank directory, configuration, and log-opening failures before peers continue. Existing checkpoint and empty-loader safeguards retained. | Three new two-rank cases failed before the fix. Distributed, progress, checkpoint, programmatic, and wrapped-model modules: **40 passed**. |
+| 1 | Propagate main-rank directory, configuration, and log-opening failures before peers continue. Final review also guards the initial write/flush (see the review follow-up below). Existing checkpoint and empty-loader safeguards retained. | Three new two-rank cases failed before the fix. Distributed, progress, checkpoint, programmatic, and wrapped-model modules: **40 passed**. |
 | 2 | Coordinate schema validation plus strict collator label lengths before truncation; updated stale short-label fixtures. Positional gaps, mixed coordinates, biological masks, and differentiable residue-only decoding retained. | Two new label-length cases failed before the fix. Named alignment/Parquet/decoder/structure/mixed-shard modules: **128 passed**. |
 | 3 | Verified sanitized geometric operands, finite masked gradients, connected empty FAPE, valid-only protein means, and unavailable underdetermined alignment. Existing implementation retained. | FAPE, structural metrics/independent references, and decoder/FAPE integration: **19 passed, 2 accelerator-only skipped**. Fresh accelerator checks belong to Task 14. |
 | 4 | Retained connected zero loss/gradients for empty supervision, class bounds, and mean/sum CE. Added the explicitly requested finite-FP16 reduction-overflow regression for both reductions; it passes the existing multiply-before-sum implementation. | CE, MLM model, and Parquet modules: **94 passed**. |
@@ -718,3 +718,16 @@ verification is recorded below and committed separately.
 | 11 | Preserved safe boolean/additive masking and fully blocked rows. Fixed manual attention for float32 additive masks with FP16/BF16 values by matching the weighted-value multiplication dtype. | Both mixed-dtype cases failed before the one-line fix; attention module: **65 passed**, including forward/gradient SDPA parity. |
 | 12 | Verified selected-layer metadata/collection, equivalent logits/contact scores, retained-feature projections, rank/global budgets, and coordinated limit errors. Existing collection implementation and recorded FP32 GPU/host capacity measurements retained. | Task 11's **65 attention cases**, Task 9's **45 contact cases**, Task 8 evaluator cases, and Task 1 real distributed budget/gather cases cover this task. Fresh supported accelerator checks follow in Task 14. |
 | 13 | Verified early public-option rejection, deprecated-coordinate errors, atomic checkpoint durability, no implicit resume, packaged resources, and CLI behavior. Force Accelerate's internal accumulation factor to one even when its environment override is set, preserving manual global normalization. | The environment regression produced gradient 4 instead of 16 before the fix. Helpers/model/checkpoint/package/CLI modules: **42 passed**. |
+
+### Final review follow-up
+
+The independent review of `5e52a35..d91e765` found one Important startup gap:
+opening `train.log` may succeed while its initial write fails. A bounded actual
+two-rank regression using `/dev/full` failed before the fix. Moving the initial
+write/flush into the existing guarded block preserves the original writer error
+on every rank. All four startup-output cases passed after the fix. No other
+critical, important, or minor findings were reported. The reviewer declined full
+suite/build/accelerator acceptance because it is verified separately below, and
+retained the explicitly unsupported recovery/trainable/sharded and external
+scientific-quality boundaries. Later logging failures were unchanged and were
+not separately reproduced; this fix establishes the startup-output contract.

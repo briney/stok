@@ -1268,6 +1268,11 @@ def run_training(cfg: DictConfig):
     if is_main:
         try:
             log_file_handle = (io_dirs["logs"] / "train.log").open("a", encoding="utf-8")
+            print(
+                f"Training started. Objective: {objective}",
+                file=log_file_handle,
+                flush=True,
+            )
         except Exception as exc:
             output_error = f"{type(exc).__name__}: {exc}"
     _raise_rank_errors(output_error, accelerator, "Opening training log failed")
@@ -1278,13 +1283,6 @@ def run_training(cfg: DictConfig):
         enabled=console_enabled,
         file=sys.stdout,
     )
-    if is_main and log_file_handle is not None:
-        print(
-            f"Training started. Objective: {objective}",
-            file=log_file_handle,
-            flush=True,
-        )
-
     # Initialize modular evaluation system
     evaluator = Evaluator(
         cfg=cfg,
