@@ -97,14 +97,19 @@ For example, write a typed training file with PyArrow:
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-pq.write_table(pa.table({
-    "sequence_id": ["protein_1", "protein_2"],
-    "sequence": ["MKTV", "ACDE"],
-    "structure_tokens": pa.array(
-        [[12, 45, None, 19], [3, 7, 21, 6]],
-        type=pa.list_(pa.int32()),
+pq.write_table(
+    pa.table(
+        {
+            "sequence_id": ["protein_1", "protein_2"],
+            "sequence": ["MKTV", "ACDE"],
+            "structure_tokens": pa.array(
+                [[12, 45, None, 19], [3, 7, 21, 6]],
+                type=pa.list_(pa.int32()),
+            ),
+        }
     ),
-}), "train.parquet")
+    "train.parquet",
+)
 ```
 
 ### codebook training (default)
@@ -189,10 +194,18 @@ stok train \
 For MLM training, Parquet datasets only need `sequence_id` and `sequence`:
 
 ```python
-pq.write_table(pa.table({
-    "sequence_id": ["protein_1", "protein_2"],
-    "sequence": ["MVLSPADKTNVKAAWGKVGAHAGEYGAEALERMF", "MNIFEMLRIDKGLQVVAVKAPGFGDNRKNQLKDF"],
-}), "sequences.parquet")
+pq.write_table(
+    pa.table(
+        {
+            "sequence_id": ["protein_1", "protein_2"],
+            "sequence": [
+                "MVLSPADKTNVKAAWGKVGAHAGEYGAEALERMF",
+                "MNIFEMLRIDKGLQVVAVKAPGFGDNRKNQLKDF",
+            ],
+        }
+    ),
+    "sequences.parquet",
+)
 ```
 
 **MLM metrics:**
@@ -324,10 +337,14 @@ import torch
 from stok.utils.metrics import lddt_ca, tm_score, rmsd, true_aligned_error
 
 # coords: [B, L, 3_atoms, 3] with atoms ordered [N, CA, C]
-lddt_b, lddt_per_res = lddt_ca(pred_coords, true_coords, residue_mask=mask, return_per_residue=True)
+lddt_b, lddt_per_res = lddt_ca(
+    pred_coords, true_coords, residue_mask=mask, return_per_residue=True
+)
 tm_b, _ = tm_score(pred_coords, true_coords, residue_mask=mask)
 rmsd_b = rmsd(pred_coords, true_coords, residue_mask=mask, align=True, atom_set="CA")
-tae, pair_mask = true_aligned_error(pred_coords, true_coords, residue_mask=mask, atom="CA")
+tae, pair_mask = true_aligned_error(
+    pred_coords, true_coords, residue_mask=mask, atom="CA"
+)
 ```
 
 Notes:

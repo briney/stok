@@ -52,10 +52,16 @@ class TestApplyAPC:
 
     def test_apc_formula_correctness(self):
         """Test that APC formula is correctly implemented."""
-        matrix = torch.tensor([[[1.0, 2.0, 3.0, 4.0],
-                                 [2.0, 3.0, 4.0, 5.0],
-                                 [3.0, 4.0, 5.0, 6.0],
-                                 [4.0, 5.0, 6.0, 7.0]]])
+        matrix = torch.tensor(
+            [
+                [
+                    [1.0, 2.0, 3.0, 4.0],
+                    [2.0, 3.0, 4.0, 5.0],
+                    [3.0, 4.0, 5.0, 6.0],
+                    [4.0, 5.0, 6.0, 7.0],
+                ]
+            ]
+        )
 
         result = _apply_apc(matrix)
 
@@ -72,7 +78,7 @@ class TestApplyAPC:
         B, L = 1, 4
         # Matrix with very small values
         matrix = torch.ones(B, L, L) * 1e-10
-        
+
         # Should not raise, should return finite values
         result = _apply_apc(matrix)
         assert torch.isfinite(result).all()
@@ -87,8 +93,7 @@ class TestExtractPerLayerHeadAttention:
         n_layers = 6
 
         attentions = tuple(
-            torch.randn(B, H, L, L).softmax(dim=-1)
-            for _ in range(n_layers)
+            torch.randn(B, H, L, L).softmax(dim=-1) for _ in range(n_layers)
         )
         outputs = {"attentions": attentions}
 
@@ -109,8 +114,7 @@ class TestExtractPerLayerHeadAttention:
         n_layers = 2
 
         attentions = tuple(
-            torch.randn(B, H, L, L).softmax(dim=-1)
-            for _ in range(n_layers)
+            torch.randn(B, H, L, L).softmax(dim=-1) for _ in range(n_layers)
         )
         outputs = {"attentions": attentions}
 
@@ -129,8 +133,7 @@ class TestExtractPerLayerHeadAttention:
 
         # Create attention that would have non-zero APC correction
         attentions = tuple(
-            torch.randn(B, H, L, L).softmax(dim=-1)
-            for _ in range(n_layers)
+            torch.randn(B, H, L, L).softmax(dim=-1) for _ in range(n_layers)
         )
         outputs = {"attentions": attentions}
 
@@ -144,7 +147,7 @@ class TestExtractPerLayerHeadAttention:
 
 class TestExtractAttentionContacts:
     """Tests for the _extract_attention_contacts function.
-    
+
     Note: These tests now account for APC being applied after symmetrization.
     """
 
@@ -152,24 +155,23 @@ class TestExtractAttentionContacts:
         """Test default behavior with num_layers=1 (last layer only)."""
         B, H, L = 2, 4, 16
         n_layers = 6
-        
+
         # Create mock attention weights for 6 layers
         attentions = tuple(
-            torch.randn(B, H, L, L).softmax(dim=-1)
-            for _ in range(n_layers)
+            torch.randn(B, H, L, L).softmax(dim=-1) for _ in range(n_layers)
         )
         outputs = {"attentions": attentions}
-        
+
         result = _extract_attention_contacts(
             outputs,
             layer="last",
             head_aggregation="mean",
             num_layers=1,
         )
-        
+
         assert result is not None
         assert result.shape == (B, L, L)
-        
+
         # Verify it's using only the last layer (manually compute expected with APC)
         expected = attentions[-1].mean(dim=1)  # Average over heads
         expected = (expected + expected.transpose(-1, -2)) / 2  # Symmetrize
@@ -181,44 +183,42 @@ class TestExtractAttentionContacts:
         B, H, L = 2, 4, 16
         n_layers = 6
         num_layers_to_use = 3
-        
+
         # Create mock attention weights
         attentions = tuple(
-            torch.randn(B, H, L, L).softmax(dim=-1)
-            for _ in range(n_layers)
+            torch.randn(B, H, L, L).softmax(dim=-1) for _ in range(n_layers)
         )
         outputs = {"attentions": attentions}
-        
+
         result = _extract_attention_contacts(
             outputs,
             layer="last",
             head_aggregation="mean",
             num_layers=num_layers_to_use,
         )
-        
+
         assert result is not None
         assert result.shape == (B, L, L)
-        
+
         # Manually compute expected result with APC
         stacked = torch.stack(attentions[-num_layers_to_use:], dim=0)  # [3, B, H, L, L]
         layer_avg = stacked.mean(dim=0)  # [B, H, L, L]
         head_avg = layer_avg.mean(dim=1)  # [B, L, L]
         expected = (head_avg + head_avg.transpose(-1, -2)) / 2  # Symmetrize
         expected = _apply_apc(expected)  # Apply APC
-        
+
         torch.testing.assert_close(result, expected)
 
     def test_num_layers_clamped_to_available(self):
         """Test that num_layers is clamped to available layers."""
         B, H, L = 2, 4, 16
         n_layers = 3
-        
+
         attentions = tuple(
-            torch.randn(B, H, L, L).softmax(dim=-1)
-            for _ in range(n_layers)
+            torch.randn(B, H, L, L).softmax(dim=-1) for _ in range(n_layers)
         )
         outputs = {"attentions": attentions}
-        
+
         # Request more layers than available
         result = _extract_attention_contacts(
             outputs,
@@ -226,56 +226,54 @@ class TestExtractAttentionContacts:
             head_aggregation="mean",
             num_layers=10,  # More than available
         )
-        
+
         assert result is not None
         assert result.shape == (B, L, L)
-        
+
         # Should use all available layers (3) with APC
         stacked = torch.stack(attentions, dim=0)  # All 3 layers
         layer_avg = stacked.mean(dim=0)
         head_avg = layer_avg.mean(dim=1)
         expected = (head_avg + head_avg.transpose(-1, -2)) / 2
         expected = _apply_apc(expected)
-        
+
         torch.testing.assert_close(result, expected)
 
     def test_num_layers_one_equals_last(self):
         """Test that num_layers=1 produces same result as layer='last' behavior."""
         B, H, L = 2, 4, 16
         n_layers = 6
-        
+
         attentions = tuple(
-            torch.randn(B, H, L, L).softmax(dim=-1)
-            for _ in range(n_layers)
+            torch.randn(B, H, L, L).softmax(dim=-1) for _ in range(n_layers)
         )
         outputs = {"attentions": attentions}
-        
+
         result_num_layers_1 = _extract_attention_contacts(
             outputs,
             layer="last",
             head_aggregation="mean",
             num_layers=1,
         )
-        
+
         # num_layers is ignored when layer is int, but for layer="last" with num_layers=1
         # it should be equivalent to using only the last layer
         expected = attentions[-1].mean(dim=1)
         expected = (expected + expected.transpose(-1, -2)) / 2
         expected = _apply_apc(expected)
-        
+
         torch.testing.assert_close(result_num_layers_1, expected)
 
     def test_layer_int_ignores_num_layers(self):
         """Test that specifying layer as int ignores num_layers parameter."""
         B, H, L = 2, 4, 16
         n_layers = 6
-        
+
         attentions = tuple(
-            torch.randn(B, H, L, L).softmax(dim=-1)
-            for _ in range(n_layers)
+            torch.randn(B, H, L, L).softmax(dim=-1) for _ in range(n_layers)
         )
         outputs = {"attentions": attentions}
-        
+
         # Use layer=2 with num_layers=3 - should only use layer 2
         result = _extract_attention_contacts(
             outputs,
@@ -283,51 +281,50 @@ class TestExtractAttentionContacts:
             head_aggregation="mean",
             num_layers=3,
         )
-        
+
         expected = attentions[2].mean(dim=1)
         expected = (expected + expected.transpose(-1, -2)) / 2
         expected = _apply_apc(expected)
-        
+
         torch.testing.assert_close(result, expected)
 
     def test_layer_mean_ignores_num_layers(self):
         """Test that layer='mean' ignores num_layers and uses all layers."""
         B, H, L = 2, 4, 16
         n_layers = 6
-        
+
         attentions = tuple(
-            torch.randn(B, H, L, L).softmax(dim=-1)
-            for _ in range(n_layers)
+            torch.randn(B, H, L, L).softmax(dim=-1) for _ in range(n_layers)
         )
         outputs = {"attentions": attentions}
-        
+
         result = _extract_attention_contacts(
             outputs,
             layer="mean",
             head_aggregation="mean",
             num_layers=2,  # Should be ignored
         )
-        
+
         # Should use ALL layers with APC
         stacked = torch.stack(attentions, dim=0)
         layer_avg = stacked.mean(dim=0)
         head_avg = layer_avg.mean(dim=1)
         expected = (head_avg + head_avg.transpose(-1, -2)) / 2
         expected = _apply_apc(expected)
-        
+
         torch.testing.assert_close(result, expected)
 
     def test_returns_none_without_attentions(self):
         """Test that function returns None when attentions not in outputs."""
         outputs = {"logits": torch.randn(2, 16, 32)}
-        
+
         result = _extract_attention_contacts(
             outputs,
             layer="last",
             head_aggregation="mean",
             num_layers=3,
         )
-        
+
         assert result is None
 
     def test_head_aggregation_max(self):
@@ -335,50 +332,48 @@ class TestExtractAttentionContacts:
         B, H, L = 2, 4, 16
         n_layers = 4
         num_layers_to_use = 2
-        
+
         attentions = tuple(
-            torch.randn(B, H, L, L).softmax(dim=-1)
-            for _ in range(n_layers)
+            torch.randn(B, H, L, L).softmax(dim=-1) for _ in range(n_layers)
         )
         outputs = {"attentions": attentions}
-        
+
         result = _extract_attention_contacts(
             outputs,
             layer="last",
             head_aggregation="max",
             num_layers=num_layers_to_use,
         )
-        
+
         assert result is not None
         assert result.shape == (B, L, L)
-        
+
         # Manually compute with max aggregation and APC
         stacked = torch.stack(attentions[-num_layers_to_use:], dim=0)
         layer_avg = stacked.mean(dim=0)
         head_max = layer_avg.max(dim=1).values
         expected = (head_max + head_max.transpose(-1, -2)) / 2
         expected = _apply_apc(expected)
-        
+
         torch.testing.assert_close(result, expected)
-    
+
     def test_output_is_symmetric(self):
         """Test that output is symmetric after symmetrization and APC."""
         B, H, L = 2, 4, 16
         n_layers = 4
-        
+
         attentions = tuple(
-            torch.randn(B, H, L, L).softmax(dim=-1)
-            for _ in range(n_layers)
+            torch.randn(B, H, L, L).softmax(dim=-1) for _ in range(n_layers)
         )
         outputs = {"attentions": attentions}
-        
+
         result = _extract_attention_contacts(
             outputs,
             layer="last",
             head_aggregation="mean",
             num_layers=2,
         )
-        
+
         # Check symmetry
         torch.testing.assert_close(result, result.transpose(-1, -2))
 
@@ -394,13 +389,13 @@ class TestPrecisionAtLMetricNumLayers:
             use_attention=True,
             num_layers=3,
         )
-        
+
         assert metric.num_layers == 3
 
     def test_init_default_num_layers(self):
         """Test that default num_layers is 1."""
         metric = PrecisionAtLMetric()
-        
+
         assert metric.num_layers == 1
 
     def test_update_uses_num_layers(self):
@@ -411,36 +406,37 @@ class TestPrecisionAtLMetricNumLayers:
             use_attention=True,
             num_layers=2,
         )
-        
+
         B, H, L = 2, 4, 32
         n_layers = 4
-        
+
         # Create inputs
         tokens = torch.randint(4, 24, (B, L))
         labels = torch.full((B, L), -100)
         coords = torch.randn(B, L, 3, 3) * 10.0
-        
+
         attentions = tuple(
-            torch.softmax(torch.randn(B, H, L, L), dim=-1)
-            for _ in range(n_layers)
+            torch.softmax(torch.randn(B, H, L, L), dim=-1) for _ in range(n_layers)
         )
-        
+
         outputs = {
             "logits": torch.randn(B, L, 32),
             "loss": torch.tensor(2.5),
             "attentions": attentions,
         }
-        
-        cfg = OmegaConf.create({
-            "model": {
-                "encoder": {"pad_id": 1},
-                "classifier": {"ignore_index": -100},
+
+        cfg = OmegaConf.create(
+            {
+                "model": {
+                    "encoder": {"pad_id": 1},
+                    "classifier": {"ignore_index": -100},
+                }
             }
-        })
-        
+        )
+
         # Should not raise
         metric.update(outputs, tokens, labels, coords, cfg)
-        
+
         result = metric.compute()
         assert "p_at_l" in result
         assert 0.0 <= result["p_at_l"] <= 1.0
@@ -452,174 +448,186 @@ class TestPrecisionAtLMetricConfig:
     def test_num_layers_from_config(self):
         """Test that num_layers is correctly passed from config."""
         from stok.eval.registry import build_metrics
-        
-        cfg = OmegaConf.create({
-            "train": {
-                "eval": {
-                    "metrics": {
-                        "p_at_l": {
-                            "enabled": True,
-                            "contact_threshold": 8.0,
-                            "min_seq_sep": 6,
-                            "use_attention": True,
-                            "num_layers": 4,
-                        },
+
+        cfg = OmegaConf.create(
+            {
+                "train": {
+                    "eval": {
+                        "metrics": {
+                            "p_at_l": {
+                                "enabled": True,
+                                "contact_threshold": 8.0,
+                                "min_seq_sep": 6,
+                                "use_attention": True,
+                                "num_layers": 4,
+                            },
+                        }
                     }
-                }
-            },
-            "data": {"load_coords": True},
-            "model": {"classifier": {"ignore_index": -100}},
-        })
-        
+                },
+                "data": {"load_coords": True},
+                "model": {"classifier": {"ignore_index": -100}},
+            }
+        )
+
         metrics = build_metrics(cfg, objective="mlm", has_coords=True)
         p_at_l = next(
             (m for m in metrics if type(m).__name__ == "PrecisionAtLMetric"),
             None,
         )
-        
+
         assert p_at_l is not None
         assert p_at_l.num_layers == 4
 
     def test_num_layers_default_from_config(self):
         """Test that num_layers defaults to 10% of encoder layers when not specified."""
         from stok.eval.registry import build_metrics
-        
-        cfg = OmegaConf.create({
-            "train": {
-                "eval": {
-                    "metrics": {
-                        "p_at_l": {
-                            "enabled": True,
-                            # num_layers not specified -> defaults to 10% of n_layers
-                        },
+
+        cfg = OmegaConf.create(
+            {
+                "train": {
+                    "eval": {
+                        "metrics": {
+                            "p_at_l": {
+                                "enabled": True,
+                                # num_layers not specified -> defaults to 10% of n_layers
+                            },
+                        }
                     }
-                }
-            },
-            "data": {"load_coords": True},
-            "model": {
-                "encoder": {"n_layers": 24},  # 10% of 24 = 2.4 -> ceil -> 3
-                "classifier": {"ignore_index": -100},
-            },
-        })
-        
+                },
+                "data": {"load_coords": True},
+                "model": {
+                    "encoder": {"n_layers": 24},  # 10% of 24 = 2.4 -> ceil -> 3
+                    "classifier": {"ignore_index": -100},
+                },
+            }
+        )
+
         metrics = build_metrics(cfg, objective="mlm", has_coords=True)
         p_at_l = next(
             (m for m in metrics if type(m).__name__ == "PrecisionAtLMetric"),
             None,
         )
-        
+
         assert p_at_l is not None
         assert p_at_l.num_layers == 3  # ceil(24 * 0.1) = 3
 
     def test_num_layers_default_8_layers(self):
         """Test that 8-layer model gets num_layers=1."""
         from stok.eval.registry import build_metrics
-        
-        cfg = OmegaConf.create({
-            "train": {
-                "eval": {
-                    "metrics": {
-                        "p_at_l": {"enabled": True},
+
+        cfg = OmegaConf.create(
+            {
+                "train": {
+                    "eval": {
+                        "metrics": {
+                            "p_at_l": {"enabled": True},
+                        }
                     }
-                }
-            },
-            "data": {"load_coords": True},
-            "model": {
-                "encoder": {"n_layers": 8},  # 10% of 8 = 0.8 -> ceil -> 1
-                "classifier": {"ignore_index": -100},
-            },
-        })
-        
+                },
+                "data": {"load_coords": True},
+                "model": {
+                    "encoder": {"n_layers": 8},  # 10% of 8 = 0.8 -> ceil -> 1
+                    "classifier": {"ignore_index": -100},
+                },
+            }
+        )
+
         metrics = build_metrics(cfg, objective="mlm", has_coords=True)
         p_at_l = next(
             (m for m in metrics if type(m).__name__ == "PrecisionAtLMetric"),
             None,
         )
-        
+
         assert p_at_l is not None
         assert p_at_l.num_layers == 1  # ceil(8 * 0.1) = 1
 
     def test_num_layers_default_36_layers(self):
         """Test that 36-layer model gets num_layers=4."""
         from stok.eval.registry import build_metrics
-        
-        cfg = OmegaConf.create({
-            "train": {
-                "eval": {
-                    "metrics": {
-                        "p_at_l": {"enabled": True},
+
+        cfg = OmegaConf.create(
+            {
+                "train": {
+                    "eval": {
+                        "metrics": {
+                            "p_at_l": {"enabled": True},
+                        }
                     }
-                }
-            },
-            "data": {"load_coords": True},
-            "model": {
-                "encoder": {"n_layers": 36},  # 10% of 36 = 3.6 -> ceil -> 4
-                "classifier": {"ignore_index": -100},
-            },
-        })
-        
+                },
+                "data": {"load_coords": True},
+                "model": {
+                    "encoder": {"n_layers": 36},  # 10% of 36 = 3.6 -> ceil -> 4
+                    "classifier": {"ignore_index": -100},
+                },
+            }
+        )
+
         metrics = build_metrics(cfg, objective="mlm", has_coords=True)
         p_at_l = next(
             (m for m in metrics if type(m).__name__ == "PrecisionAtLMetric"),
             None,
         )
-        
+
         assert p_at_l is not None
         assert p_at_l.num_layers == 4  # ceil(36 * 0.1) = 4
 
     def test_num_layers_default_missing_encoder_config(self):
         """Test fallback to 12 layers when encoder config is missing."""
         from stok.eval.registry import build_metrics
-        
-        cfg = OmegaConf.create({
-            "train": {
-                "eval": {
-                    "metrics": {
-                        "p_at_l": {"enabled": True},
+
+        cfg = OmegaConf.create(
+            {
+                "train": {
+                    "eval": {
+                        "metrics": {
+                            "p_at_l": {"enabled": True},
+                        }
                     }
-                }
-            },
-            "data": {"load_coords": True},
-            "model": {"classifier": {"ignore_index": -100}},  # No encoder config
-        })
-        
+                },
+                "data": {"load_coords": True},
+                "model": {"classifier": {"ignore_index": -100}},  # No encoder config
+            }
+        )
+
         metrics = build_metrics(cfg, objective="mlm", has_coords=True)
         p_at_l = next(
             (m for m in metrics if type(m).__name__ == "PrecisionAtLMetric"),
             None,
         )
-        
+
         assert p_at_l is not None
         assert p_at_l.num_layers == 2  # ceil(12 * 0.1) = 2 (fallback)
 
     def test_num_layers_explicit_overrides_default(self):
         """Test that explicit num_layers config overrides the dynamic default."""
         from stok.eval.registry import build_metrics
-        
-        cfg = OmegaConf.create({
-            "train": {
-                "eval": {
-                    "metrics": {
-                        "p_at_l": {
-                            "enabled": True,
-                            "num_layers": 5,  # Explicit override
-                        },
+
+        cfg = OmegaConf.create(
+            {
+                "train": {
+                    "eval": {
+                        "metrics": {
+                            "p_at_l": {
+                                "enabled": True,
+                                "num_layers": 5,  # Explicit override
+                            },
+                        }
                     }
-                }
-            },
-            "data": {"load_coords": True},
-            "model": {
-                "encoder": {"n_layers": 36},  # Would be 4 if not overridden
-                "classifier": {"ignore_index": -100},
-            },
-        })
-        
+                },
+                "data": {"load_coords": True},
+                "model": {
+                    "encoder": {"n_layers": 36},  # Would be 4 if not overridden
+                    "classifier": {"ignore_index": -100},
+                },
+            }
+        )
+
         metrics = build_metrics(cfg, objective="mlm", has_coords=True)
         p_at_l = next(
             (m for m in metrics if type(m).__name__ == "PrecisionAtLMetric"),
             None,
         )
-        
+
         assert p_at_l is not None
         assert p_at_l.num_layers == 5  # Explicit value, not calculated
 
@@ -635,7 +643,7 @@ class TestPrecisionAtLLogisticRegression:
             logreg_lambda=0.2,
             logreg_n_iterations=3,
         )
-        
+
         assert metric.use_logistic_regression is True
         assert metric.logreg_n_train == 15
         assert metric.logreg_lambda == 0.2
@@ -644,7 +652,7 @@ class TestPrecisionAtLLogisticRegression:
     def test_init_logreg_defaults(self):
         """Test default logistic regression parameters."""
         metric = PrecisionAtLMetric()
-        
+
         assert metric.use_logistic_regression is False
         assert metric.logreg_n_train == 20
         assert metric.logreg_lambda == 0.15
@@ -656,41 +664,42 @@ class TestPrecisionAtLLogisticRegression:
             use_logistic_regression=True,
             min_seq_sep=3,
         )
-        
+
         B, H, L = 2, 4, 32
         n_layers = 4
-        
+
         # Create inputs
         tokens = torch.randint(4, 24, (B, L))
         labels = torch.full((B, L), -100)
         coords = torch.randn(B, L, 3, 3) * 10.0
-        
+
         attentions = tuple(
-            torch.softmax(torch.randn(B, H, L, L), dim=-1)
-            for _ in range(n_layers)
+            torch.softmax(torch.randn(B, H, L, L), dim=-1) for _ in range(n_layers)
         )
-        
+
         outputs = {
             "logits": torch.randn(B, L, 32),
             "loss": torch.tensor(2.5),
             "attentions": attentions,
         }
-        
-        cfg = OmegaConf.create({
-            "model": {
-                "encoder": {"pad_id": 1},
-                "classifier": {"ignore_index": -100},
+
+        cfg = OmegaConf.create(
+            {
+                "model": {
+                    "encoder": {"pad_id": 1},
+                    "classifier": {"ignore_index": -100},
+                }
             }
-        })
-        
+        )
+
         # Before update, no structures accumulated
         assert len(metric._logreg_structures) == 0
-        
+
         metric.update(outputs, tokens, labels, coords, cfg)
-        
+
         # After update, should have accumulated B structures
         assert len(metric._logreg_structures) == B
-        
+
         # Each structure should have features and labels
         for struct in metric._logreg_structures:
             assert "features" in struct
@@ -703,14 +712,14 @@ class TestPrecisionAtLLogisticRegression:
     def test_logreg_reset(self):
         """Test that reset clears accumulated structures."""
         metric = PrecisionAtLMetric(use_logistic_regression=True)
-        
+
         # Add some dummy data
         metric._logreg_structures = [
             {"features": torch.randn(10, 8), "labels": torch.zeros(10), "seq_len": 32}
         ]
-        
+
         metric.reset()
-        
+
         assert len(metric._logreg_structures) == 0
 
     def test_logreg_compute_insufficient_structures(self):
@@ -719,47 +728,51 @@ class TestPrecisionAtLLogisticRegression:
             use_logistic_regression=True,
             logreg_n_train=20,
         )
-        
+
         # Add only 5 structures (less than n_train)
         for _ in range(5):
             n_pairs = 50
-            metric._logreg_structures.append({
-                "features": torch.randn(n_pairs, 16),
-                "labels": torch.randint(0, 2, (n_pairs,)).float(),
-                "seq_len": 32,
-            })
-        
+            metric._logreg_structures.append(
+                {
+                    "features": torch.randn(n_pairs, 16),
+                    "labels": torch.randint(0, 2, (n_pairs,)).float(),
+                    "seq_len": 32,
+                }
+            )
+
         # Should fall back to standard computation without error
         result = metric.compute()
-        
+
         assert "p_at_l" in result
         assert 0.0 <= result["p_at_l"] <= 1.0
 
     def test_logreg_compute_with_sufficient_structures(self):
         """Test logistic regression computation with enough structures."""
         pytest.importorskip("sklearn")
-        
+
         metric = PrecisionAtLMetric(
             use_logistic_regression=True,
             logreg_n_train=5,
             logreg_n_iterations=2,
         )
-        
+
         # Add 10 structures (5 for train, 5 for test)
         for _ in range(10):
             n_pairs = 100
             # Create features that have some correlation with labels
             features = torch.randn(n_pairs, 16)
             labels = (features[:, 0] > 0).float()  # Correlate with first feature
-            
-            metric._logreg_structures.append({
-                "features": features,
-                "labels": labels,
-                "seq_len": 32,
-            })
-        
+
+            metric._logreg_structures.append(
+                {
+                    "features": features,
+                    "labels": labels,
+                    "seq_len": 32,
+                }
+            )
+
         result = metric.compute()
-        
+
         assert "p_at_l" in result
         # With correlated features, should get reasonable precision
         assert result["p_at_l"] >= 0.0
@@ -767,14 +780,14 @@ class TestPrecisionAtLLogisticRegression:
     def test_logreg_state_tensors_includes_population(self):
         """Test that state_tensors returns empty list for logreg mode (uses objects)."""
         metric = PrecisionAtLMetric(use_logistic_regression=True)
-        
+
         # Add some structures
         metric._logreg_structures = [
             {"features": torch.randn(10, 8), "labels": torch.zeros(10), "seq_len": 32}
         ]
-        
+
         tensors = metric.state_tensors()
-        
+
         # Logreg mode uses object gathering, not tensor gathering
         assert len(tensors) == 1
         assert tensors[0].numel() == 5
@@ -782,19 +795,21 @@ class TestPrecisionAtLLogisticRegression:
     def test_logreg_state_objects_returns_structures(self):
         """Test that state_objects returns the accumulated structures."""
         metric = PrecisionAtLMetric(use_logistic_regression=True)
-        
+
         # Add structures
         n_features = 16
         for i in range(3):
             n_pairs = 10 + i
-            metric._logreg_structures.append({
-                "features": torch.randn(n_pairs, n_features),
-                "labels": torch.randint(0, 2, (n_pairs,)).float(),
-                "seq_len": 32 + i,
-            })
-        
+            metric._logreg_structures.append(
+                {
+                    "features": torch.randn(n_pairs, n_features),
+                    "labels": torch.randint(0, 2, (n_pairs,)).float(),
+                    "seq_len": 32 + i,
+                }
+            )
+
         objects = metric.state_objects()
-        
+
         assert objects is not None
         assert len(objects) == 3
         assert objects[0]["seq_len"] == 32
@@ -804,15 +819,15 @@ class TestPrecisionAtLLogisticRegression:
     def test_logreg_state_objects_none_for_standard_mode(self):
         """Test that state_objects returns None for standard mode."""
         metric = PrecisionAtLMetric(use_logistic_regression=False)
-        
+
         objects = metric.state_objects()
-        
+
         assert objects is None
 
     def test_logreg_load_state_objects_flattens_gathered(self):
         """Test load_state_objects correctly flattens gathered data."""
         metric = PrecisionAtLMetric(use_logistic_regression=True)
-        
+
         # Simulate gathered data from 2 processes
         process_0_data = [
             {"features": torch.randn(10, 8), "labels": torch.zeros(10), "seq_len": 32},
@@ -821,11 +836,11 @@ class TestPrecisionAtLLogisticRegression:
         process_1_data = [
             {"features": torch.randn(12, 8), "labels": torch.zeros(12), "seq_len": 40},
         ]
-        
+
         gathered = [process_0_data, process_1_data]
-        
+
         metric.load_state_objects(gathered)
-        
+
         # Should have flattened to 3 structures total
         assert len(metric._logreg_structures) == 3
         assert metric._logreg_structures[0]["seq_len"] == 32
@@ -835,7 +850,7 @@ class TestPrecisionAtLLogisticRegression:
     def test_logreg_load_state_objects_handles_empty(self):
         """Test load_state_objects handles empty process data."""
         metric = PrecisionAtLMetric(use_logistic_regression=True)
-        
+
         # Simulate gathered data where one process has no structures
         process_0_data = [
             {"features": torch.randn(10, 8), "labels": torch.zeros(10), "seq_len": 32},
@@ -844,11 +859,11 @@ class TestPrecisionAtLLogisticRegression:
         process_2_data = [
             {"features": torch.randn(12, 8), "labels": torch.zeros(12), "seq_len": 40},
         ]
-        
+
         gathered = [process_0_data, process_1_data, process_2_data]
-        
+
         metric.load_state_objects(gathered)
-        
+
         # Should have 2 structures (skipping empty process)
         assert len(metric._logreg_structures) == 2
         assert metric._logreg_structures[0]["seq_len"] == 32
@@ -861,31 +876,33 @@ class TestPrecisionAtLLogisticRegressionConfig:
     def test_logreg_config_options(self):
         """Test that logreg options are correctly passed from config."""
         from stok.eval.registry import build_metrics
-        
-        cfg = OmegaConf.create({
-            "train": {
-                "eval": {
-                    "metrics": {
-                        "p_at_l": {
-                            "enabled": True,
-                            "use_logistic_regression": True,
-                            "logreg_n_train": 10,
-                            "logreg_lambda": 0.1,
-                            "logreg_n_iterations": 3,
-                        },
+
+        cfg = OmegaConf.create(
+            {
+                "train": {
+                    "eval": {
+                        "metrics": {
+                            "p_at_l": {
+                                "enabled": True,
+                                "use_logistic_regression": True,
+                                "logreg_n_train": 10,
+                                "logreg_lambda": 0.1,
+                                "logreg_n_iterations": 3,
+                            },
+                        }
                     }
-                }
-            },
-            "data": {"load_coords": True},
-            "model": {"classifier": {"ignore_index": -100}},
-        })
-        
+                },
+                "data": {"load_coords": True},
+                "model": {"classifier": {"ignore_index": -100}},
+            }
+        )
+
         metrics = build_metrics(cfg, objective="mlm", has_coords=True)
         p_at_l = next(
             (m for m in metrics if type(m).__name__ == "PrecisionAtLMetric"),
             None,
         )
-        
+
         assert p_at_l is not None
         assert p_at_l.use_logistic_regression is True
         assert p_at_l.logreg_n_train == 10
@@ -895,28 +912,30 @@ class TestPrecisionAtLLogisticRegressionConfig:
     def test_logreg_config_defaults(self):
         """Test that logreg defaults are applied when not specified."""
         from stok.eval.registry import build_metrics
-        
-        cfg = OmegaConf.create({
-            "train": {
-                "eval": {
-                    "metrics": {
-                        "p_at_l": {
-                            "enabled": True,
-                            # No logreg options specified
-                        },
+
+        cfg = OmegaConf.create(
+            {
+                "train": {
+                    "eval": {
+                        "metrics": {
+                            "p_at_l": {
+                                "enabled": True,
+                                # No logreg options specified
+                            },
+                        }
                     }
-                }
-            },
-            "data": {"load_coords": True},
-            "model": {"classifier": {"ignore_index": -100}},
-        })
-        
+                },
+                "data": {"load_coords": True},
+                "model": {"classifier": {"ignore_index": -100}},
+            }
+        )
+
         metrics = build_metrics(cfg, objective="mlm", has_coords=True)
         p_at_l = next(
             (m for m in metrics if type(m).__name__ == "PrecisionAtLMetric"),
             None,
         )
-        
+
         assert p_at_l is not None
         assert p_at_l.use_logistic_regression is False
         assert p_at_l.logreg_n_train == 20
@@ -924,61 +943,87 @@ class TestPrecisionAtLLogisticRegressionConfig:
         assert p_at_l.logreg_n_iterations == 5
 
 
-
 def test_contact_population_ignores_specials_missing_coords_and_keeps_gaps():
     from omegaconf import OmegaConf
-    cfg = OmegaConf.create({'model': {'encoder': {'pad_id': 1}}})
+
+    cfg = OmegaConf.create({"model": {"encoder": {"pad_id": 1}}})
     # Two observed residues separated by three original positions: one evaluable pair.
     tokens = torch.tensor([[0, 4, 4, 4, 4, 2, 1]])
-    coords = torch.full((1, 7, 3, 3), float('nan'))
-    coords[0, 1] = 0.
-    coords[0, 4] = 1.
+    coords = torch.full((1, 7, 3, 3), float("nan"))
+    coords[0, 1] = 0.0
+    coords[0, 4] = 1.0
     attention = torch.ones(1, 1, 7, 7)
     metric = PrecisionAtLMetric(min_seq_sep=3)
-    metric.update({'attentions': [attention], 'residue_mask': (tokens == 4)}, tokens, None, coords, cfg)
+    metric.update(
+        {"attentions": [attention], "residue_mask": (tokens == 4)},
+        tokens,
+        None,
+        coords,
+        cfg,
+    )
     result = metric.compute()
-    assert result['p_at_l'] == 1.
-    assert result['p_at_l/num_valid'] == 1
+    assert result["p_at_l"] == 1.0
+    assert result["p_at_l/num_valid"] == 1
     # All specials and no eligible residue pair is unavailable, not precision zero.
     metric.reset()
-    metric.update({'attentions': [attention], 'residue_mask': (tokens == 4)}, tokens, None,
-                  torch.full_like(coords, float('nan')), cfg)
-    assert 'p_at_l' not in metric.compute()
-    assert metric.compute()['p_at_l/num_skipped'] == 1
+    metric.update(
+        {"attentions": [attention], "residue_mask": (tokens == 4)},
+        tokens,
+        None,
+        torch.full_like(coords, float("nan")),
+        cfg,
+    )
+    assert "p_at_l" not in metric.compute()
+    assert metric.compute()["p_at_l/num_skipped"] == 1
 
 
 def test_contact_attention_apc_excludes_boundary_values():
     from stok.eval.metrics.contact import _extract_attention_contacts
-    raw = torch.tensor([[[[0., 9., 2.], [9., 0., 1.], [2., 1., 0.]]]])
-    base = _extract_attention_contacts({'attentions': [raw], 'residue_mask': torch.ones(1, 3, dtype=torch.bool)})
-    padded = torch.full((1, 1, 6, 6), 1000.)
+
+    raw = torch.tensor([[[[0.0, 9.0, 2.0], [9.0, 0.0, 1.0], [2.0, 1.0, 0.0]]]])
+    base = _extract_attention_contacts(
+        {"attentions": [raw], "residue_mask": torch.ones(1, 3, dtype=torch.bool)}
+    )
+    padded = torch.full((1, 1, 6, 6), 1000.0)
     padded[:, :, 1:4, 1:4] = raw
     mask = torch.tensor([[False, True, True, True, False, False]])
-    actual = _extract_attention_contacts({'attentions': [padded], 'residue_mask': mask})
+    actual = _extract_attention_contacts({"attentions": [padded], "residue_mask": mask})
     torch.testing.assert_close(actual[:, 1:4, 1:4], base)
 
 
 def test_logreg_fallback_is_protein_weighted():
     import pytest
+
     metric = PrecisionAtLMetric(use_logistic_regression=True)
     metric._logreg_structures = [
-        {'features': torch.tensor([[10.], [1.]]), 'labels': torch.tensor([1., 0.]), 'seq_len': 1},
-        {'features': torch.tensor([[10.], [9.], [8.], [1.]]), 'labels': torch.zeros(4), 'seq_len': 3},
+        {
+            "features": torch.tensor([[10.0], [1.0]]),
+            "labels": torch.tensor([1.0, 0.0]),
+            "seq_len": 1,
+        },
+        {
+            "features": torch.tensor([[10.0], [9.0], [8.0], [1.0]]),
+            "labels": torch.zeros(4),
+            "seq_len": 3,
+        },
     ]
-    with pytest.warns(UserWarning, match='Not enough structures'):
+    with pytest.warns(UserWarning, match="Not enough structures"):
         result = metric.compute()
-    assert result['p_at_l'] == .5
-    assert result['p_at_l/num_valid'] == 2
+    assert result["p_at_l"] == 0.5
+    assert result["p_at_l/num_valid"] == 2
 
 
 def test_logreg_rejects_projected_feature_storage_before_collection():
-    metric = PrecisionAtLMetric(use_logistic_regression=True, min_seq_sep=1,
-                               logreg_max_feature_bytes=100)
+    metric = PrecisionAtLMetric(
+        use_logistic_regression=True, min_seq_sep=1, logreg_max_feature_bytes=100
+    )
     tokens = torch.full((1, 8), 4)
     coords = torch.zeros(1, 8, 3, 3)
-    cfg = OmegaConf.create({'model': {'encoder': {'pad_id': 1}}})
-    with pytest.raises(ValueError, match='logreg_max_feature_bytes'):
-        metric.update({'attentions': [torch.ones(1, 2, 8, 8)]}, tokens, None, coords, cfg)
+    cfg = OmegaConf.create({"model": {"encoder": {"pad_id": 1}}})
+    with pytest.raises(ValueError, match="logreg_max_feature_bytes"):
+        metric.update(
+            {"attentions": [torch.ones(1, 2, 8, 8)]}, tokens, None, coords, cfg
+        )
     assert metric._logreg_structures == []
 
 
@@ -987,12 +1032,19 @@ def test_fitted_logreg_is_order_invariant_and_preserves_duplicates():
     structures = []
     for i in range(8):
         features = torch.randn(30, 3, generator=generator)
-        structures.append({'features': features, 'labels': (features[:, i % 3] > 0).float(),
-                           'seq_len': 8, 'sample_key': str(i)})
+        structures.append(
+            {
+                "features": features,
+                "labels": (features[:, i % 3] > 0).float(),
+                "seq_len": 8,
+                "sample_key": str(i),
+            }
+        )
     results = []
     for order in (list(range(8)), [0, 2, 4, 6, 1, 3, 5, 7]):
-        metric = PrecisionAtLMetric(use_logistic_regression=True, logreg_n_train=2,
-                                   logreg_n_iterations=5)
+        metric = PrecisionAtLMetric(
+            use_logistic_regression=True, logreg_n_train=2, logreg_n_iterations=5
+        )
         metric._logreg_structures = [structures[i] for i in order]
         results.append(metric.compute())
     assert results[0] == results[1]

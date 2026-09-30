@@ -15,7 +15,12 @@ from stok.eval.metrics.classification import (
 def _make_cfg(ignore_index: int = -100):
     """Create a minimal config for testing."""
     return OmegaConf.create(
-        {"model": {"classifier": {"ignore_index": ignore_index}, "encoder": {"pad_id": 1}}}
+        {
+            "model": {
+                "classifier": {"ignore_index": ignore_index},
+                "encoder": {"pad_id": 1},
+            }
+        }
     )
 
 
@@ -59,7 +64,9 @@ class TestAccuracyMetric:
                 [[0.9, 0.1], [0.9, 0.1], [0.1, 0.9], [0.1, 0.9]],  # preds: 0, 0, 1, 1
             ]
         )
-        labels = torch.tensor([[0, 1, 0, 1]])  # correct: 0, wrong: 1, wrong: 0, correct: 1
+        labels = torch.tensor(
+            [[0, 1, 0, 1]]
+        )  # correct: 0, wrong: 1, wrong: 0, correct: 1
         tokens = torch.zeros_like(labels)
 
         metric.update({"logits": logits}, tokens, labels, None, cfg)
@@ -211,15 +218,16 @@ class TestPerplexityMetric:
         assert result["ppl/num_valid"] == 0
 
 
-
 def test_perplexity_weights_supervised_tokens():
     metric = PerplexityMetric()
     cfg = _make_cfg()
-    for n, ce in [(1, 1.), (9, 3.)]:
+    for n, ce in [(1, 1.0), (9, 3.0)]:
         labels = torch.zeros(1, n, dtype=torch.long)
-        metric.update({'classification_loss': torch.tensor(ce)}, labels, labels, None, cfg)
-    assert math.isclose(metric.compute()['ppl'], math.exp(2.8), rel_tol=1e-6)
-    assert metric.compute()['ppl/num_valid'] == 10
+        metric.update(
+            {"classification_loss": torch.tensor(ce)}, labels, labels, None, cfg
+        )
+    assert math.isclose(metric.compute()["ppl"], math.exp(2.8), rel_tol=1e-6)
+    assert metric.compute()["ppl/num_valid"] == 10
 
 
 def test_perplexity_rebatching_real_logits_and_missing_population():
@@ -230,9 +238,14 @@ def test_perplexity_rebatching_real_logits_and_missing_population():
     for size in (1, 2, 3):
         metric = PerplexityMetric()
         for start in range(0, 5, size):
-            metric.update({'logits': logits[start:start+size]}, labels[start:start+size],
-                          labels[start:start+size], None, _make_cfg())
-        values.append(metric.compute()['ppl'])
-    assert max(values)-min(values) < 1e-6
-    assert 'ppl' not in PerplexityMetric().compute()
-    assert 'acc' not in AccuracyMetric().compute()
+            metric.update(
+                {"logits": logits[start : start + size]},
+                labels[start : start + size],
+                labels[start : start + size],
+                None,
+                _make_cfg(),
+            )
+        values.append(metric.compute()["ppl"])
+    assert max(values) - min(values) < 1e-6
+    assert "ppl" not in PerplexityMetric().compute()
+    assert "acc" not in AccuracyMetric().compute()

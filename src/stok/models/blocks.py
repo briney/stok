@@ -3,6 +3,7 @@ import torch.nn as nn
 
 from .attention import MultiheadAttention
 from .mlp import SwiGLU
+from .rope import RotaryEmbedding
 
 
 class RMSNorm(nn.Module):
@@ -28,7 +29,7 @@ class EncoderBlock(nn.Module):
         n_heads: int,
         attn_dropout: float,
         resid_dropout: float,
-        rope: object,
+        rope: RotaryEmbedding,
         norm_type: str = "layernorm",
         ffn_mult: float = 4.0,
     ):
@@ -106,5 +107,6 @@ class EncoderBlock(nn.Module):
         x = x + self.drop2(h)
 
         if output_attentions:
+            assert attn_weights is not None
             return x, attn_weights
         return x

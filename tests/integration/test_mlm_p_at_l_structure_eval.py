@@ -593,9 +593,7 @@ class TestEndToEndMLMWithCameoEval:
         eval_df = pd.DataFrame(
             {
                 "sequence_id": [f"eval_{i}" for i in range(5)],
-                "sequence": [
-                    "MNIFEMLRIDKGLQVVAVKAPGFGDNRKNQ"[:25] for _ in range(5)
-                ],
+                "sequence": ["MNIFEMLRIDKGLQVVAVKAPGFGDNRKNQ"[:25] for _ in range(5)],
             }
         )
         eval_df.to_parquet(eval_parquet, index=False)
@@ -632,4 +630,3 @@ class TestEndToEndMLMWithCameoEval:
         assert "P@L" not in result.output, (
             "P@L should not be logged when coords are not available"
         )
-

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import cast
 import random
 
 import numpy as np
@@ -15,10 +15,9 @@ from torch.utils.data import DataLoader
 
 from stok.utils.masking import residue_mask_from_tokens
 from stok.eval.base import Metric
+from stok.eval.metrics.contact import PrecisionAtLMetric
 from stok.eval.registry import build_metrics, resolve_eval_metrics
-
-if TYPE_CHECKING:
-    pass
+from stok.models.head import CodebookClassifier
 
 
 def _get_model_device(model: nn.Module, accelerator) -> torch.device:
@@ -95,8 +94,14 @@ class Evaluator:
         """
         cache_key = eval_name or "__default__"
         if cache_key not in self._metrics_cache:
-            has_coords, has_labels, resolved = self._capabilities.get(cache_key,
-                (self.has_coords, True, resolve_eval_metrics(self.cfg, eval_name, objective=self.objective)))
+            has_coords, has_labels, resolved = self._capabilities.get(
+                cache_key,
+                (
+                    self.has_coords,
+                    True,
+                    resolve_eval_metrics(self.cfg, eval_name, objective=self.objective),
+                ),
+            )
             metrics = build_metrics(
                 cfg=self.cfg,
                 objective=self.objective,
@@ -110,8 +115,9 @@ class Evaluator:
 
             # Check if any metric needs attention weights (e.g., p_at_l)
             self._needs_attentions_cache[cache_key] = any(
-                getattr(m, "name", "") == "p_at_l" and
-                (m.use_attention or m.use_logistic_regression) for m in metrics
+                isinstance(m, PrecisionAtLMetric)
+                and (m.use_attention or m.use_logistic_regression)
+                for m in metrics
             )
 
         return self._metrics_cache[cache_key]
@@ -157,13 +163,16 @@ class Evaluator:
 
         logits = outputs["logits"]
         pad_id = int(self.cfg.model.encoder.pad_id)
-        res_mask = residue_mask_from_tokens(tokens, pad_id=pad_id,
+        res_mask = residue_mask_from_tokens(
+            tokens,
+            pad_id=pad_id,
             bos_id=int(self.cfg.model.encoder.get("bos_id", 0)),
-            eos_id=int(self.cfg.model.encoder.get("eos_id", 2)))
+            eos_id=int(self.cfg.model.encoder.get("eos_id", 2)),
+        )
 
         # Get codebook from model
         unwrapped = _unwrap_model(self.model, self.accelerator)
-        codebook = unwrapped.classifier.E
+        codebook = cast(CodebookClassifier, unwrapped.classifier).E
 
         with torch.no_grad():
             if self.decode_method == "top_p":
@@ -187,25 +196,43 @@ class Evaluator:
         for metric in metrics:
             objects = metric.state_objects()
             if objects is not None:
-                size = sum(s["features"].numel() * s["features"].element_size() +
-                           s["labels"].numel() * s["labels"].element_size() for s in objects)
-                total = self.accelerator.gather(torch.tensor([size], device=self.accelerator.device)).sum().item()
-                if total > metric.logreg_max_feature_bytes:
-                    raise ValueError(f"P@L total feature bytes {total} exceed logreg_max_feature_bytes")
+                size = sum(
+                    s["features"].numel() * s["features"].element_size()
+                    + s["labels"].numel() * s["labels"].element_size()
+                    for s in objects
+                )
+                total = (
+                    self.accelerator.gather(
+                        torch.tensor([size], device=self.accelerator.device)
+                    )
+                    .sum()
+                    .item()
+                )
+                if (
+                    isinstance(metric, PrecisionAtLMetric)
+                    and total > metric.logreg_max_feature_bytes
+                ):
+                    raise ValueError(
+                        f"P@L total feature bytes {total} exceed logreg_max_feature_bytes"
+                    )
                 metric.load_state_objects(gather_object(objects))
             tensors = metric.state_tensors()
             if tensors:
                 states.append((metric, tensors))
         if not states:
             return
-        flat = torch.cat([t.flatten().double() for _, tensors in states for t in tensors]).to(self.accelerator.device)
+        flat = torch.cat(
+            [t.flatten().double() for _, tensors in states for t in tensors]
+        ).to(self.accelerator.device)
         gathered = self.accelerator.gather(flat)
         summed = gathered.reshape(-1, flat.numel()).sum(0)
         offset = 0
         for metric, tensors in states:
             restored = []
             for tensor in tensors:
-                restored.append(summed[offset:offset+tensor.numel()].reshape(tensor.shape))
+                restored.append(
+                    summed[offset : offset + tensor.numel()].reshape(tensor.shape)
+                )
                 offset += tensor.numel()
             metric.load_state_tensors(restored)
 
@@ -221,8 +248,14 @@ class Evaluator:
         batching can change top-p draws. MLM masking is per-sample invariant.
         """
         python_state, numpy_state = random.getstate(), np.random.get_state()
-        devices = list(range(torch.cuda.device_count())) if torch.cuda.is_initialized() else []
-        seed = int(self.cfg.train.get("eval", {}).get("seed", self.cfg.train.get("seed", 1337)))
+        devices = (
+            list(range(torch.cuda.device_count()))
+            if torch.cuda.is_initialized()
+            else []
+        )
+        seed = int(
+            self.cfg.train.get("eval", {}).get("seed", self.cfg.train.get("seed", 1337))
+        )
         try:
             with torch.random.fork_rng(devices=devices):
                 torch.default_generator.manual_seed(seed)
@@ -238,8 +271,15 @@ class Evaluator:
     def _evaluate(self, eval_loader: DataLoader, eval_name: str) -> dict[str, float]:
         dataset = eval_loader.dataset
         has_labels = self.objective == "mlm" or getattr(dataset, "has_labels", True)
-        self._capabilities[eval_name] = (getattr(dataset, "has_coords", self.has_coords), has_labels,
-            getattr(eval_loader, "metric_configs", resolve_eval_metrics(self.cfg, eval_name, objective=self.objective)))
+        self._capabilities[eval_name] = (
+            getattr(dataset, "has_coords", self.has_coords),
+            has_labels,
+            getattr(
+                eval_loader,
+                "metric_configs",
+                resolve_eval_metrics(self.cfg, eval_name, objective=self.objective),
+            ),
+        )
         self._metrics_cache.pop(eval_name, None)
         metrics = self._get_metrics(eval_name)
         for metric in metrics:
@@ -247,8 +287,16 @@ class Evaluator:
         needs_decoding = any(metric.requires_decoder for metric in metrics)
         needs_attentions = self._needs_attentions(eval_name)
         n_layers = int(self.cfg.model.encoder.get("n_layers", 12))
-        attention_indices = tuple(sorted({i for m in metrics if m.name == "p_at_l"
-            for i in m.required_attention_layers(n_layers)}))
+        attention_indices = tuple(
+            sorted(
+                {
+                    i
+                    for m in metrics
+                    if isinstance(m, PrecisionAtLMetric)
+                    for i in m.required_attention_layers(n_layers)
+                }
+            )
+        )
         incoming_training = self.model.training
         self.model.eval()
         eval_model = _unwrap_model(self.model, self.accelerator)
@@ -263,20 +311,38 @@ class Evaluator:
                         context = "forward"
                         tokens, labels = (t.to(device) for t in batch[:2])
                         coords = batch[2].to(device) if len(batch) == 3 else None
-                        outputs = eval_model(tokens=tokens, labels=labels if has_labels else None,
-                            ignore_index=ignore_index, output_attentions=needs_attentions,
-                            **({"attention_layer_indices": attention_indices} if needs_attentions else {}))
-                        outputs["residue_mask"] = residue_mask_from_tokens(tokens,
+                        outputs = eval_model(
+                            tokens=tokens,
+                            labels=labels if has_labels else None,
+                            ignore_index=ignore_index,
+                            output_attentions=needs_attentions,
+                            **(
+                                {"attention_layer_indices": attention_indices}
+                                if needs_attentions
+                                else {}
+                            ),
+                        )
+                        outputs["residue_mask"] = residue_mask_from_tokens(
+                            tokens,
                             pad_id=int(self.cfg.model.encoder.pad_id),
                             bos_id=int(self.cfg.model.encoder.get("bos_id", 0)),
-                            eos_id=int(self.cfg.model.encoder.get("eos_id", 2)))
+                            eos_id=int(self.cfg.model.encoder.get("eos_id", 2)),
+                        )
                         if needs_decoding and "pred_coords" not in outputs:
-                            outputs["pred_coords"] = self._decode_predictions(outputs, tokens)
+                            outputs["pred_coords"] = self._decode_predictions(
+                                outputs, tokens
+                            )
                         for metric in metrics:
                             context = metric.name
                             failed_before = metric.num_failed
                             try:
-                                metric.update(outputs, tokens, labels if has_labels else None, coords, self.cfg)
+                                metric.update(
+                                    outputs,
+                                    tokens,
+                                    labels if has_labels else None,
+                                    coords,
+                                    self.cfg,
+                                )
                             except Exception:
                                 if metric.num_failed == failed_before:
                                     metric.num_failed += 1
@@ -293,8 +359,10 @@ class Evaluator:
                     computed = metric.compute()
                     results.update(computed)
                     if getattr(metric, "explicit", False) and metric.num_valid == 0:
-                        raise ValueError(f"{metric.name} unavailable (num_valid=0, "
-                            f"num_skipped={metric.num_skipped}, num_failed={metric.num_failed})")
+                        raise ValueError(
+                            f"{metric.name} unavailable (num_valid=0, "
+                            f"num_skipped={metric.num_skipped}, num_failed={metric.num_failed})"
+                        )
             except Exception as exc:
                 error = f"{context}: {type(exc).__name__}: {exc}"
             self._raise_eval_errors(error, eval_name)

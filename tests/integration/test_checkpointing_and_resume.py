@@ -55,6 +55,7 @@ def test_checkpointing_artifacts(tmp_path):
     assert (model_dir / "final.pt").is_file()
 
     import torch
+
     first = torch.load(model_dir / "final.pt", weights_only=False)
     assert first["global_step"] == 3 and first["micro_step"] == 3
     assert first["step_unit"] == "optimizer_update"
@@ -65,25 +66,33 @@ def test_checkpointing_artifacts(tmp_path):
     assert second["global_step"] == 1 and second["micro_step"] == 1
 
 
-
-
 def test_interrupted_checkpoint_preserves_previous_file(tmp_path, monkeypatch):
     import pytest
     import torch
     from omegaconf import OmegaConf
     from stok.cli.train import _save_checkpoint
-    path = tmp_path / 'latest.pt'
-    torch.save({'old': True}, path)
+
+    path = tmp_path / "latest.pt"
+    torch.save({"old": True}, path)
     model = torch.nn.Linear(1, 1)
     optimizer = torch.optim.AdamW(model.parameters())
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _: 1.)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _: 1.0)
+
     def interrupted(payload, target):
-        with open(target, 'wb') as handle:
-            handle.write(b'partial')
-        raise OSError('interrupted checkpoint')
-    monkeypatch.setattr(torch, 'save', interrupted)
-    with pytest.raises(OSError, match='interrupted checkpoint'):
-        _save_checkpoint(path, model=model, optimizer=optimizer, scheduler=scheduler,
-                         global_step=1, cfg=OmegaConf.create({}), accelerator=None)
-    assert torch.load(path, weights_only=False) == {'old': True}
+        with open(target, "wb") as handle:
+            handle.write(b"partial")
+        raise OSError("interrupted checkpoint")
+
+    monkeypatch.setattr(torch, "save", interrupted)
+    with pytest.raises(OSError, match="interrupted checkpoint"):
+        _save_checkpoint(
+            path,
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            global_step=1,
+            cfg=OmegaConf.create({}),
+            accelerator=None,
+        )
+    assert torch.load(path, weights_only=False) == {"old": True}
     assert list(tmp_path.iterdir()) == [path]

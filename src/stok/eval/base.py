@@ -28,12 +28,13 @@ class Metric(Protocol):
     objectives: ClassVar[set[str] | None]
     requires_decoder: ClassVar[bool]
     requires_coords: ClassVar[bool]
+    explicit: bool
 
     def update(
         self,
         outputs: dict,
         tokens: torch.Tensor,
-        labels: torch.Tensor,
+        labels: torch.Tensor | None,
         coords: torch.Tensor | None,
         cfg: DictConfig,
     ) -> None:
@@ -78,6 +79,10 @@ class Metric(Protocol):
         """
         ...
 
+    def state_objects(self) -> list[Any] | None: ...
+
+    def load_state_objects(self, gathered: list[Any]) -> None: ...
+
 
 class MetricBase(ABC):
     """Abstract base class for metrics with default implementations.
@@ -98,6 +103,7 @@ class MetricBase(ABC):
     objectives: ClassVar[set[str] | None] = None
     requires_decoder: ClassVar[bool] = False
     requires_coords: ClassVar[bool] = False
+    explicit: bool = False
 
     def __init__(self, **kwargs):
         """Initialize metric with optional configuration.
@@ -111,25 +117,28 @@ class MetricBase(ABC):
         self.num_valid = self.num_skipped = self.num_failed = 0
 
     def diagnostics(self) -> dict[str, float]:
-        return {f"{self.name}/{key}": float(getattr(self, key))
-                for key in ("num_valid", "num_skipped", "num_failed")}
+        return {
+            f"{self.name}/{key}": float(getattr(self, key))
+            for key in ("num_valid", "num_skipped", "num_failed")
+        }
 
     def population_values(self):
         return [self.num_valid, self.num_skipped, self.num_failed]
 
     def load_population(self, tensor, default_valid=0):
         if tensor.numel() >= 5:
-            self.num_valid, self.num_skipped, self.num_failed = map(int, tensor[-3:].tolist())
+            self.num_valid, self.num_skipped, self.num_failed = map(
+                int, tensor[-3:].tolist()
+            )
         else:
             self.num_valid, self.num_skipped, self.num_failed = int(default_valid), 0, 0
-
 
     @abstractmethod
     def update(
         self,
         outputs: dict,
         tokens: torch.Tensor,
-        labels: torch.Tensor,
+        labels: torch.Tensor | None,
         coords: torch.Tensor | None,
         cfg: DictConfig,
     ) -> None:

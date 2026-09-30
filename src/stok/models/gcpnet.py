@@ -11,9 +11,8 @@ import torch
 import torch.nn as nn
 
 # import torch_scatter
-from graphein.protein.tensor.data import ProteinBatch
 from omegaconf import DictConfig, OmegaConf
-from torch_geometric.data import Batch
+from torch_geometric.data import Data
 
 from ..utils.gcp import (
     CachedGaussianRBF,
@@ -93,10 +92,10 @@ class GCPNetModel(torch.nn.Module):
         self.predict_node_rep = module_cfg.predict_node_rep
 
         # Feature dimensionalities
-        edge_input_dims = ScalarVector(model_cfg.e_input_dim, model_cfg.xi_input_dim)
-        node_input_dims = ScalarVector(model_cfg.h_input_dim, model_cfg.chi_input_dim)
-        self.edge_dims = ScalarVector(model_cfg.e_hidden_dim, model_cfg.xi_hidden_dim)
-        self.node_dims = ScalarVector(model_cfg.h_hidden_dim, model_cfg.chi_hidden_dim)
+        edge_input_dims = (model_cfg.e_input_dim, model_cfg.xi_input_dim)
+        node_input_dims = (model_cfg.h_input_dim, model_cfg.chi_input_dim)
+        self.edge_dims = (model_cfg.e_hidden_dim, model_cfg.xi_hidden_dim)
+        self.node_dims = (model_cfg.h_hidden_dim, model_cfg.chi_hidden_dim)
 
         # Position-wise operations
         self.centralize = partial(centralize, key="pos")
@@ -134,7 +133,7 @@ class GCPNetModel(torch.nn.Module):
                         # Note: `GCPNet` defaults to providing SE(3) equivariance
                         # It is possible to provide E(3) equivariance by instead setting `module_cfg.enable_e3_equivariance=true`
                         self.node_dims,
-                        (self.node_dims.scalar, 0),
+                        (self.node_dims[0], 0),
                         nonlinearities=tuple(module_cfg.nonlinearities),
                         scalar_gate=module_cfg.scalar_gate,
                         vector_gate=module_cfg.vector_gate,
@@ -155,19 +154,21 @@ class GCPNetModel(torch.nn.Module):
 
     def _ensure_edge_frames(
         self,
-        batch: Batch | ProteinBatch,
+        batch: Data,
         *,
         force: bool = False,
         pos_override: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Reuse cached edge-local frames when node positions are unchanged."""
 
+        assert batch.edge_index is not None
         if pos_override is not None:
             frames = self.localize(pos_override, batch.edge_index)
             batch.f_ij = frames
             return frames
 
         pos = batch.pos
+        assert pos is not None
         edge_index = batch.edge_index
         num_edges = edge_index.size(1)
 
@@ -217,7 +218,7 @@ class GCPNetModel(torch.nn.Module):
         cached_pos.copy_(detached_pos)
         return frames
 
-    def forward(self, batch: Batch | ProteinBatch) -> EncoderOutput:
+    def forward(self, batch: Data) -> EncoderOutput:
         """Implements the forward pass of the GCPNet encoder.
 
         Returns the node embedding and graph embedding in a dictionary.
@@ -232,6 +233,7 @@ class GCPNetModel(torch.nn.Module):
             the dimension of the embeddings.
         :rtype: EncoderOutput
         """
+        assert batch.batch is not None
         # Centralize node positions to make them translation-invariant
         pos_centroid, batch.pos = self.centralize(batch, batch_index=batch.batch)
 
@@ -278,6 +280,7 @@ class GCPNetModel(torch.nn.Module):
                 batch.f_ij = self._ensure_edge_frames(
                     batch, force=True, pos_override=centralized_node_pos
                 )
+            assert batch.pos is not None
             encoder_outputs["pos"] = batch.pos  # (n, 3) -> (batch_size, 3)
 
         # Summarize intermediate node representations as final predictions
@@ -305,10 +308,10 @@ class GCPNetModel(torch.nn.Module):
 class GCP(nn.Module):
     def __init__(
         self,
-        input_dims: ScalarVector,
-        output_dims: ScalarVector,
+        input_dims: tuple[int, int],
+        output_dims: tuple[int, int],
         nonlinearities: tuple[str, str] = ("silu", "silu"),
-        scalar_out_nonlinearity: str | None = "silu",
+        scalar_out_nonlinearity: str = "silu",
         scalar_gate: int = 0,
         vector_gate: bool = True,
         feedforward_out: bool = False,
@@ -335,9 +338,9 @@ class GCP(nn.Module):
             self.norm = nn.LayerNorm(self.scalar_output_dim)
 
         if self.vector_input_dim:
-            assert (
-                self.vector_input_dim % bottleneck == 0
-            ), f"Input channel of vector ({self.vector_input_dim}) must be divisible with bottleneck factor ({bottleneck})"
+            assert self.vector_input_dim % bottleneck == 0, (
+                f"Input channel of vector ({self.vector_input_dim}) must be divisible with bottleneck factor ({bottleneck})"
+            )
 
             self.hidden_dim = (
                 self.vector_input_dim // bottleneck
@@ -486,12 +489,12 @@ class GCP(nn.Module):
 
     def forward(
         self,
-        s_maybe_v: tuple[torch.Tensor, torch.Tensor] | torch.Tensor,
+        s_maybe_v: ScalarVector | tuple[torch.Tensor, torch.Tensor] | torch.Tensor,
         edge_index: torch.Tensor,
         frames: torch.Tensor,
         node_inputs: bool = False,
         node_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor | ScalarVector:
         if self.vector_input_dim:
             scalar_rep, vector_rep = s_maybe_v
             v_pre = vector_rep.transpose(-1, -2)
@@ -587,7 +590,7 @@ class GCPLayerNorm(nn.Module):
     """
 
     def __init__(
-        self, dims: ScalarVector, eps: float = 1e-8, use_gcp_norm: bool = True
+        self, dims: tuple[int, int], eps: float = 1e-8, use_gcp_norm: bool = True
     ):
         super().__init__()
         self.scalar_dims, self.vector_dims = dims
@@ -629,13 +632,13 @@ class GCPLayerNorm(nn.Module):
 class GCPEmbedding(nn.Module):
     def __init__(
         self,
-        edge_input_dims: ScalarVector,
-        node_input_dims: ScalarVector,
-        edge_hidden_dims: ScalarVector,
-        node_hidden_dims: ScalarVector,
+        edge_input_dims: tuple[int, int],
+        node_input_dims: tuple[int, int],
+        edge_hidden_dims: tuple[int, int],
+        node_hidden_dims: tuple[int, int],
         num_atom_types: int = 0,
         nonlinearities: tuple[str, str] = ("silu", "silu"),
-        cfg: dict | None = None,
+        cfg: DictConfig | None = None,
         pre_norm: bool = True,
         use_gcp_norm: bool = True,
     ):
@@ -646,6 +649,7 @@ class GCPEmbedding(nn.Module):
         else:
             self.atom_embedding = None
 
+        assert cfg is not None
         self.radial_embedding = CachedGaussianRBF(
             max_distance=cfg.r_max,
             num_rbf=cfg.num_rbf,
@@ -686,10 +690,10 @@ class GCPEmbedding(nn.Module):
         )
 
     def forward(
-        self, batch: Batch | ProteinBatch
+        self, batch: Data
     ) -> tuple[
-        tuple[torch.Tensor, torch.Tensor] | torch.Tensor,
-        tuple[torch.Tensor, torch.Tensor] | torch.Tensor,
+        ScalarVector | torch.Tensor,
+        ScalarVector | torch.Tensor,
     ]:
         if self.atom_embedding is not None:
             node_rep = ScalarVector(self.atom_embedding(batch.h), batch.chi)
@@ -698,6 +702,7 @@ class GCPEmbedding(nn.Module):
 
         edge_rep = ScalarVector(batch.e, batch.xi)
 
+        assert batch.pos is not None and batch.edge_index is not None
         edge_vectors = (
             batch.pos[batch.edge_index[0]] - batch.pos[batch.edge_index[1]]
         )  # [n_edges, 3]
@@ -743,11 +748,11 @@ class GCPEmbedding(nn.Module):
 class GCPMessagePassing(nn.Module):
     def __init__(
         self,
-        input_dims: ScalarVector,
-        output_dims: ScalarVector,
-        edge_dims: ScalarVector,
-        cfg: dict,
-        mp_cfg: dict,
+        input_dims: tuple[int, int],
+        output_dims: tuple[int, int],
+        edge_dims: tuple[int, int],
+        cfg: DictConfig,
+        mp_cfg: DictConfig,
         reduce_function: str = "sum",
         use_scalar_message_attention: bool = True,
     ):
@@ -806,7 +811,7 @@ class GCPMessagePassing(nn.Module):
         # learnable scalar message gating
         if use_scalar_message_attention:
             self.scalar_message_attention = nn.Sequential(
-                nn.Linear(output_dims.scalar, 1), nn.Sigmoid()
+                nn.Linear(output_dims[0], 1), nn.Sigmoid()
             )
 
     def forward(
@@ -968,10 +973,10 @@ class GCPMessagePassing(nn.Module):
 class GCPInteractions(nn.Module):
     def __init__(
         self,
-        node_dims: ScalarVector,
-        edge_dims: ScalarVector,
-        cfg: dict,
-        layer_cfg: dict,
+        node_dims: tuple[int, int],
+        edge_dims: tuple[int, int],
+        cfg: DictConfig,
+        layer_cfg: DictConfig,
         dropout: float = 0.0,
         nonlinearities: tuple[str, str] | None = None,
     ):
@@ -1015,13 +1020,13 @@ class GCPInteractions(nn.Module):
 
         # build out feedforward network modules
         hidden_dims = (
-            (node_dims.scalar, node_dims.vector)
+            (node_dims[0], node_dims[1])
             if layer_cfg.num_feedforward_layers == 1
-            else (4 * node_dims.scalar, 2 * node_dims.vector)
+            else (4 * node_dims[0], 2 * node_dims[1])
         )
         ff_interaction_layers = [
             ff_GCP(
-                (node_dims.scalar * 2, node_dims.vector * 2),
+                (node_dims[0] * 2, node_dims[1] * 2),
                 hidden_dims,
                 nonlinearities=("none", "none")
                 if layer_cfg.num_feedforward_layers == 1
@@ -1060,7 +1065,7 @@ class GCPInteractions(nn.Module):
             position_output_dims = (
                 node_dims
                 if getattr(cfg, "update_positions_with_vector_sum", False)
-                else (node_dims.scalar, 1)
+                else (node_dims[0], 1)
             )
             self.node_position_update_gcp = ff_GCP(
                 node_dims,
@@ -1092,13 +1097,13 @@ class GCPInteractions(nn.Module):
 
     def forward(
         self,
-        node_rep: tuple[torch.Tensor, torch.Tensor],
-        edge_rep: tuple[torch.Tensor, torch.Tensor],
+        node_rep: ScalarVector | tuple[torch.Tensor, torch.Tensor],
+        edge_rep: ScalarVector | tuple[torch.Tensor, torch.Tensor],
         edge_index: torch.Tensor,
         frames: torch.Tensor,
         node_mask: torch.Tensor | None = None,
         node_pos: torch.Tensor | None = None,
-    ) -> tuple[tuple[torch.Tensor, torch.Tensor], torch.Tensor | None]:
+    ) -> tuple[ScalarVector, torch.Tensor | None]:
         node_rep = ScalarVector(node_rep[0], node_rep[1])
         edge_rep = ScalarVector(edge_rep[0], edge_rep[1])
 
@@ -1143,6 +1148,7 @@ class GCPInteractions(nn.Module):
             return node_rep, node_pos
 
         # update node positions
+        assert node_pos is not None
         node_pos = node_pos + self.derive_x_update(
             node_rep, edge_index, frames, node_mask=node_mask
         )

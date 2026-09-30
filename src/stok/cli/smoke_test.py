@@ -56,7 +56,7 @@ def run_smoke_test(cfg: DictConfig):
 
     if cfg.print_model_summary:
         n_params = sum(p.numel() for p in model.parameters())
-        print(f"Model params: {n_params/1e6:.2f}M")
+        print(f"Model params: {n_params / 1e6:.2f}M")
 
     # Tiny forward sanity check
     B, L = 2, 16

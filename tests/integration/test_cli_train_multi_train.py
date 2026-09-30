@@ -13,7 +13,13 @@ def _write_parquet(path: Path, n_rows: int, seq_min_len: int, seq_max_len: int):
     rows = []
     for i in range(n_rows):
         seq = random_protein_sequence(seq_min_len, seq_max_len)
-        rows.append({"sequence_id": f"p{i}", "sequence": seq, "structure_tokens": [0] * len(seq)})
+        rows.append(
+            {
+                "sequence_id": f"p{i}",
+                "sequence": seq,
+                "structure_tokens": [0] * len(seq),
+            }
+        )
     pq.write_table(pa.Table.from_pylist(rows), path)
 
 
@@ -60,5 +66,3 @@ def test_cli_train_with_multiple_train_datasets_and_fractions(tmp_path):
     result = runner.invoke(cli, ["train", *overrides])  # type: ignore[arg-type]
     assert result.exit_code == 0, result.output
     assert "Training complete." in result.output
-
-

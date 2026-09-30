@@ -156,18 +156,35 @@ Execute the listed order for a simple serial workflow. Tasks 4, 5, and 11 are in
   import subprocess
   import sys
 
+
   def test_two_rank_checkpoint_completes(tmp_path):
       result = subprocess.run(
-          [sys.executable, "-m", "torch.distributed.run", "--standalone",
-           "--nproc_per_node=2", "-m", "stok.train",
-           "model.encoder.d_model=16", "model.encoder.n_heads=2",
-           "model.encoder.n_layers=1", "model.encoder.ffn_mult=1.0",
-           "model.codebook.preset=lite", "data.num_workers=0",
-           "data.batch_size=2", "data.max_len=8", "train.num_steps=3",
-           "train.checkpoint_steps=1", "train.wandb.enabled=false",
-           "train.console.enabled=false", f"train.project_path={tmp_path}"],
+          [
+              sys.executable,
+              "-m",
+              "torch.distributed.run",
+              "--standalone",
+              "--nproc_per_node=2",
+              "-m",
+              "stok.train",
+              "model.encoder.d_model=16",
+              "model.encoder.n_heads=2",
+              "model.encoder.n_layers=1",
+              "model.encoder.ffn_mult=1.0",
+              "model.codebook.preset=lite",
+              "data.num_workers=0",
+              "data.batch_size=2",
+              "data.max_len=8",
+              "train.num_steps=3",
+              "train.checkpoint_steps=1",
+              "train.wandb.enabled=false",
+              "train.console.enabled=false",
+              f"train.project_path={tmp_path}",
+          ],
           env={**os.environ, "ACCELERATE_USE_CPU": "true", "OMP_NUM_THREADS": "1"},
-          capture_output=True, text=True, timeout=60,
+          capture_output=True,
+          text=True,
+          timeout=60,
       )
       assert result.returncode == 0, result.stdout + result.stderr
       assert (tmp_path / "checkpoints/step_00000002.pt").is_file()
@@ -184,13 +201,18 @@ Execute the listed order for a simple serial workflow. Tasks 4, 5, and 11 are in
       checkpoint_error = None
       if is_main:
           try:
-              _save_checkpoint(step_path, model=model, optimizer=optimizer,
-                               scheduler=scheduler, global_step=global_step,
-                               cfg=cfg, accelerator=accelerator)
+              _save_checkpoint(
+                  step_path,
+                  model=model,
+                  optimizer=optimizer,
+                  scheduler=scheduler,
+                  global_step=global_step,
+                  cfg=cfg,
+                  accelerator=accelerator,
+              )
           except Exception as exc:
               checkpoint_error = f"{type(exc).__name__}: {exc}"
-      errors = (gather_object([checkpoint_error]) if accelerator
-                else [checkpoint_error])
+      errors = gather_object([checkpoint_error]) if accelerator else [checkpoint_error]
       if any(error is not None for error in errors):
           raise RuntimeError(f"Checkpoint failed: {errors}")
   if batches_this_pass == 0:
@@ -212,11 +234,22 @@ Execute the listed order for a simple serial workflow. Tasks 4, 5, and 11 are in
   ```python
   def test_internal_gap_and_coordinates_stay_on_same_residue(tokenizer):
       from stok.cli.train import _tokenize_and_align
+
       coords = torch.arange(27, dtype=torch.float32).reshape(3, 3, 3)
       tokens, labels, aligned = _tokenize_and_align(
-          [{"sequence_id": "p", "sequence": "LAG", "structure_tokens": torch.tensor([7, -1, 9]),
-            "coords": coords}], tokenizer, max_len=6, ignore_index=-100,
-          pad_id=tokenizer.pad_token_id, num_classes=10,
+          [
+              {
+                  "sequence_id": "p",
+                  "sequence": "LAG",
+                  "structure_tokens": torch.tensor([7, -1, 9]),
+                  "coords": coords,
+              }
+          ],
+          tokenizer,
+          max_len=6,
+          ignore_index=-100,
+          pad_id=tokenizer.pad_token_id,
+          num_classes=10,
       )
       assert labels.tolist() == [[-100, 7, -100, 9, -100, -100]]
       torch.testing.assert_close(aligned[0, 1:4], coords)
@@ -231,10 +264,10 @@ Execute the listed order for a simple serial workflow. Tasks 4, 5, and 11 are in
   result = codes.new_full((*codes.shape[:2], 3, 3), float("nan"))
   active = residue_mask.any(dim=1)
   if active.any():
-      decoded = decode_coords(decoder, codes[active, 1:-1],
-                              residue_mask[active, 1:-1])
+      decoded = decode_coords(decoder, codes[active, 1:-1], residue_mask[active, 1:-1])
       result[active, 1:-1] = decoded.masked_fill(
-          ~residue_mask[active, 1:-1, None, None], float("nan"))
+          ~residue_mask[active, 1:-1, None, None], float("nan")
+      )
   return result
   ```
 
@@ -303,8 +336,9 @@ The probe accepts `--case coverage|eval-tail`, `--output PATH`, `--workers N`, a
   ```python
   import json
 
-  rank_ids = [json.loads((tmp_path / f"rank_{rank}.json").read_text())["ids"]
-              for rank in range(2)]
+  rank_ids = [
+      json.loads((tmp_path / f"rank_{rank}.json").read_text())["ids"] for rank in range(2)
+  ]
   flattened = [sequence_id for ids in rank_ids for sequence_id in ids]
   assert sorted(flattened) == ["0", "1", "2", "3", "4"]
   assert len(set(flattened)) == len(flattened)
@@ -338,9 +372,14 @@ The probe accepts `--case coverage|eval-tail`, `--output PATH`, `--workers N`, a
 - [x] Buffer only the input window, derive global CE/FAPE denominators, and implement this loss scaling per micro-batch:
 
   ```python
-  ce_term = ce_sum * (world_size / global_token_count) if global_token_count else ce_sum * 0
-  fape_term = (fape_sum * (world_size / global_structure_count)
-               if global_structure_count else fape_sum * 0)
+  ce_term = (
+      ce_sum * (world_size / global_token_count) if global_token_count else ce_sum * 0
+  )
+  fape_term = (
+      fape_sum * (world_size / global_structure_count)
+      if global_structure_count
+      else fape_sum * 0
+  )
   loss = ce_term + fape_weight * fape_term
   ```
 
@@ -357,8 +396,9 @@ The probe accepts `--case coverage|eval-tail`, `--output PATH`, `--workers N`, a
 
   ```python
   cfg.train.eval.metrics.lddt.enabled = False
-  cfg.data.eval = {"pdb": {"path": str(tmp_path), "format": "structure",
-                          "metrics": {"only": ["lddt"]}}}
+  cfg.data.eval = {
+      "pdb": {"path": str(tmp_path), "format": "structure", "metrics": {"only": ["lddt"]}}
+  }
   selected = resolve_eval_metrics(cfg, "pdb", objective="codebook")
   assert set(selected) == {"lddt"}
   assert selected["lddt"]["explicit"] is True
@@ -381,12 +421,18 @@ The probe accepts `--case coverage|eval-tail`, `--output PATH`, `--workers N`, a
   def test_perplexity_is_token_weighted():
       from stok.eval.metrics.classification import PerplexityMetric
       from omegaconf import OmegaConf
+
       cfg = OmegaConf.create({"model": {"classifier": {"ignore_index": -100}}})
       metric = PerplexityMetric()
       for n, ce in [(1, 1.0), (9, 3.0)]:
           labels = torch.zeros(1, n, dtype=torch.long)
-          metric.update({"classification_loss": torch.tensor(ce)},
-                        torch.zeros_like(labels), labels, None, cfg)
+          metric.update(
+              {"classification_loss": torch.tensor(ce)},
+              torch.zeros_like(labels),
+              labels,
+              None,
+              cfg,
+          )
       assert math.isclose(metric.compute()["ppl"], math.exp(2.8), rel_tol=1e-6)
   ```
 
@@ -452,8 +498,9 @@ The probe accepts `--case coverage|eval-tail`, `--output PATH`, `--workers N`, a
       x = sample_input.clone().requires_grad_()
       mask = torch.zeros(x.shape[:2], dtype=torch.bool)
       mask[:, -1] = True
-      out = attention_module(x, key_padding_mask=mask,
-                             attn_mask=torch.zeros(x.size(1), x.size(1)))
+      out = attention_module(
+          x, key_padding_mask=mask, attn_mask=torch.zeros(x.size(1), x.size(1))
+      )
       assert torch.isfinite(out).all()
       out.sum().backward()
       assert torch.isfinite(x.grad).all()

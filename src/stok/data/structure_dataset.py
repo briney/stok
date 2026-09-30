@@ -111,11 +111,11 @@ class StructureFolderDataset(Dataset):
         """Return number of structure files in the dataset."""
         return len(self._files)
 
-    def __getitem__(self, idx: int) -> dict[str, torch.Tensor | str]:
+    def __getitem__(self, index: int) -> dict[str, torch.Tensor | str]:
         """Load and parse a structure file.
 
         Args:
-            idx: Index of the structure file to load.
+            index: Index of the structure file to load.
 
         Returns:
             Dict with keys:
@@ -127,7 +127,7 @@ class StructureFolderDataset(Dataset):
 
             Note: 'structure_tokens' key is NOT included (not available for raw structures).
         """
-        path = self._files[idx]
+        path = self._files[index]
 
         # Parse structure
         data = parse_structure(

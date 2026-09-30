@@ -46,4 +46,3 @@ def format_flops_scientific(flops: int | float, precision: int = 3) -> str:
         Formatted string like "1.234e12".
     """
     return f"{flops:.{precision}e}"
-

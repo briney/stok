@@ -146,7 +146,11 @@ def _extract_attention_contacts(
         if layer == "mean":
             selected = attentions
         elif isinstance(layer, int):
-            original = layer if layer >= 0 else outputs.get("num_attention_layers", len(attentions)) + layer
+            original = (
+                layer
+                if layer >= 0
+                else outputs.get("num_attention_layers", len(attentions)) + layer
+            )
             if original not in indices:
                 raise ValueError(f"Missing attention layer {original}")
             selected = [attentions[indices.index(original)]]
@@ -169,7 +173,9 @@ def _extract_attention_contacts(
 
     mask = outputs.get("residue_mask")
     if mask is not None:
-        contact_probs = contact_probs.masked_fill(~(mask[:, :, None] & mask[:, None, :]), 0)
+        contact_probs = contact_probs.masked_fill(
+            ~(mask[:, :, None] & mask[:, None, :]), 0
+        )
 
     # Symmetrize (contacts are symmetric)
     contact_probs = (contact_probs + contact_probs.transpose(-1, -2)) / 2
@@ -265,7 +271,7 @@ class PrecisionAtLMetric(MetricBase):
         self,
         outputs: dict,
         tokens: torch.Tensor,
-        labels: torch.Tensor,
+        labels: torch.Tensor | None,
         coords: torch.Tensor | None,
         cfg: DictConfig,
     ) -> None:
@@ -277,8 +283,12 @@ class PrecisionAtLMetric(MetricBase):
             mask = outputs.get("residue_mask")
             if mask is None:
                 enc = cfg.model.encoder
-                mask = residue_mask_from_tokens(tokens, pad_id=int(enc.get("pad_id", 1)),
-                    bos_id=int(enc.get("bos_id", 0)), eos_id=int(enc.get("eos_id", 2)))
+                mask = residue_mask_from_tokens(
+                    tokens,
+                    pad_id=int(enc.get("pad_id", 1)),
+                    bos_id=int(enc.get("bos_id", 0)),
+                    eos_id=int(enc.get("eos_id", 2)),
+                )
             valid = mask & torch.isfinite(coords[:, :, 1]).all(-1)
             positions = torch.arange(tokens.size(1), device=tokens.device)
             pairs = valid[:, :, None] & valid[:, None, :]
@@ -294,21 +304,35 @@ class PrecisionAtLMetric(MetricBase):
                     attentions = outputs.get("attentions")
                     if attentions:
                         feature_count = sum(a.shape[1] for a in attentions)
-                        projected = self._feature_bytes + int(pairs.sum()) * (feature_count + 1) * 4
-                        world = torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
+                        projected = (
+                            self._feature_bytes
+                            + int(pairs.sum()) * (feature_count + 1) * 4
+                        )
+                        world = (
+                            torch.distributed.get_world_size()
+                            if torch.distributed.is_initialized()
+                            else 1
+                        )
                         if projected > self.logreg_max_feature_bytes // world:
-                            raise ValueError(f"P@L projected feature bytes {projected} exceed rank budget "
+                            raise ValueError(
+                                f"P@L projected feature bytes {projected} exceed rank budget "
                                 f"{self.logreg_max_feature_bytes // world}; increase logreg_max_feature_bytes "
-                                "or evaluate fewer/shorter structures")
+                                "or evaluate fewer/shorter structures"
+                            )
                     predictions = _extract_per_layer_head_attention(masked_outputs)
                 elif self.use_attention:
-                    predictions = _extract_attention_contacts(masked_outputs,
-                        layer=self.attention_layer, head_aggregation=self.head_aggregation,
-                        num_layers=self.num_layers)
+                    predictions = _extract_attention_contacts(
+                        masked_outputs,
+                        layer=self.attention_layer,
+                        head_aggregation=self.head_aggregation,
+                        num_layers=self.num_layers,
+                    )
                 else:
                     hidden = outputs.get("hidden_states", outputs.get("logits"))
                     if hidden is None:
-                        raise ValueError("P@L similarity requires hidden_states or logits")
+                        raise ValueError(
+                            "P@L similarity requires hidden_states or logits"
+                        )
                     hidden = torch.nn.functional.normalize(hidden.float(), dim=-1)
                     predictions = hidden @ hidden.transpose(-1, -2)
                 if predictions is None:
@@ -317,28 +341,50 @@ class PrecisionAtLMetric(MetricBase):
                 for b in eligible.nonzero().flatten().tolist():
                     seq_len = int(valid[b].sum())
                     if self.use_logistic_regression:
-                        features = predictions[b, :, :, pairs[b]].flatten(0, 1).T.float().cpu()
+                        features = (
+                            predictions[b, :, :, pairs[b]].flatten(0, 1).T.float().cpu()
+                        )
                         if not torch.isfinite(features).all():
                             raise ValueError("Nonfinite contact features")
-                        self._feature_bytes += features.numel() * features.element_size() + features.shape[0] * 4
+                        self._feature_bytes += (
+                            features.numel() * features.element_size()
+                            + features.shape[0] * 4
+                        )
                         # Content identity survives rank/worker traversal order. Keep duplicates.
                         identity = hashlib.sha256()
-                        biological_tokens = tokens[b][mask[b]].detach().cpu().long().numpy()
+                        biological_tokens = (
+                            tokens[b][mask[b]].detach().cpu().long().numpy()
+                        )
                         biological_coords = coords[b][mask[b]].detach().cpu().float()
                         identity.update(len(biological_tokens).to_bytes(8, "big"))
                         identity.update(biological_tokens.tobytes())
-                        identity.update(torch.isfinite(biological_coords).numpy().tobytes())
-                        identity.update(torch.nan_to_num(biological_coords, nan=0., posinf=0., neginf=0.).numpy().tobytes())
-                        self._logreg_structures.append({"features": features,
-                            "labels": contacts[b][pairs[b]].float().cpu(), "seq_len": seq_len,
-                            "sample_key": identity.hexdigest()})
+                        identity.update(
+                            torch.isfinite(biological_coords).numpy().tobytes()
+                        )
+                        identity.update(
+                            torch.nan_to_num(
+                                biological_coords, nan=0.0, posinf=0.0, neginf=0.0
+                            )
+                            .numpy()
+                            .tobytes()
+                        )
+                        self._logreg_structures.append(
+                            {
+                                "features": features,
+                                "labels": contacts[b][pairs[b]].float().cpu(),
+                                "seq_len": seq_len,
+                                "sample_key": identity.hexdigest(),
+                            }
+                        )
                     else:
                         scores = predictions[b][pairs[b]]
                         if not torch.isfinite(scores).all():
                             raise ValueError("Nonfinite contact predictions")
                         k = min(seq_len, scores.numel())
                         selected = scores.topk(k).indices
-                        self._correct_sum += contacts[b][pairs[b]][selected].float().mean().item()
+                        self._correct_sum += (
+                            contacts[b][pairs[b]][selected].float().mean().item()
+                        )
                         self._total_sum += 1
                         self.num_valid += 1
             except Exception:
@@ -531,7 +577,11 @@ class PrecisionAtLMetric(MetricBase):
         if not self.use_attention:
             return ()
         if isinstance(self.attention_layer, int):
-            index = self.attention_layer if self.attention_layer >= 0 else n_layers + self.attention_layer
+            index = (
+                self.attention_layer
+                if self.attention_layer >= 0
+                else n_layers + self.attention_layer
+            )
             if not 0 <= index < n_layers:
                 raise ValueError("attention_layer outside encoder")
             return (index,)
@@ -540,8 +590,12 @@ class PrecisionAtLMetric(MetricBase):
         return tuple(range(max(0, n_layers - self.num_layers), n_layers))
 
     def state_tensors(self) -> list[torch.Tensor]:
-        return [torch.tensor([self._correct_sum, self._total_sum, *self.population_values()],
-                             dtype=torch.float64)]
+        return [
+            torch.tensor(
+                [self._correct_sum, self._total_sum, *self.population_values()],
+                dtype=torch.float64,
+            )
+        ]
 
     def load_state_tensors(self, tensors: list[torch.Tensor]) -> None:
         if tensors:

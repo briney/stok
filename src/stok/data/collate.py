@@ -9,17 +9,28 @@ def tokenize_residues(seq: str, tokenizer, max_len: int) -> torch.Tensor:
     """Encode exactly one token per biological position, plus BOS and EOS."""
     if max_len < 3:
         raise ValueError("max_len must be >= 3 (BOS, residue, EOS)")
-    if not isinstance(seq, str) or any(c not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ.-" for c in seq):
-        raise ValueError("Sequence must contain single-character residues, not control tokens")
+    if not isinstance(seq, str) or any(
+        c not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ.-" for c in seq
+    ):
+        raise ValueError(
+            "Sequence must contain single-character residues, not control tokens"
+        )
     raw = tokenizer(seq, add_special_tokens=False)["input_ids"]
     if len(raw) != len(seq):
         raise ValueError("Tokenizer must encode exactly one token per residue")
-    return tokenizer(seq, add_special_tokens=True, truncation=True,
-                     max_length=max_len, padding="max_length", return_tensors="pt")["input_ids"][0]
+    return tokenizer(
+        seq,
+        add_special_tokens=True,
+        truncation=True,
+        max_length=max_len,
+        padding="max_length",
+        return_tensors="pt",
+    )["input_ids"][0]
 
 
-def align_coords(coords: torch.Tensor | None, *, residue_count: int,
-                 token_length: int) -> torch.Tensor:
+def align_coords(
+    coords: torch.Tensor | None, *, residue_count: int, token_length: int
+) -> torch.Tensor:
     """Shift raw residue coordinates past BOS; preserve missing sample rows."""
     aligned = torch.full((token_length, 3, 3), float("nan"))
     if coords is not None:
@@ -28,7 +39,7 @@ def align_coords(coords: torch.Tensor | None, *, residue_count: int,
         n = min(residue_count, token_length - 2)
         if len(coords) < n:
             raise ValueError("Coordinate length is shorter than the residue sequence")
-        aligned[1:1+n] = coords[:n]
+        aligned[1 : 1 + n] = coords[:n]
     return aligned
 
 
@@ -47,7 +58,9 @@ def mlm_collate(
     generator: torch.Generator | None = None,
     eval_seed: int | None = None,
     dataset_name: str = "",
-) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> (
+    tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+):
     """Collate batch for masked language modeling.
 
     Applies BERT-style masking:
@@ -90,7 +103,9 @@ def mlm_collate(
     for aa in "ACDEFGHIKLMNPQRSTVWY":
         encoded = tokenizer(aa, add_special_tokens=False)["input_ids"]
         if len(encoded) != 1 or encoded[0] in special_token_ids:
-            raise ValueError(f"Tokenizer must encode amino acid {aa} as one known token")
+            raise ValueError(
+                f"Tokenizer must encode amino acid {aa} as one known token"
+            )
         aa_ids.append(encoded[0])
     aa_ids = torch.tensor(aa_ids)
 
@@ -102,9 +117,14 @@ def mlm_collate(
         seq: str = item["sequence"]
         sample_generator = generator
         if eval_seed is not None:
-            identity = json.dumps([eval_seed, dataset_name, item.get("sequence_id"), seq],
-                                  ensure_ascii=False, separators=(",", ":")).encode()
-            seed = int.from_bytes(hashlib.blake2b(identity, digest_size=8).digest(), "big")
+            identity = json.dumps(
+                [eval_seed, dataset_name, item.get("sequence_id"), seq],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode()
+            seed = int.from_bytes(
+                hashlib.blake2b(identity, digest_size=8).digest(), "big"
+            )
             sample_generator = torch.Generator().manual_seed(seed)
 
         ids = tokenize_residues(seq, tokenizer, max_len).clone()
@@ -141,9 +161,13 @@ def mlm_collate(
             ids[mask_indices[mask_token_mask]] = mask_id
 
             # Apply random tokens (sample from amino acid range)
-            num_random = random_token_mask.sum().item()
+            num_random = int(random_token_mask.sum().item())
             if num_random > 0:
-                random_tokens = aa_ids[torch.randint(len(aa_ids), (num_random,), generator=sample_generator)]
+                random_tokens = aa_ids[
+                    torch.randint(
+                        len(aa_ids), (num_random,), generator=sample_generator
+                    )
+                ]
                 ids[mask_indices[random_token_mask]] = random_tokens
 
         input_ids_list.append(ids)
@@ -151,7 +175,9 @@ def mlm_collate(
 
         # Extract optional coordinates tensor
         coords = item.get("coords")
-        coords_list.append(align_coords(coords, residue_count=len(seq), token_length=max_len))
+        coords_list.append(
+            align_coords(coords, residue_count=len(seq), token_length=max_len)
+        )
 
     tokens = torch.stack(input_ids_list)
     labels = torch.stack(labels_list)

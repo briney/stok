@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 from pathlib import Path
-from typing import Any
+from collections.abc import Sequence, Sized
+from typing import Any, cast
 
 import numpy as np
 import pyarrow as pa
@@ -12,6 +15,7 @@ PARQUET_EXTENSIONS = {".parquet", ".parq", ".pq"}
 
 def distributed_rank() -> tuple[int, int]:
     import torch.distributed as dist
+
     if dist.is_available() and dist.is_initialized():
         return dist.get_rank(), dist.get_world_size()
     return 0, 1
@@ -21,7 +25,9 @@ def _usable_samples(dataset) -> int:
     total = dataset.num_samples
     batch_size = getattr(dataset, "training_batch_size", None)
     if batch_size is not None:
-        quantum = dataset.world_size * batch_size * max(1, getattr(dataset, "num_workers", 0))
+        quantum = (
+            dataset.world_size * batch_size * max(1, getattr(dataset, "num_workers", 0))
+        )
         total = total // quantum * quantum
     return total
 
@@ -40,7 +46,10 @@ def _partition_stream(dataset):
     for position, item in enumerate(dataset._iter_unsharded(dataset._epoch)):
         if position >= usable:
             break
-        if position % dataset.world_size == dataset.rank and (position // dataset.world_size) % workers == worker_id:
+        if (
+            position % dataset.world_size == dataset.rank
+            and (position // dataset.world_size) % workers == worker_id
+        ):
             yield item
 
 
@@ -178,8 +187,8 @@ class TokenizedDataset(Dataset):
     def __len__(self):
         return self.data.num_rows
 
-    def __getitem__(self, idx: int) -> dict[str, torch.Tensor | str]:
-        row = self.data.slice(idx, 1).to_pylist()[0]
+    def __getitem__(self, index: int) -> dict[str, torch.Tensor | str]:
+        row = self.data.slice(index, 1).to_pylist()[0]
         return _build_output_from_row(
             row,
             max_length=self.max_length,
@@ -224,11 +233,11 @@ class DummySequenceDataset(Dataset):
         """
         return self.num_samples
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Get a sample from the dataset.
 
         Args:
-            idx: Sample index.
+            index: Sample index.
 
         Returns:
             Tuple of (tokens, labels) with shapes [seq_len] and [seq_len].
@@ -267,11 +276,11 @@ class DummyMLMDataset(Dataset):
     def __len__(self) -> int:
         return self.num_samples
 
-    def __getitem__(self, idx: int) -> dict[str, str]:
+    def __getitem__(self, index: int) -> dict[str, str]:
         """Get a sample from the dataset.
 
         Args:
-            idx: Sample index.
+            index: Sample index.
 
         Returns:
             Dict with 'sequence_id' and 'sequence' keys.
@@ -280,7 +289,7 @@ class DummyMLMDataset(Dataset):
         seq = "".join(
             self._aa_chars[i] for i in torch.randint(0, 20, (self.seq_len,)).tolist()
         )
-        return {"sequence_id": f"dummy_{idx}", "sequence": seq}
+        return {"sequence_id": f"dummy_{index}", "sequence": seq}
 
 
 class IterableTokenizedDataset(IterableDataset):
@@ -299,6 +308,9 @@ class IterableTokenizedDataset(IterableDataset):
         load_coords: Whether to load 3D coordinates.
         require_structure_tokens: Whether structure_tokens is required. Set to False for MLM.
     """
+
+    training_batch_size: int
+    num_workers: int
 
     def __init__(
         self,
@@ -370,12 +382,15 @@ class IterableTokenizedDataset(IterableDataset):
             table = pq.ParquetFile(path).read(columns=self._columns[s_idx])
             rows = list(range(table.num_rows))
             if self.shuffle_rows:
-                np.random.RandomState((seed_base + 1009 + s_idx) & 0xFFFFFFFF).shuffle(rows)
+                np.random.RandomState((seed_base + 1009 + s_idx) & 0xFFFFFFFF).shuffle(
+                    rows
+                )
             for i in rows:
                 try:
                     yield _build_output_from_row(
                         table.slice(i, 1).to_pylist()[0],
-                        max_length=self.max_length, has_coords=self.has_coords,
+                        max_length=self.max_length,
+                        has_coords=self.has_coords,
                     )
                 except ValueError as exc:
                     raise ValueError(f"Shard {path}: {exc}") from exc
@@ -395,6 +410,9 @@ class MapAsIterableDataset(IterableDataset):
         total emitted samples by `num_workers`.
     """
 
+    training_batch_size: int
+    num_workers: int
+
     def __init__(
         self, dataset: Dataset, *, num_samples: int | None = None, seed: int = 0
     ):
@@ -402,7 +420,9 @@ class MapAsIterableDataset(IterableDataset):
         self.dataset = dataset
         self.has_labels = getattr(dataset, "has_labels", True)
         self.has_coords = getattr(dataset, "has_coords", False)
-        self.num_samples = int(num_samples) if num_samples is not None else len(dataset)
+        self.num_samples = (
+            int(num_samples) if num_samples is not None else len(cast(Sized, dataset))
+        )
         self.seed = int(seed)
         self._epoch = -1
         self.rank, self.world_size = distributed_rank()
@@ -414,11 +434,13 @@ class MapAsIterableDataset(IterableDataset):
         return _partition_stream(self)
 
     def _iter_unsharded(self, epoch: int):
-        rng = np.random.RandomState(((0x9E3779B97F4A7C15 ^ self.seed) + epoch * 0x1000003) & 0xFFFFFFFF)
-        if len(self.dataset) == 0:
+        rng = np.random.RandomState(
+            ((0x9E3779B97F4A7C15 ^ self.seed) + epoch * 0x1000003) & 0xFFFFFFFF
+        )
+        if len(cast(Sized, self.dataset)) == 0:
             return
         for _ in range(self.num_samples):
-            yield self.dataset[int(rng.randint(0, len(self.dataset)))]
+            yield self.dataset[int(rng.randint(0, len(cast(Sized, self.dataset))))]
 
 
 class InterleavedIterableDataset(IterableDataset):
@@ -435,9 +457,14 @@ class InterleavedIterableDataset(IterableDataset):
     workers is approximately `num_samples` (not multiplied by num_workers).
     """
 
+    training_batch_size: int
+    num_workers: int
+
     def __init__(
         self,
-        datasets: list[IterableDataset],
+        datasets: Sequence[
+            IterableTokenizedDataset | MapAsIterableDataset | InterleavedIterableDataset
+        ],
         fractions: list[float],
         *,
         num_samples: int | None = None,

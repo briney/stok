@@ -66,7 +66,7 @@ def _create_nested_folder(tmp_path: Path) -> Path:
     folder = tmp_path / "nested"
     folder.mkdir()
     (folder / "protein1.pdb").write_text(MINIMAL_PDB_1)
-    
+
     subfolder = folder / "subdir"
     subfolder.mkdir()
     (subfolder / "protein2.pdb").write_text(MINIMAL_PDB_2)
@@ -79,9 +79,9 @@ class TestStructureFolderDataset:
     def test_load_folder_basic(self, tmp_path):
         """Load folder with PDB files and verify length."""
         folder = _create_pdb_folder(tmp_path)
-        
+
         ds = StructureFolderDataset(folder, max_length=16)
-        
+
         assert len(ds) == 2
         assert ds.has_coords is True
 
@@ -89,9 +89,9 @@ class TestStructureFolderDataset:
         """Output dict has expected keys."""
         folder = _create_pdb_folder(tmp_path)
         ds = StructureFolderDataset(folder, max_length=16)
-        
+
         item = ds[0]
-        
+
         assert "sequence_id" in item
         assert "sequence" in item
         assert "coords" in item
@@ -105,9 +105,9 @@ class TestStructureFolderDataset:
         folder = _create_pdb_folder(tmp_path)
         max_length = 16
         ds = StructureFolderDataset(folder, max_length=max_length)
-        
+
         item = ds[0]
-        
+
         assert item["coords"].shape == (max_length, 3, 3)
         assert item["coords"].dtype == torch.float32
 
@@ -116,9 +116,9 @@ class TestStructureFolderDataset:
         folder = _create_pdb_folder(tmp_path)
         max_length = 16
         ds = StructureFolderDataset(folder, max_length=max_length)
-        
+
         item = ds[0]
-        
+
         assert item["masks"].shape == (max_length,)
         assert item["masks"].dtype == torch.bool
         assert item["nan_masks"].shape == (max_length,)
@@ -128,9 +128,9 @@ class TestStructureFolderDataset:
         folder = _create_pdb_folder(tmp_path)
         max_length = 16
         ds = StructureFolderDataset(folder, max_length=max_length)
-        
+
         item = ds[0]  # protein1.pdb has 2 residues
-        
+
         # First 2 positions should have valid coords
         assert not torch.isnan(item["coords"][:2]).any()
         # Remaining positions should be NaN
@@ -144,12 +144,12 @@ class TestStructureFolderDataset:
         folder = tmp_path / "long"
         folder.mkdir()
         (folder / "long.pdb").write_text(LONG_PDB)  # 5 residues
-        
+
         max_length = 3
         ds = StructureFolderDataset(folder, max_length=max_length)
-        
+
         item = ds[0]
-        
+
         assert len(item["sequence"]) == max_length
         assert item["coords"].shape == (max_length, 3, 3)
         assert item["masks"].all()  # All positions valid after truncation
@@ -157,11 +157,11 @@ class TestStructureFolderDataset:
     def test_recursive_search(self, tmp_path):
         """recursive=True searches subdirectories."""
         folder = _create_nested_folder(tmp_path)
-        
+
         # Without recursive
         ds_nonrecursive = StructureFolderDataset(folder, max_length=16, recursive=False)
         assert len(ds_nonrecursive) == 1
-        
+
         # With recursive
         ds_recursive = StructureFolderDataset(folder, max_length=16, recursive=True)
         assert len(ds_recursive) == 2
@@ -170,7 +170,7 @@ class TestStructureFolderDataset:
         """Empty folder raises ValueError."""
         folder = tmp_path / "empty"
         folder.mkdir()
-        
+
         with pytest.raises(ValueError, match="No structure files found"):
             StructureFolderDataset(folder, max_length=16)
 
@@ -178,7 +178,7 @@ class TestStructureFolderDataset:
         """Non-directory path raises ValueError."""
         pdb_file = tmp_path / "single.pdb"
         pdb_file.write_text(MINIMAL_PDB_1)
-        
+
         with pytest.raises(ValueError, match="Not a directory"):
             StructureFolderDataset(pdb_file, max_length=16)
 
@@ -197,26 +197,26 @@ END
         folder = tmp_path / "twochains"
         folder.mkdir()
         (folder / "test.pdb").write_text(pdb_two_chains)
-        
+
         ds = StructureFolderDataset(folder, max_length=16, chain_id="B")
         item = ds[0]
-        
+
         assert item["sequence"] == "M"
 
     def test_has_coords_attribute(self, tmp_path):
         """Dataset has has_coords=True for compatibility."""
         folder = _create_pdb_folder(tmp_path)
         ds = StructureFolderDataset(folder, max_length=16)
-        
+
         assert ds.has_coords is True
 
     def test_repr(self, tmp_path):
         """__repr__ returns informative string."""
         folder = _create_pdb_folder(tmp_path)
         ds = StructureFolderDataset(folder, max_length=16)
-        
+
         repr_str = repr(ds)
-        
+
         assert "StructureFolderDataset" in repr_str
         assert "num_files=2" in repr_str
         assert "max_length=16" in repr_str
@@ -225,17 +225,19 @@ END
         """All supported extensions are discovered."""
         folder = tmp_path / "mixed"
         folder.mkdir()
-        
+
         # Create files with different extensions
         (folder / "a.pdb").write_text(MINIMAL_PDB_1)
         (folder / "b.ent").write_text(MINIMAL_PDB_1)
-        (folder / "c.cif").write_text(MINIMAL_PDB_1)  # Will fail to parse as PDB but counts
+        (folder / "c.cif").write_text(
+            MINIMAL_PDB_1
+        )  # Will fail to parse as PDB but counts
         (folder / "d.txt").write_text("not a structure")
-        
+
         # Note: .cif content is invalid here but file discovery should still work
         # The actual parsing would fail for c.cif with this content
         ds = StructureFolderDataset(folder, max_length=16)
-        
+
         # Should find .pdb and .ent (which are valid PDB format)
         # .cif is in the list but would fail on actual parse
         assert len(ds._files) >= 2  # At least .pdb and .ent

@@ -74,4 +74,3 @@ def test_cli_train_with_parquet_dir_train_and_file_eval(tmp_path):
     result = runner.invoke(cli, ["train", *overrides])  # type: ignore[arg-type]
     assert result.exit_code == 0, result.output
     assert "Training complete." in result.output
-

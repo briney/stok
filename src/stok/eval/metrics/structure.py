@@ -1,4 +1,7 @@
 """Protein-weighted structure scores; absent observations are not zero scores."""
+
+from abc import abstractmethod
+
 import torch
 from stok.eval.base import MetricBase
 from stok.eval.registry import register_metric
@@ -16,6 +19,9 @@ class _StructureMetric(MetricBase):
         super().__init__(**kwargs)
         self.reset()
 
+    @abstractmethod
+    def score(self, pred, true, mask) -> torch.Tensor | None: ...
+
     def update(self, outputs, tokens, labels, coords, cfg):
         pred = outputs.get("pred_coords")
         if pred is None or (self.requires_coords and coords is None):
@@ -23,18 +29,27 @@ class _StructureMetric(MetricBase):
             return
         mask = outputs.get("residue_mask")
         if mask is None:
-            mask = residue_mask_from_tokens(tokens, pad_id=int(cfg.model.encoder.pad_id),
-                bos_id=int(cfg.model.encoder.get("bos_id", 0)), eos_id=int(cfg.model.encoder.get("eos_id", 2)))
+            mask = residue_mask_from_tokens(
+                tokens,
+                pad_id=int(cfg.model.encoder.pad_id),
+                bos_id=int(cfg.model.encoder.get("bos_id", 0)),
+                eos_id=int(cfg.model.encoder.get("eos_id", 2)),
+            )
         with torch.no_grad():
             for i in range(tokens.size(0)):
                 try:
-                    score = self.score(pred[i:i+1], coords[i:i+1] if coords is not None else None,
-                                       mask[i:i+1])
+                    score = self.score(
+                        pred[i : i + 1],
+                        coords[i : i + 1] if coords is not None else None,
+                        mask[i : i + 1],
+                    )
                     if score is None:
                         self.num_skipped += 1
                         continue
                     if not torch.isfinite(score):
-                        raise ValueError("Nonfinite structure score on an evaluable protein")
+                        raise ValueError(
+                            "Nonfinite structure score on an evaluable protein"
+                        )
                     self._sum += float(score)
                     self._count += 1
                     self.num_valid += 1
@@ -49,12 +64,16 @@ class _StructureMetric(MetricBase):
         return result
 
     def reset(self):
-        self._sum = 0.
+        self._sum = 0.0
         self._count = 0
         self.reset_population()
 
     def state_tensors(self):
-        return [torch.tensor([self._sum, self._count, *self.population_values()], dtype=torch.float64)]
+        return [
+            torch.tensor(
+                [self._sum, self._count, *self.population_values()], dtype=torch.float64
+            )
+        ]
 
     def load_state_tensors(self, tensors):
         if tensors:
@@ -69,7 +88,9 @@ def _target_mask(coords, mask, all_atoms=False):
 
 def _can_align(coords, mask):
     points = coords[0, mask[0], 1].float()
-    return len(points) >= 3 and int(torch.linalg.matrix_rank(points - points.mean(0))) >= 2
+    return (
+        len(points) >= 3 and int(torch.linalg.matrix_rank(points - points.mean(0))) >= 2
+    )
 
 
 @register_metric("lddt")
@@ -82,7 +103,7 @@ class LDDTMetric(_StructureMetric):
         if len(points) < 2:
             return None
         distances = torch.cdist(points, points)
-        if not (torch.triu(distances <= 15., diagonal=1)).any():
+        if not (torch.triu(distances <= 15.0, diagonal=1)).any():
             return None
         return lddt_ca(pred, true, valid)[0][0]
 
@@ -90,6 +111,7 @@ class LDDTMetric(_StructureMetric):
 @register_metric("tm_score")
 class TMScoreMetric(_StructureMetric):
     """Kabsch-aligned C-alpha TM score, not a TM-align optimization."""
+
     name = "tm"
 
     def score(self, pred, true, mask):
@@ -118,7 +140,7 @@ class RMSDMetric(_StructureMetric):
 class FAPEMetric(_StructureMetric):
     name = "fape_loss"
 
-    def __init__(self, clamp=10., length_scale=10., **kwargs):
+    def __init__(self, clamp=10.0, length_scale=10.0, **kwargs):
         super().__init__(**kwargs)
         self.clamp, self.length_scale = clamp, length_scale
 
@@ -126,7 +148,9 @@ class FAPEMetric(_StructureMetric):
         valid = _target_mask(true, mask, True)
         if not valid.any():
             return None
-        return fape_loss(pred, true, valid, clamp=self.clamp, length_scale=self.length_scale)
+        return fape_loss(
+            pred, true, valid, clamp=self.clamp, length_scale=self.length_scale
+        )
 
 
 @register_metric("pred_nan_frac")

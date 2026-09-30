@@ -39,5 +39,3 @@ def test_run_training_programmatic_smoke(capsys, tmp_path):
 
     out = capsys.readouterr().out
     assert "Training complete." in out
-
-

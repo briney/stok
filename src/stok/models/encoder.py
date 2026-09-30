@@ -65,7 +65,11 @@ class Encoder(nn.Module):
         output_attentions: bool = False,
         output_hidden_states: bool = False,
         attention_layer_indices: tuple[int, ...] | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, ...]:
+    ) -> (
+        torch.Tensor
+        | tuple[torch.Tensor, tuple[torch.Tensor, ...]]
+        | tuple[torch.Tensor, tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]
+    ):
         """Forward pass through encoder stack.
 
         Args:
@@ -90,13 +94,19 @@ class Encoder(nn.Module):
                 all_hidden_states is a tuple of n_layers+1 tensors [B, L, d_model].
             - Both: (output, all_attentions, all_hidden_states).
         """
-        indices = tuple(range(len(self.layers))) if attention_layer_indices is None else tuple(attention_layer_indices)
-        if len(set(indices)) != len(indices) or any(type(i) is not int or not 0 <= i < len(self.layers) for i in indices):
-            raise ValueError("attention_layer_indices must be unique valid encoder layer indices")
-        all_attentions = {}
-        all_hidden_states: list[torch.Tensor] | None = (
-            [] if output_hidden_states else None
+        indices = (
+            tuple(range(len(self.layers)))
+            if attention_layer_indices is None
+            else tuple(attention_layer_indices)
         )
+        if len(set(indices)) != len(indices) or any(
+            type(i) is not int or not 0 <= i < len(self.layers) for i in indices
+        ):
+            raise ValueError(
+                "attention_layer_indices must be unique valid encoder layer indices"
+            )
+        all_attentions = {}
+        all_hidden_states: list[torch.Tensor] = []
 
         # Collect initial hidden state (before any layers)
         if output_hidden_states:
@@ -124,7 +134,11 @@ class Encoder(nn.Module):
 
         # Build return value based on flags
         if output_attentions and output_hidden_states:
-            return h, tuple(all_attentions[i] for i in indices), tuple(all_hidden_states)
+            return (
+                h,
+                tuple(all_attentions[i] for i in indices),
+                tuple(all_hidden_states),
+            )
         elif output_attentions:
             return h, tuple(all_attentions[i] for i in indices)
         elif output_hidden_states:

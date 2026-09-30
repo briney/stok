@@ -5,8 +5,11 @@ from .geometry import frames_from_ncac, sanitize_coordinates, fp32_autocast_cont
 
 
 def token_ce_loss(
-    logits: torch.Tensor, labels: torch.Tensor, ignore_index: int = -100,
-    *, reduction: str = "mean",
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    ignore_index: int = -100,
+    *,
+    reduction: str = "mean",
 ) -> torch.Tensor:
     """Compute cross-entropy loss over structure tokens.
 
@@ -27,8 +30,12 @@ def token_ce_loss(
         raise ValueError(f"Target class IDs must be in [0, {C}) or ignore_index")
     if not supervised.any():
         return (logits * 0.0).sum()
-    return F.cross_entropy(logits.reshape(-1, C), labels_flat,
-                           ignore_index=ignore_index, reduction=reduction)
+    return F.cross_entropy(
+        logits.reshape(-1, C),
+        labels_flat,
+        ignore_index=ignore_index,
+        reduction=reduction,
+    )
 
 
 def fape_loss(
@@ -65,7 +72,8 @@ def fape_loss(
 
     with fp32_autocast_context(pred_coords.device.type):
         pred_coords, true_coords, residue_valid = sanitize_coordinates(
-            pred_coords, true_coords, residue_mask)
+            pred_coords, true_coords, residue_mask
+        )
         T_pred = frames_from_ncac(pred_coords)
         T_true = frames_from_ncac(true_coords)
         pair_mask = residue_valid[:, :, None] & residue_valid[:, None, :]
