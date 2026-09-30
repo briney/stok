@@ -1,0 +1,1836 @@
+{
+  "artifacts": {
+    "large": {
+      "files": {
+        "best_valid.pth": "7d1d43950a29834e7f702409bf957e9ffb75eb3cb3952074ba4c545bb4130eaf",
+        "config_gcpnet_encoder.yaml": "be1662f7f37a79f8b91810eaa1e50ff2f1294b750370ad6e4d46e320c65db633",
+        "config_geometric_decoder.yaml": "d195ee74478ca6f73001c4d80beb68f7ebf45201793147564d776313baaa9992",
+        "config_vqvae.yaml": "f3d5cc99a15c550ac6af253214e94c7f7cb583b846d45e40ad3ba2dc7d18f96e"
+      },
+      "repository": "Mahdip72/gcp-vqvae-large",
+      "revision": "64bb4ff628f7d2ccba587cdc9f0eaa97c1f3f9a1"
+    },
+    "lite": {
+      "files": {
+        "best_valid.pth": "0a212868f83ba1cc426404ec5d09c0d83012c8e34715483a7107091ffcf16e30",
+        "config_gcpnet_encoder.yaml": "54dfa49d2113994415456efb9babb2d6abd25c0a73436ac73d5cd51a68d90dd8",
+        "config_geometric_decoder.yaml": "5913125ce9d861debbd93599282a4d2003c42684a16dc8c1bd87557a1dedbf44",
+        "config_vqvae.yaml": "c08736c872568758c0ab5bbfaa4cd384851c8d3c9c0405c4669b9fadc71e3e1f"
+      },
+      "repository": "Mahdip72/gcp-vqvae-lite",
+      "revision": "d67ca3dfc1ecd6c6a1c3841f584e82f2f9803447"
+    }
+  },
+  "cases": [
+    {
+      "fixture": {
+        "arrays": {
+          "observed_atom_mask": {
+            "dtype": "bool",
+            "shape": [
+              40,
+              4
+            ]
+          },
+          "observed_author_ids": {
+            "dtype": "int64",
+            "shape": [
+              40
+            ]
+          },
+          "observed_batch": {
+            "dtype": "int64",
+            "shape": [
+              40
+            ]
+          },
+          "observed_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              40,
+              4,
+              3
+            ]
+          },
+          "observed_insertion_codes": {
+            "dtype": "<U1",
+            "shape": [
+              40
+            ]
+          },
+          "observed_residue_names": {
+            "dtype": "<U3",
+            "shape": [
+              40
+            ]
+          },
+          "parsed_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              40,
+              4,
+              3
+            ]
+          },
+          "prepared_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              40,
+              4,
+              3
+            ]
+          },
+          "residue_mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              64
+            ]
+          },
+          "token_mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              64
+            ]
+          }
+        },
+        "path": "lite_complete_pdb.npz",
+        "sha256": "86ba58f3d1f45f90667ad409a81bbc3247ab307a1d1392ab2a2d4933082dbb90"
+      },
+      "kind": "preparation",
+      "lengths": [
+        40
+      ],
+      "name": "lite_complete_pdb",
+      "preset": "lite",
+      "sequences": [
+        "SATVYVISGATRGIGFALTSLLAQRDNVLIFAGARDPAKA"
+      ],
+      "sources": [
+        {
+          "chain_id": "A",
+          "coordinate_residues": 40,
+          "model_index": 0,
+          "path": "inputs/complete_pdb.pdb"
+        }
+      ],
+      "stages": [
+        "observed_atom_mask",
+        "observed_author_ids",
+        "observed_batch",
+        "observed_coordinates",
+        "observed_insertion_codes",
+        "observed_residue_names",
+        "parsed_coordinates",
+        "prepared_coordinates",
+        "residue_mask",
+        "token_mask"
+      ]
+    },
+    {
+      "fixture": {
+        "arrays": {
+          "observed_atom_mask": {
+            "dtype": "bool",
+            "shape": [
+              39,
+              4
+            ]
+          },
+          "observed_author_ids": {
+            "dtype": "int64",
+            "shape": [
+              39
+            ]
+          },
+          "observed_batch": {
+            "dtype": "int64",
+            "shape": [
+              39
+            ]
+          },
+          "observed_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              39,
+              4,
+              3
+            ]
+          },
+          "observed_insertion_codes": {
+            "dtype": "<U1",
+            "shape": [
+              39
+            ]
+          },
+          "observed_residue_names": {
+            "dtype": "<U3",
+            "shape": [
+              39
+            ]
+          },
+          "parsed_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              40,
+              4,
+              3
+            ]
+          },
+          "prepared_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              40,
+              4,
+              3
+            ]
+          },
+          "residue_mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              64
+            ]
+          },
+          "token_mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              64
+            ]
+          }
+        },
+        "path": "lite_incomplete_pdb.npz",
+        "sha256": "ec6f2006a61e47443a8a8edd125f1f64b9fdb6dc93eed3d7e4fd91ead096a256"
+      },
+      "kind": "preparation",
+      "lengths": [
+        40
+      ],
+      "name": "lite_incomplete_pdb",
+      "preset": "lite",
+      "sequences": [
+        "SATVYVISGATXGIGFALTSLLAQRDNVLIFAGARDPAKA"
+      ],
+      "sources": [
+        {
+          "chain_id": "A",
+          "coordinate_residues": 39,
+          "model_index": 0,
+          "path": "inputs/incomplete_pdb.pdb"
+        }
+      ],
+      "stages": [
+        "observed_atom_mask",
+        "observed_author_ids",
+        "observed_batch",
+        "observed_coordinates",
+        "observed_insertion_codes",
+        "observed_residue_names",
+        "parsed_coordinates",
+        "prepared_coordinates",
+        "residue_mask",
+        "token_mask"
+      ]
+    },
+    {
+      "fixture": {
+        "arrays": {
+          "observed_atom_mask": {
+            "dtype": "bool",
+            "shape": [
+              40,
+              4
+            ]
+          },
+          "observed_author_ids": {
+            "dtype": "int64",
+            "shape": [
+              40
+            ]
+          },
+          "observed_batch": {
+            "dtype": "int64",
+            "shape": [
+              40
+            ]
+          },
+          "observed_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              40,
+              4,
+              3
+            ]
+          },
+          "observed_insertion_codes": {
+            "dtype": "<U1",
+            "shape": [
+              40
+            ]
+          },
+          "observed_residue_names": {
+            "dtype": "<U3",
+            "shape": [
+              40
+            ]
+          },
+          "parsed_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              40,
+              4,
+              3
+            ]
+          },
+          "prepared_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              40,
+              4,
+              3
+            ]
+          },
+          "residue_mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              64
+            ]
+          },
+          "token_mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              64
+            ]
+          }
+        },
+        "path": "lite_renumbered.npz",
+        "sha256": "4afcca2342063345ffd85f80c5c85d8072e48b17666ef153c8b398adf0a75bb3"
+      },
+      "kind": "preparation",
+      "lengths": [
+        40
+      ],
+      "name": "lite_renumbered",
+      "preset": "lite",
+      "sequences": [
+        "SATVYVISGATRGIGFALTSLLAQRDNVLIFAGARDPAKA"
+      ],
+      "sources": [
+        {
+          "chain_id": "A",
+          "coordinate_residues": 40,
+          "model_index": 0,
+          "path": "inputs/renumbered.pdb"
+        }
+      ],
+      "stages": [
+        "observed_atom_mask",
+        "observed_author_ids",
+        "observed_batch",
+        "observed_coordinates",
+        "observed_insertion_codes",
+        "observed_residue_names",
+        "parsed_coordinates",
+        "prepared_coordinates",
+        "residue_mask",
+        "token_mask"
+      ]
+    },
+    {
+      "fixture": {
+        "arrays": {
+          "observed_atom_mask": {
+            "dtype": "bool",
+            "shape": [
+              40,
+              4
+            ]
+          },
+          "observed_author_ids": {
+            "dtype": "int64",
+            "shape": [
+              40
+            ]
+          },
+          "observed_batch": {
+            "dtype": "int64",
+            "shape": [
+              40
+            ]
+          },
+          "observed_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              40,
+              4,
+              3
+            ]
+          },
+          "observed_insertion_codes": {
+            "dtype": "<U1",
+            "shape": [
+              40
+            ]
+          },
+          "observed_residue_names": {
+            "dtype": "<U3",
+            "shape": [
+              40
+            ]
+          },
+          "parsed_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              41,
+              4,
+              3
+            ]
+          },
+          "prepared_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              41,
+              4,
+              3
+            ]
+          },
+          "residue_mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              64
+            ]
+          },
+          "token_mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              64
+            ]
+          }
+        },
+        "path": "lite_insertion_codes.npz",
+        "sha256": "311056acbe05d34aed3846fbf9e7b6f7a3e87db9153363467794ab862948debc"
+      },
+      "kind": "preparation",
+      "lengths": [
+        41
+      ],
+      "name": "lite_insertion_codes",
+      "preset": "lite",
+      "sequences": [
+        "SATVYVXISGATRGIGFALTSLLAQRDNVLIFAGARDPAKA"
+      ],
+      "sources": [
+        {
+          "chain_id": "A",
+          "coordinate_residues": 40,
+          "model_index": 0,
+          "path": "inputs/insertion_codes.pdb"
+        }
+      ],
+      "stages": [
+        "observed_atom_mask",
+        "observed_author_ids",
+        "observed_batch",
+        "observed_coordinates",
+        "observed_insertion_codes",
+        "observed_residue_names",
+        "parsed_coordinates",
+        "prepared_coordinates",
+        "residue_mask",
+        "token_mask"
+      ]
+    },
+    {
+      "fixture": {
+        "arrays": {
+          "observed_atom_mask": {
+            "dtype": "bool",
+            "shape": [
+              32,
+              4
+            ]
+          },
+          "observed_author_ids": {
+            "dtype": "int64",
+            "shape": [
+              32
+            ]
+          },
+          "observed_batch": {
+            "dtype": "int64",
+            "shape": [
+              32
+            ]
+          },
+          "observed_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              32,
+              4,
+              3
+            ]
+          },
+          "observed_insertion_codes": {
+            "dtype": "<U1",
+            "shape": [
+              32
+            ]
+          },
+          "observed_residue_names": {
+            "dtype": "<U3",
+            "shape": [
+              32
+            ]
+          },
+          "parsed_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              32,
+              4,
+              3
+            ]
+          },
+          "prepared_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              32,
+              4,
+              3
+            ]
+          },
+          "residue_mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              64
+            ]
+          },
+          "token_mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              64
+            ]
+          }
+        },
+        "path": "lite_shorter.npz",
+        "sha256": "d23e508c62307b4eb80f960a0ac75da7b72fa0dbe64f33851115da78dcc34a24"
+      },
+      "kind": "preparation",
+      "lengths": [
+        32
+      ],
+      "name": "lite_shorter",
+      "preset": "lite",
+      "sequences": [
+        "SATVYVISGATRGIGFALTSLLAQRDNVLIFA"
+      ],
+      "sources": [
+        {
+          "chain_id": "A",
+          "coordinate_residues": 32,
+          "model_index": 0,
+          "path": "inputs/shorter.pdb"
+        }
+      ],
+      "stages": [
+        "observed_atom_mask",
+        "observed_author_ids",
+        "observed_batch",
+        "observed_coordinates",
+        "observed_insertion_codes",
+        "observed_residue_names",
+        "parsed_coordinates",
+        "prepared_coordinates",
+        "residue_mask",
+        "token_mask"
+      ]
+    },
+    {
+      "fixture": {
+        "arrays": {
+          "observed_atom_mask": {
+            "dtype": "bool",
+            "shape": [
+              40,
+              4
+            ]
+          },
+          "observed_author_ids": {
+            "dtype": "int64",
+            "shape": [
+              40
+            ]
+          },
+          "observed_batch": {
+            "dtype": "int64",
+            "shape": [
+              40
+            ]
+          },
+          "observed_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              40,
+              4,
+              3
+            ]
+          },
+          "observed_insertion_codes": {
+            "dtype": "<U1",
+            "shape": [
+              40
+            ]
+          },
+          "observed_residue_names": {
+            "dtype": "<U3",
+            "shape": [
+              40
+            ]
+          },
+          "parsed_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              40,
+              4,
+              3
+            ]
+          },
+          "prepared_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              40,
+              4,
+              3
+            ]
+          },
+          "residue_mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              64
+            ]
+          },
+          "token_mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              64
+            ]
+          }
+        },
+        "path": "lite_complete_cif.npz",
+        "sha256": "86ba58f3d1f45f90667ad409a81bbc3247ab307a1d1392ab2a2d4933082dbb90"
+      },
+      "kind": "preparation",
+      "lengths": [
+        40
+      ],
+      "name": "lite_complete_cif",
+      "preset": "lite",
+      "sequences": [
+        "SATVYVISGATRGIGFALTSLLAQRDNVLIFAGARDPAKA"
+      ],
+      "sources": [
+        {
+          "chain_id": "A",
+          "coordinate_residues": 40,
+          "model_index": 0,
+          "path": "inputs/complete_cif.cif"
+        }
+      ],
+      "stages": [
+        "observed_atom_mask",
+        "observed_author_ids",
+        "observed_batch",
+        "observed_coordinates",
+        "observed_insertion_codes",
+        "observed_residue_names",
+        "parsed_coordinates",
+        "prepared_coordinates",
+        "residue_mask",
+        "token_mask"
+      ]
+    },
+    {
+      "fixture": {
+        "arrays": {
+          "observed_atom_mask": {
+            "dtype": "bool",
+            "shape": [
+              39,
+              4
+            ]
+          },
+          "observed_author_ids": {
+            "dtype": "int64",
+            "shape": [
+              39
+            ]
+          },
+          "observed_batch": {
+            "dtype": "int64",
+            "shape": [
+              39
+            ]
+          },
+          "observed_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              39,
+              4,
+              3
+            ]
+          },
+          "observed_insertion_codes": {
+            "dtype": "<U1",
+            "shape": [
+              39
+            ]
+          },
+          "observed_residue_names": {
+            "dtype": "<U3",
+            "shape": [
+              39
+            ]
+          },
+          "parsed_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              40,
+              4,
+              3
+            ]
+          },
+          "prepared_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              40,
+              4,
+              3
+            ]
+          },
+          "residue_mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              64
+            ]
+          },
+          "token_mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              64
+            ]
+          }
+        },
+        "path": "lite_incomplete_cif.npz",
+        "sha256": "ec6f2006a61e47443a8a8edd125f1f64b9fdb6dc93eed3d7e4fd91ead096a256"
+      },
+      "kind": "preparation",
+      "lengths": [
+        40
+      ],
+      "name": "lite_incomplete_cif",
+      "preset": "lite",
+      "sequences": [
+        "SATVYVISGATXGIGFALTSLLAQRDNVLIFAGARDPAKA"
+      ],
+      "sources": [
+        {
+          "chain_id": "A",
+          "coordinate_residues": 39,
+          "model_index": 0,
+          "path": "inputs/incomplete_cif.cif"
+        }
+      ],
+      "stages": [
+        "observed_atom_mask",
+        "observed_author_ids",
+        "observed_batch",
+        "observed_coordinates",
+        "observed_insertion_codes",
+        "observed_residue_names",
+        "parsed_coordinates",
+        "prepared_coordinates",
+        "residue_mask",
+        "token_mask"
+      ]
+    },
+    {
+      "fixture": {
+        "arrays": {
+          "observed_atom_mask": {
+            "dtype": "bool",
+            "shape": [
+              72,
+              4
+            ]
+          },
+          "observed_author_ids": {
+            "dtype": "int64",
+            "shape": [
+              72
+            ]
+          },
+          "observed_batch": {
+            "dtype": "int64",
+            "shape": [
+              72
+            ]
+          },
+          "observed_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              72,
+              4,
+              3
+            ]
+          },
+          "observed_insertion_codes": {
+            "dtype": "<U1",
+            "shape": [
+              72
+            ]
+          },
+          "observed_residue_names": {
+            "dtype": "<U3",
+            "shape": [
+              72
+            ]
+          },
+          "parsed_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              72,
+              4,
+              3
+            ]
+          },
+          "prepared_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              72,
+              4,
+              3
+            ]
+          },
+          "residue_mask": {
+            "dtype": "bool",
+            "shape": [
+              2,
+              64
+            ]
+          },
+          "token_mask": {
+            "dtype": "bool",
+            "shape": [
+              2,
+              64
+            ]
+          }
+        },
+        "path": "lite_unequal_batch.npz",
+        "sha256": "aae46376ac060d33464da94e2e3db4f77b030a9c8790995fe23db5934242ed37"
+      },
+      "kind": "preparation",
+      "lengths": [
+        40,
+        32
+      ],
+      "name": "lite_unequal_batch",
+      "preset": "lite",
+      "sequences": [
+        "SATVYVISGATRGIGFALTSLLAQRDNVLIFAGARDPAKA",
+        "SATVYVISGATRGIGFALTSLLAQRDNVLIFA"
+      ],
+      "sources": [
+        {
+          "chain_id": "A",
+          "coordinate_residues": 40,
+          "model_index": 0,
+          "path": "inputs/complete_pdb.pdb"
+        },
+        {
+          "chain_id": "A",
+          "coordinate_residues": 32,
+          "model_index": 0,
+          "path": "inputs/shorter.pdb"
+        }
+      ],
+      "stages": [
+        "observed_atom_mask",
+        "observed_author_ids",
+        "observed_batch",
+        "observed_coordinates",
+        "observed_insertion_codes",
+        "observed_residue_names",
+        "parsed_coordinates",
+        "prepared_coordinates",
+        "residue_mask",
+        "token_mask"
+      ]
+    },
+    {
+      "kind": "rejected",
+      "name": "lite_too_missing",
+      "preset": "lite",
+      "rejections": {
+        "missing_coordinates": 20,
+        "missing_ratio_exceeded": 1
+      }
+    },
+    {
+      "kind": "rejected",
+      "name": "lite_too_short",
+      "preset": "lite",
+      "rejections": {
+        "chains_too_short": 1,
+        "no_chain_id_a": 1
+      }
+    },
+    {
+      "fixture": {
+        "arrays": {
+          "observed_atom_mask": {
+            "dtype": "bool",
+            "shape": [
+              40,
+              4
+            ]
+          },
+          "observed_author_ids": {
+            "dtype": "int64",
+            "shape": [
+              40
+            ]
+          },
+          "observed_batch": {
+            "dtype": "int64",
+            "shape": [
+              40
+            ]
+          },
+          "observed_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              40,
+              4,
+              3
+            ]
+          },
+          "observed_insertion_codes": {
+            "dtype": "<U1",
+            "shape": [
+              40
+            ]
+          },
+          "observed_residue_names": {
+            "dtype": "<U3",
+            "shape": [
+              40
+            ]
+          },
+          "parsed_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              40,
+              4,
+              3
+            ]
+          },
+          "prepared_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              40,
+              4,
+              3
+            ]
+          },
+          "residue_mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              64
+            ]
+          },
+          "token_mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              64
+            ]
+          }
+        },
+        "path": "large_complete_pdb.npz",
+        "sha256": "86ba58f3d1f45f90667ad409a81bbc3247ab307a1d1392ab2a2d4933082dbb90"
+      },
+      "kind": "preparation",
+      "lengths": [
+        40
+      ],
+      "name": "large_complete_pdb",
+      "preset": "large",
+      "sequences": [
+        "SATVYVISGATRGIGFALTSLLAQRDNVLIFAGARDPAKA"
+      ],
+      "sources": [
+        {
+          "chain_id": "A",
+          "coordinate_residues": 40,
+          "model_index": 0,
+          "path": "inputs/complete_pdb.pdb"
+        }
+      ],
+      "stages": [
+        "observed_atom_mask",
+        "observed_author_ids",
+        "observed_batch",
+        "observed_coordinates",
+        "observed_insertion_codes",
+        "observed_residue_names",
+        "parsed_coordinates",
+        "prepared_coordinates",
+        "residue_mask",
+        "token_mask"
+      ]
+    },
+    {
+      "fixture": {
+        "arrays": {
+          "observed_atom_mask": {
+            "dtype": "bool",
+            "shape": [
+              39,
+              4
+            ]
+          },
+          "observed_author_ids": {
+            "dtype": "int64",
+            "shape": [
+              39
+            ]
+          },
+          "observed_batch": {
+            "dtype": "int64",
+            "shape": [
+              39
+            ]
+          },
+          "observed_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              39,
+              4,
+              3
+            ]
+          },
+          "observed_insertion_codes": {
+            "dtype": "<U1",
+            "shape": [
+              39
+            ]
+          },
+          "observed_residue_names": {
+            "dtype": "<U3",
+            "shape": [
+              39
+            ]
+          },
+          "parsed_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              40,
+              4,
+              3
+            ]
+          },
+          "prepared_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              40,
+              4,
+              3
+            ]
+          },
+          "residue_mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              64
+            ]
+          },
+          "token_mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              64
+            ]
+          }
+        },
+        "path": "large_incomplete_pdb.npz",
+        "sha256": "ec6f2006a61e47443a8a8edd125f1f64b9fdb6dc93eed3d7e4fd91ead096a256"
+      },
+      "kind": "preparation",
+      "lengths": [
+        40
+      ],
+      "name": "large_incomplete_pdb",
+      "preset": "large",
+      "sequences": [
+        "SATVYVISGATXGIGFALTSLLAQRDNVLIFAGARDPAKA"
+      ],
+      "sources": [
+        {
+          "chain_id": "A",
+          "coordinate_residues": 39,
+          "model_index": 0,
+          "path": "inputs/incomplete_pdb.pdb"
+        }
+      ],
+      "stages": [
+        "observed_atom_mask",
+        "observed_author_ids",
+        "observed_batch",
+        "observed_coordinates",
+        "observed_insertion_codes",
+        "observed_residue_names",
+        "parsed_coordinates",
+        "prepared_coordinates",
+        "residue_mask",
+        "token_mask"
+      ]
+    },
+    {
+      "fixture": {
+        "arrays": {
+          "observed_atom_mask": {
+            "dtype": "bool",
+            "shape": [
+              40,
+              4
+            ]
+          },
+          "observed_author_ids": {
+            "dtype": "int64",
+            "shape": [
+              40
+            ]
+          },
+          "observed_batch": {
+            "dtype": "int64",
+            "shape": [
+              40
+            ]
+          },
+          "observed_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              40,
+              4,
+              3
+            ]
+          },
+          "observed_insertion_codes": {
+            "dtype": "<U1",
+            "shape": [
+              40
+            ]
+          },
+          "observed_residue_names": {
+            "dtype": "<U3",
+            "shape": [
+              40
+            ]
+          },
+          "parsed_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              40,
+              4,
+              3
+            ]
+          },
+          "prepared_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              40,
+              4,
+              3
+            ]
+          },
+          "residue_mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              64
+            ]
+          },
+          "token_mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              64
+            ]
+          }
+        },
+        "path": "large_renumbered.npz",
+        "sha256": "4afcca2342063345ffd85f80c5c85d8072e48b17666ef153c8b398adf0a75bb3"
+      },
+      "kind": "preparation",
+      "lengths": [
+        40
+      ],
+      "name": "large_renumbered",
+      "preset": "large",
+      "sequences": [
+        "SATVYVISGATRGIGFALTSLLAQRDNVLIFAGARDPAKA"
+      ],
+      "sources": [
+        {
+          "chain_id": "A",
+          "coordinate_residues": 40,
+          "model_index": 0,
+          "path": "inputs/renumbered.pdb"
+        }
+      ],
+      "stages": [
+        "observed_atom_mask",
+        "observed_author_ids",
+        "observed_batch",
+        "observed_coordinates",
+        "observed_insertion_codes",
+        "observed_residue_names",
+        "parsed_coordinates",
+        "prepared_coordinates",
+        "residue_mask",
+        "token_mask"
+      ]
+    },
+    {
+      "fixture": {
+        "arrays": {
+          "observed_atom_mask": {
+            "dtype": "bool",
+            "shape": [
+              40,
+              4
+            ]
+          },
+          "observed_author_ids": {
+            "dtype": "int64",
+            "shape": [
+              40
+            ]
+          },
+          "observed_batch": {
+            "dtype": "int64",
+            "shape": [
+              40
+            ]
+          },
+          "observed_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              40,
+              4,
+              3
+            ]
+          },
+          "observed_insertion_codes": {
+            "dtype": "<U1",
+            "shape": [
+              40
+            ]
+          },
+          "observed_residue_names": {
+            "dtype": "<U3",
+            "shape": [
+              40
+            ]
+          },
+          "parsed_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              41,
+              4,
+              3
+            ]
+          },
+          "prepared_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              41,
+              4,
+              3
+            ]
+          },
+          "residue_mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              64
+            ]
+          },
+          "token_mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              64
+            ]
+          }
+        },
+        "path": "large_insertion_codes.npz",
+        "sha256": "311056acbe05d34aed3846fbf9e7b6f7a3e87db9153363467794ab862948debc"
+      },
+      "kind": "preparation",
+      "lengths": [
+        41
+      ],
+      "name": "large_insertion_codes",
+      "preset": "large",
+      "sequences": [
+        "SATVYVXISGATRGIGFALTSLLAQRDNVLIFAGARDPAKA"
+      ],
+      "sources": [
+        {
+          "chain_id": "A",
+          "coordinate_residues": 40,
+          "model_index": 0,
+          "path": "inputs/insertion_codes.pdb"
+        }
+      ],
+      "stages": [
+        "observed_atom_mask",
+        "observed_author_ids",
+        "observed_batch",
+        "observed_coordinates",
+        "observed_insertion_codes",
+        "observed_residue_names",
+        "parsed_coordinates",
+        "prepared_coordinates",
+        "residue_mask",
+        "token_mask"
+      ]
+    },
+    {
+      "fixture": {
+        "arrays": {
+          "observed_atom_mask": {
+            "dtype": "bool",
+            "shape": [
+              32,
+              4
+            ]
+          },
+          "observed_author_ids": {
+            "dtype": "int64",
+            "shape": [
+              32
+            ]
+          },
+          "observed_batch": {
+            "dtype": "int64",
+            "shape": [
+              32
+            ]
+          },
+          "observed_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              32,
+              4,
+              3
+            ]
+          },
+          "observed_insertion_codes": {
+            "dtype": "<U1",
+            "shape": [
+              32
+            ]
+          },
+          "observed_residue_names": {
+            "dtype": "<U3",
+            "shape": [
+              32
+            ]
+          },
+          "parsed_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              32,
+              4,
+              3
+            ]
+          },
+          "prepared_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              32,
+              4,
+              3
+            ]
+          },
+          "residue_mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              64
+            ]
+          },
+          "token_mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              64
+            ]
+          }
+        },
+        "path": "large_shorter.npz",
+        "sha256": "d23e508c62307b4eb80f960a0ac75da7b72fa0dbe64f33851115da78dcc34a24"
+      },
+      "kind": "preparation",
+      "lengths": [
+        32
+      ],
+      "name": "large_shorter",
+      "preset": "large",
+      "sequences": [
+        "SATVYVISGATRGIGFALTSLLAQRDNVLIFA"
+      ],
+      "sources": [
+        {
+          "chain_id": "A",
+          "coordinate_residues": 32,
+          "model_index": 0,
+          "path": "inputs/shorter.pdb"
+        }
+      ],
+      "stages": [
+        "observed_atom_mask",
+        "observed_author_ids",
+        "observed_batch",
+        "observed_coordinates",
+        "observed_insertion_codes",
+        "observed_residue_names",
+        "parsed_coordinates",
+        "prepared_coordinates",
+        "residue_mask",
+        "token_mask"
+      ]
+    },
+    {
+      "fixture": {
+        "arrays": {
+          "observed_atom_mask": {
+            "dtype": "bool",
+            "shape": [
+              40,
+              4
+            ]
+          },
+          "observed_author_ids": {
+            "dtype": "int64",
+            "shape": [
+              40
+            ]
+          },
+          "observed_batch": {
+            "dtype": "int64",
+            "shape": [
+              40
+            ]
+          },
+          "observed_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              40,
+              4,
+              3
+            ]
+          },
+          "observed_insertion_codes": {
+            "dtype": "<U1",
+            "shape": [
+              40
+            ]
+          },
+          "observed_residue_names": {
+            "dtype": "<U3",
+            "shape": [
+              40
+            ]
+          },
+          "parsed_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              40,
+              4,
+              3
+            ]
+          },
+          "prepared_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              40,
+              4,
+              3
+            ]
+          },
+          "residue_mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              64
+            ]
+          },
+          "token_mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              64
+            ]
+          }
+        },
+        "path": "large_complete_cif.npz",
+        "sha256": "86ba58f3d1f45f90667ad409a81bbc3247ab307a1d1392ab2a2d4933082dbb90"
+      },
+      "kind": "preparation",
+      "lengths": [
+        40
+      ],
+      "name": "large_complete_cif",
+      "preset": "large",
+      "sequences": [
+        "SATVYVISGATRGIGFALTSLLAQRDNVLIFAGARDPAKA"
+      ],
+      "sources": [
+        {
+          "chain_id": "A",
+          "coordinate_residues": 40,
+          "model_index": 0,
+          "path": "inputs/complete_cif.cif"
+        }
+      ],
+      "stages": [
+        "observed_atom_mask",
+        "observed_author_ids",
+        "observed_batch",
+        "observed_coordinates",
+        "observed_insertion_codes",
+        "observed_residue_names",
+        "parsed_coordinates",
+        "prepared_coordinates",
+        "residue_mask",
+        "token_mask"
+      ]
+    },
+    {
+      "fixture": {
+        "arrays": {
+          "observed_atom_mask": {
+            "dtype": "bool",
+            "shape": [
+              39,
+              4
+            ]
+          },
+          "observed_author_ids": {
+            "dtype": "int64",
+            "shape": [
+              39
+            ]
+          },
+          "observed_batch": {
+            "dtype": "int64",
+            "shape": [
+              39
+            ]
+          },
+          "observed_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              39,
+              4,
+              3
+            ]
+          },
+          "observed_insertion_codes": {
+            "dtype": "<U1",
+            "shape": [
+              39
+            ]
+          },
+          "observed_residue_names": {
+            "dtype": "<U3",
+            "shape": [
+              39
+            ]
+          },
+          "parsed_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              40,
+              4,
+              3
+            ]
+          },
+          "prepared_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              40,
+              4,
+              3
+            ]
+          },
+          "residue_mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              64
+            ]
+          },
+          "token_mask": {
+            "dtype": "bool",
+            "shape": [
+              1,
+              64
+            ]
+          }
+        },
+        "path": "large_incomplete_cif.npz",
+        "sha256": "ec6f2006a61e47443a8a8edd125f1f64b9fdb6dc93eed3d7e4fd91ead096a256"
+      },
+      "kind": "preparation",
+      "lengths": [
+        40
+      ],
+      "name": "large_incomplete_cif",
+      "preset": "large",
+      "sequences": [
+        "SATVYVISGATXGIGFALTSLLAQRDNVLIFAGARDPAKA"
+      ],
+      "sources": [
+        {
+          "chain_id": "A",
+          "coordinate_residues": 39,
+          "model_index": 0,
+          "path": "inputs/incomplete_cif.cif"
+        }
+      ],
+      "stages": [
+        "observed_atom_mask",
+        "observed_author_ids",
+        "observed_batch",
+        "observed_coordinates",
+        "observed_insertion_codes",
+        "observed_residue_names",
+        "parsed_coordinates",
+        "prepared_coordinates",
+        "residue_mask",
+        "token_mask"
+      ]
+    },
+    {
+      "fixture": {
+        "arrays": {
+          "observed_atom_mask": {
+            "dtype": "bool",
+            "shape": [
+              72,
+              4
+            ]
+          },
+          "observed_author_ids": {
+            "dtype": "int64",
+            "shape": [
+              72
+            ]
+          },
+          "observed_batch": {
+            "dtype": "int64",
+            "shape": [
+              72
+            ]
+          },
+          "observed_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              72,
+              4,
+              3
+            ]
+          },
+          "observed_insertion_codes": {
+            "dtype": "<U1",
+            "shape": [
+              72
+            ]
+          },
+          "observed_residue_names": {
+            "dtype": "<U3",
+            "shape": [
+              72
+            ]
+          },
+          "parsed_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              72,
+              4,
+              3
+            ]
+          },
+          "prepared_coordinates": {
+            "dtype": "float32",
+            "shape": [
+              72,
+              4,
+              3
+            ]
+          },
+          "residue_mask": {
+            "dtype": "bool",
+            "shape": [
+              2,
+              64
+            ]
+          },
+          "token_mask": {
+            "dtype": "bool",
+            "shape": [
+              2,
+              64
+            ]
+          }
+        },
+        "path": "large_unequal_batch.npz",
+        "sha256": "aae46376ac060d33464da94e2e3db4f77b030a9c8790995fe23db5934242ed37"
+      },
+      "kind": "preparation",
+      "lengths": [
+        40,
+        32
+      ],
+      "name": "large_unequal_batch",
+      "preset": "large",
+      "sequences": [
+        "SATVYVISGATRGIGFALTSLLAQRDNVLIFAGARDPAKA",
+        "SATVYVISGATRGIGFALTSLLAQRDNVLIFA"
+      ],
+      "sources": [
+        {
+          "chain_id": "A",
+          "coordinate_residues": 40,
+          "model_index": 0,
+          "path": "inputs/complete_pdb.pdb"
+        },
+        {
+          "chain_id": "A",
+          "coordinate_residues": 32,
+          "model_index": 0,
+          "path": "inputs/shorter.pdb"
+        }
+      ],
+      "stages": [
+        "observed_atom_mask",
+        "observed_author_ids",
+        "observed_batch",
+        "observed_coordinates",
+        "observed_insertion_codes",
+        "observed_residue_names",
+        "parsed_coordinates",
+        "prepared_coordinates",
+        "residue_mask",
+        "token_mask"
+      ]
+    },
+    {
+      "kind": "rejected",
+      "name": "large_too_missing",
+      "preset": "large",
+      "rejections": {
+        "missing_coordinates": 20,
+        "missing_ratio_exceeded": 1
+      }
+    },
+    {
+      "kind": "rejected",
+      "name": "large_too_short",
+      "preset": "large",
+      "rejections": {
+        "chains_too_short": 1,
+        "no_chain_id_a": 1
+      }
+    }
+  ],
+  "configuration": {
+    "max_length": 64,
+    "mode": "preparation",
+    "released_max_length": 1280
+  },
+  "environment": {
+    "attention": "torch SDPA",
+    "dependencies": {
+      "biopython": "1.88",
+      "graphein": "1.7.8",
+      "ndlinear": "1.0.0",
+      "numpy": "1.26.4",
+      "python-box": "7.4.1",
+      "pyyaml": "6.0.3",
+      "torch": "2.14.0+rocm7.2",
+      "torch-cluster": "1.6.3",
+      "torch-geometric": "2.8.0.post1",
+      "torch-scatter": "2.1.2",
+      "vector-quantize-pytorch": "1.25.2",
+      "x-transformers": "2.8.0"
+    },
+    "device": "cpu",
+    "dtype": "float32",
+    "machine": "x86_64",
+    "python": "3.12.14",
+    "seed": 0,
+    "threads": 1
+  },
+  "excluded_checkpoint_keys": {},
+  "generation_command": [
+    "python",
+    "tests/reference/generate_gcp_vqvae.py",
+    "--reference",
+    "REFERENCE_CHECKOUT",
+    "--weights",
+    "WEIGHTS_CACHE",
+    "--inputs",
+    "INPUTS_DIR",
+    "--output",
+    "OUTPUT_DIR",
+    "--max-length",
+    "64",
+    "--preparation-only"
+  ],
+  "inputs": {
+    "inputs/README.txt": "956102bda4005b8ba5011ca935902ade4f4d168ab99f4401664d3a5a52213fa7",
+    "inputs/complete_cif.cif": "6b83ac635a3048253c413b4e8db7ae6622f74d1f1190930f691c336869596cfd",
+    "inputs/complete_pdb.pdb": "2b9dc625d6cf9732954f01fbaed50c5cebd696efb2298859e713724c69da131a",
+    "inputs/incomplete_cif.cif": "3ac41d8ae4f11ae09047ca0521033a6befc7b89d0f2ae8e73d4d4e82ec42daa6",
+    "inputs/incomplete_pdb.pdb": "c2cc7f979993f8919c3f436f895c640ea52619a6145a8223a39439c7c5e10dd6",
+    "inputs/insertion_codes.pdb": "41cdb30cca7ade26a6a10dee01218b427766356ea968a10267013ca11b771631",
+    "inputs/renumbered.pdb": "80fe0542fa1f79a6fb861377a34acc60f26341d9800554232db7c64f85878574",
+    "inputs/shorter.pdb": "aafb9d04cea0fbe99b63f38bb3de1a0c7dfb5c9944999a77eb661bb9df8eab3d",
+    "inputs/too_missing.pdb": "4a15f6295baab02b59d4f48b9491c8bcd0aa41ef6b3c785179479982932caf08",
+    "inputs/too_short.pdb": "7b286b9b93893f8e8c965f27e684af9184b7070e66a95ae600870581d2a052e0"
+  },
+  "schema_version": 1,
+  "source": {
+    "commit": "68c4c284fe204de27fdf61db27fcc01136ea9f28",
+    "package_metadata_sha256": "9a18e9540bf6f7801a09196323c0ae184e04fd5849289f792243d782c5491a98",
+    "url": "https://github.com/mahdip72/vq_encoder_decoder"
+  }
+}

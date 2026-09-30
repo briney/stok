@@ -413,6 +413,84 @@ As new tests are added, update this README with a concise description of each te
 
 ## Local validation
 
+### GCP-VQVAE reference oracle
+
+`unit/test_gcp_vqvae_reference.py` verifies the checked-in, offline preparation
+oracle: input/array hashes, unique case names, provenance, dimensions and masks.
+The small PDB/mmCIF inputs in `test_data/gcp_vqvae/inputs/` are backbone excerpts
+of the existing CAMEO fixture. They cover incomplete atoms/residues, insertion
+codes, negative author numbering, unequal lengths and upstream filtering.
+They exercise upstream's observed-sequence policy; polymer correspondence comes
+later in the implementation plan.
+
+The independent generator imports only the reference package during generation;
+verification imports NumPy alone. It requires the clean checkout at
+`68c4c284fe204de27fdf61db27fcc01136ea9f28`, the package metadata from that commit,
+`x-transformers==2.8.0`, and `vector-quantize-pytorch==1.25.2`. Install the reference
+package's own dependencies in a separate virtual environment, including native
+`torch-cluster`/`torch-scatter` extensions that match that environment's PyTorch.
+These extensions remain reference-only dependencies.
+
+Set `REFERENCE_CHECKOUT` to that checkout and `WEIGHTS_CACHE` to a local directory
+containing `lite/` and `large/`. Each preset directory must contain
+`best_valid.pth`, `config_vqvae.yaml`, `config_gcpnet_encoder.yaml`, and
+`config_geometric_decoder.yaml` from the pinned release. The checkpoint's remote
+filename is `checkpoints/best_valid.pth`; store it locally as `best_valid.pth`.
+The generator verifies every artifact's SHA-256 before creating output and never
+downloads weights. The revisions and digests are recorded in the generator and
+oracle manifest.
+
+```bash
+# Run with the reference environment's Python, from the STok checkout.
+python tests/reference/generate_gcp_vqvae.py \
+  --reference "$REFERENCE_CHECKOUT" --weights "$WEIGHTS_CACHE" \
+  --inputs tests/test_data/gcp_vqvae/inputs \
+  --output /tmp/gcp-vqvae-full-oracle --max-length 64
+
+# Fail, rather than skip, if either release or any required model case is missing.
+python tests/reference/generate_gcp_vqvae.py \
+  --verify /tmp/gcp-vqvae-full-oracle --require-models
+
+# Run in the STok test environment; no reference installation is needed to read it.
+STOK_GCP_REFERENCE_FIXTURES=/tmp/gcp-vqvae-full-oracle python -m pytest \
+  tests/unit/test_gcp_vqvae_reference.py \
+  tests/integration/test_gcp_vqvae_reference.py -q
+```
+
+Outputs include original observed rows/identities, upstream parsed and prepared
+coordinates/masks, actual upstream kNN graph/features, GCP embeddings, projection
+and transformer stages, VQ indices/codes, and coordinate decoder outputs. Both
+models have singleton, unequal-batch, decoder-hole and prefix-length cases.
+Only the five verified unused Large pairwise-head tensors are excluded during
+strict loading; the manifest reports their names. Full model arrays stay outside
+source control. Add `--preparation-only` to reproduce the small offline oracle.
+Output directories must not exist. Compare `manifest.json` and every `.npz` file
+between repeated runs; nondeterministic timestamps and actual local invocation
+paths are stored separately in `run.json`. The manifest's command uses documented
+directory placeholders so its canonical content is independent of local paths.
+
+The initial oracle was generated twice in CPU FP32 with a 64-position override,
+using the released weights and inference settings. This verifies deterministic
+reference capture on the compact cohort. It does **not** establish STok's full
+file-to-token parity, 1280-position production behavior, or accelerator support.
+Omit `--max-length 64` to capture the released 1280-position configuration.
+An unset `STOK_GCP_REFERENCE_FIXTURES` skips the integration inventory check with
+an explicit reason; a skip is not published-weight parity evidence.
+
+Fresh Python 3.10.21 and 3.13.15 installations passed a small encoder/quantizer
+inference check with both pinned dependencies. Python 3.13 built NumPy 1.26.4
+from source for Graphein's `numpy<2` requirement. Graphein's minimum is 1.7.8 to
+avoid resolver fallback to the obsolete 1.5.2 release with invalid dependency
+metadata. The package's `requires-python >=3.10` contract is retained.
+
+Task 1 acceptance: the complete CPU unit/integration suite passed **532 tests**,
+with only the two accelerator-only cases skipped; Ruff and `ty` passed. The
+oracle's 17 checks passed on Python 3.10 and 3.13. Its duplicate full captures
+had identical canonical manifests and NPZ bytes; every checked-in preparation
+array also matched its corresponding full-model capture. The full inventory
+check rejects missing/invalid prefix lengths and decoder-only replacements for
+file-to-graph cases. This is reference-oracle evidence, not STok parity evidence.
+
 Install the project with `python -m pip install -e '.[dev]'`. Use
 `OMP_NUM_THREADS=1 ACCELERATE_USE_CPU=true python -m pytest` for CPU checks.
 Distributed regression tests launch two local processes and require loopback
