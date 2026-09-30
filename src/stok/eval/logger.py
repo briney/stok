@@ -116,6 +116,10 @@ class MetricLogger:
         if train_flops is not None:
             msg += f" | flops {format_flops_scientific(train_flops)}"
 
+        for key, value in metrics.items():
+            if key.endswith("/num_valid") and value == 0:
+                msg += f" | {key.rsplit('/', 1)[0]} unavailable"
+
         # Define formatting for known metrics (order matters for readability)
         # Format: (key, display_name, format_string, suffix)
         known_metrics = [

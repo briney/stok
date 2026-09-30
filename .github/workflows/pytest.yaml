@@ -12,6 +12,12 @@ on:
 jobs:
     build:
         runs-on: ${{ matrix.os }}
+        timeout-minutes: 30
+        env:
+            ACCELERATE_USE_CPU: 'true'
+            OMP_NUM_THREADS: '1'
+            MKL_NUM_THREADS: '1'
+            TOKENIZERS_PARALLELISM: 'false'
         strategy:
             fail-fast: false
             matrix:
@@ -29,8 +35,31 @@ jobs:
             - name: Install project and test deps
               run: |
                   python -m pip install --upgrade pip setuptools wheel
-                  python -m pip install -e .
-                  python -m pip install pytest
+                  python -m pip install -e '.[dev]' build
             - name: Test with pytest
               run: |
-                  pytest
+                  python -m pytest tests/unit tests/integration --ignore=tests/integration/test_distributed_training.py -q
+            - name: Correctness lint and package build
+              run: |
+                  python -m ruff check src tests
+                  python -m compileall -q src
+                  python -m build
+
+    distributed-cpu:
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        env:
+            ACCELERATE_USE_CPU: 'true'
+            CUDA_VISIBLE_DEVICES: ''
+            OMP_NUM_THREADS: '1'
+            MKL_NUM_THREADS: '1'
+            TOKENIZERS_PARALLELISM: 'false'
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-python@v5
+              with:
+                  python-version: '3.12'
+                  cache: pip
+            - run: python -m pip install -e '.[dev]'
+            - name: Bounded two-process CPU regressions
+              run: python -m pytest tests/integration/test_distributed_training.py -q

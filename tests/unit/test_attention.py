@@ -85,7 +85,6 @@ class TestNeedWeightsEquivalence:
         attn = attention_module
         x = sample_input
         B, L, _ = x.shape
-        n_heads = attn.n_heads
 
         # Create an additive mask (simulate some blocked attention patterns)
         attn_mask = torch.zeros(B, 1, L, L)
@@ -867,3 +866,63 @@ class TestSTokModelOutputHiddenStates:
         assert torch.allclose(result_none["logits"], result_hidden["logits"], atol=1e-5)
         assert torch.allclose(result_none["logits"], result_both["logits"], atol=1e-5)
 
+
+
+@pytest.mark.parametrize('dtype', [torch.float32, torch.bfloat16, torch.float16])
+@pytest.mark.parametrize('additive', [True, False])
+def test_combined_masks_finite_and_manual_sdpa_parity(attention_module, sample_input, dtype, additive):
+    attn = attention_module.to(dtype=dtype)
+    x = sample_input.to(dtype=dtype).requires_grad_()
+    padding = torch.zeros(x.shape[:2], dtype=torch.bool)
+    padding[0] = True  # Fully blocked protein.
+    padding[:, -1] = True
+    blocked = torch.zeros(x.size(1), x.size(1), dtype=torch.bool)
+    blocked[2] = True  # Fully blocked query in the other protein.
+    mask = torch.zeros_like(blocked, dtype=dtype).masked_fill(blocked, -float('inf')) if additive else blocked
+    sdpa = attn(x, key_padding_mask=padding, attn_mask=mask)
+    manual, weights = attn(x, key_padding_mask=padding, attn_mask=mask, need_weights=True)
+    assert torch.isfinite(manual).all() and torch.isfinite(sdpa).all()
+    assert (weights[0] == 0).all() and (manual[:, 2] == 0).all()
+    grad_sdpa, = torch.autograd.grad(sdpa.sum(), x, retain_graph=True)
+    grad_manual, = torch.autograd.grad(manual.sum(), x)
+    assert torch.isfinite(grad_manual).all() and torch.isfinite(grad_sdpa).all()
+    tol = .02 if dtype != torch.float32 else 1e-5
+    torch.testing.assert_close(manual, sdpa, atol=tol, rtol=tol)
+    torch.testing.assert_close(grad_manual, grad_sdpa, atol=tol, rtol=tol)
+
+
+def test_selected_layers_use_sdpa_elsewhere_and_preserve_contacts(monkeypatch):
+    from stok.eval.metrics.contact import _extract_attention_contacts
+    model = STokModel(vocab_size=32, pad_id=1, d_model=32, n_heads=4, n_layers=6,
+                      ffn_mult=1., dropout=0., attn_dropout=0., head_type='mlm').eval()
+    tokens = torch.full((1, 12), 4)
+    seen = []
+    for i, layer in enumerate(model.encoder.layers):
+        original = layer.attn.forward
+        def forward(*args, _i=i, _original=original, **kwargs):
+            seen.append((_i, kwargs.get('need_weights', False)))
+            return _original(*args, **kwargs)
+        monkeypatch.setattr(layer.attn, 'forward', forward)
+    full = model(tokens, output_attentions=True)
+    seen.clear()
+    selected = model(tokens, output_attentions=True, attention_layer_indices=(4, 5))
+    assert seen == [(i, i in (4, 5)) for i in range(6)]
+    assert selected['attention_layer_indices'] == (4, 5)
+    torch.testing.assert_close(full['logits'], selected['logits'], atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(_extract_attention_contacts(full, num_layers=2),
+                               _extract_attention_contacts(selected, num_layers=2))
+    torch.testing.assert_close(_extract_attention_contacts(full, layer=4),
+                               _extract_attention_contacts(selected, layer=4))
+
+
+def test_negative_contact_layer_uses_full_encoder_depth():
+    from stok.eval.metrics.contact import PrecisionAtLMetric, _extract_attention_contacts
+    model = STokModel(vocab_size=32, pad_id=1, d_model=32, n_heads=4, n_layers=6,
+                      ffn_mult=1., dropout=0., attn_dropout=0., head_type='mlm').eval()
+    tokens = torch.full((1, 12), 4)
+    metric = PrecisionAtLMetric(attention_layer=-2)
+    full = model(tokens, output_attentions=True)
+    selected = model(tokens, output_attentions=True,
+                     attention_layer_indices=metric.required_attention_layers(6))
+    torch.testing.assert_close(_extract_attention_contacts(full, layer=-2),
+                               _extract_attention_contacts(selected, layer=-2))

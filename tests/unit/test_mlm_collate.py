@@ -210,7 +210,6 @@ def test_mlm_collate_returns_coords_when_present():
     """Test that MLM collate returns coordinates when present in batch items."""
     tokenizer = Tokenizer()
     max_len = 16
-    seq_len = 10  # Sequence length (coords should be [max_len, 3, 3])
 
     # Create batch with coordinates
     batch = [
@@ -271,3 +270,36 @@ def test_mlm_collate_returns_2tuple_without_coords():
     assert tokens.shape == (2, max_len)
     assert labels.shape == (2, max_len)
 
+
+
+def test_reordered_vocabulary_and_eval_identity(tmp_path):
+    from functools import partial
+    from torch.utils.data import DataLoader
+    from stok.utils.tokenizer import DEFAULT_VOCAB
+    path = tmp_path / 'vocab.txt'
+    path.write_text('\n'.join(reversed(DEFAULT_VOCAB)))
+    tokenizer = Tokenizer(vocab_file=str(path))
+    samples = [{'sequence_id': str(i), 'sequence': 'LAGVSE' * 6} for i in range(3)]
+    collate = partial(mlm_collate, tokenizer=tokenizer, max_len=40, eval_seed=123,
+                      dataset_name='validation', mask_prob=.8)
+    one = collate(samples)
+    two = collate(samples[::-1])
+    assert torch.equal(one[0], two[0].flip(0))
+    assert torch.equal(one[1], two[1].flip(0))
+    assert (one[0][:, 0] == tokenizer.bos_token_id).all()
+    assert (one[0] == tokenizer.mask_token_id).any()
+    for workers in (0, 2):
+        batches = list(DataLoader(samples, batch_size=1, num_workers=workers, timeout=20 if workers else 0, collate_fn=collate))
+        assert torch.equal(one[0], torch.cat([b[0] for b in batches]))
+
+
+def test_mlm_validation_and_empty_population():
+    import pytest
+    tokenizer = Tokenizer()
+    for kwargs in ({'mask_prob': -1}, {'mask_token_prob': .9, 'random_token_prob': .2},
+                   {'mask_id': 4}, {'pad_id': 5}):
+        with pytest.raises(ValueError):
+            mlm_collate([{'sequence': 'LAGV'}], tokenizer, max_len=8, **kwargs)
+    for seq, prob in [('', 1.), ('LAGV', 0.)]:
+        _, labels = mlm_collate([{'sequence': seq}], tokenizer, max_len=8, mask_prob=prob)
+        assert (labels == -100).all()

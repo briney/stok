@@ -140,6 +140,7 @@ class STokModel(nn.Module):
         ignore_index: int = -100,
         output_attentions: bool = False,
         output_hidden_states: bool = False,
+        attention_layer_indices: tuple[int, ...] | None = None,
     ):
         """Forward pass through STOK model.
 
@@ -149,12 +150,13 @@ class STokModel(nn.Module):
                 padding positions. If None, inferred from pad_id. Defaults to None.
             labels: Target labels of shape [B, L]. Use ignore_index for
                 ignored positions. Defaults to None.
-            coords: Coordinates of shape [B, L, 3, 3] for N, CA, C atoms per residue.
-                If None, the structure-based FAPE loss is not computed. Defaults to None.
-            coords_loss_weight: Weight for the structure-based FAPE loss. Defaults to 0.1.
+            coords: Deprecated; supplying coordinates raises. The training loop owns FAPE.
+            coords_loss_weight: Deprecated compatibility argument; unused here.
             ignore_index: Index to ignore in loss computation. Defaults to -100.
             output_attentions: If True, also returns attention weights from all
                 encoder layers. Defaults to False.
+            attention_layer_indices: Ordered, unique encoder layer indices to collect;
+                None returns all layers. Unrequested layers retain the SDPA path.
             output_hidden_states: If True, also returns hidden states from all
                 encoder layers (including initial embeddings). Defaults to False.
 
@@ -169,6 +171,8 @@ class STokModel(nn.Module):
                     (including initial embeddings), each of shape [B, L, d_model].
                     Only present if output_hidden_states=True.
         """
+        if coords is not None:
+            raise ValueError("Coordinate/FAPE supervision belongs to the training loop, not STokModel.forward")
         # embedding
         h = self.embed(tokens)  # [B, L, d_model]
 
@@ -183,6 +187,7 @@ class STokModel(nn.Module):
             attn_mask=None,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
+            attention_layer_indices=attention_layer_indices,
         )
 
         # Unpack encoder output based on flags
@@ -227,6 +232,9 @@ class STokModel(nn.Module):
 
         if output_attentions:
             result["attentions"] = all_attentions
+            result["num_attention_layers"] = len(self.encoder.layers)
+            result["attention_layer_indices"] = (tuple(range(len(self.encoder.layers)))
+                if attention_layer_indices is None else tuple(attention_layer_indices))
 
         if output_hidden_states:
             result["hidden_states"] = all_hidden_states

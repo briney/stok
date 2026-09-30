@@ -1,6 +1,5 @@
 """Unit tests for structure_dataset module."""
 
-import numpy as np
 import pytest
 import torch
 from pathlib import Path

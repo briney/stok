@@ -168,13 +168,8 @@ def test_build_metrics_filters_by_decoder_requirement():
         }
     )
 
-    # Without decoder
-    metrics_no_decoder = build_metrics(cfg, objective="codebook", decoder=None)
-    names_no_decoder = {type(m).__name__ for m in metrics_no_decoder}
-
-    # LDDTMetric requires decoder
-    assert "LDDTMetric" not in names_no_decoder
-    assert "AccuracyMetric" in names_no_decoder
+    with pytest.raises(ValueError, match="missing decoder"):
+        build_metrics(cfg, objective="codebook", decoder=None)
 
 
 def test_build_metrics_filters_by_coords_requirement():
@@ -200,14 +195,8 @@ def test_build_metrics_filters_by_coords_requirement():
 
     decoder = MockDecoder()
 
-    # Without coords
-    metrics_no_coords = build_metrics(
-        cfg, objective="codebook", decoder=decoder, has_coords=False
-    )
-    names_no_coords = {type(m).__name__ for m in metrics_no_coords}
-
-    # LDDTMetric requires coords
-    assert "LDDTMetric" not in names_no_coords
+    with pytest.raises(ValueError, match="missing coordinates"):
+        build_metrics(cfg, objective="codebook", decoder=decoder, has_coords=False)
 
 
 def test_build_metrics_passes_config_params():
@@ -408,8 +397,8 @@ def test_build_metrics_per_dataset_has_coords_load_coords():
     )
     metric_names = {type(m).__name__ for m in metrics}
 
-    # PrecisionAtLMetric requires coords, should be enabled due to per-dataset override
-    assert "PrecisionAtLMetric" in metric_names
+    # PrecisionAtLMetric requires coords, must not infer availability from per-dataset override
+    assert "PrecisionAtLMetric" not in metric_names
     assert "PerplexityMetric" in metric_names
 
 
@@ -444,8 +433,8 @@ def test_build_metrics_per_dataset_has_coords_explicit():
     )
     metric_names = {type(m).__name__ for m in metrics}
 
-    # PrecisionAtLMetric requires coords, should be excluded
-    assert "PrecisionAtLMetric" not in metric_names
+    # Actual loaded capability is authoritative
+    assert "PrecisionAtLMetric" in metric_names
     assert "PerplexityMetric" in metric_names
 
 
@@ -502,14 +491,14 @@ def test_build_metrics_combined_only_and_has_coords():
                         "path": "/path/to/seq.parquet",
                         "load_coords": False,
                         "metrics": {
-                            "only": ["accuracy", "perplexity"],
+                            "only": ["perplexity"],
                         },
                     },
                     "struct_only": {
                         "path": "/path/to/struct.parquet",
                         "load_coords": True,
                         "metrics": {
-                            "only": ["accuracy", "p_at_l"],
+                            "only": ["masked_accuracy", "p_at_l"],
                         },
                     },
                 },
@@ -530,7 +519,7 @@ def test_build_metrics_combined_only_and_has_coords():
 
     # Structure dataset
     struct_metrics = build_metrics(
-        cfg, objective="mlm", has_coords=False, eval_name="struct_only"
+        cfg, objective="mlm", has_coords=True, eval_name="struct_only"
     )
     struct_names = {type(m).__name__ for m in struct_metrics}
 
@@ -569,8 +558,8 @@ def test_build_metrics_structure_format_has_coords():
     )
     metric_names = {type(m).__name__ for m in metrics}
 
-    # PrecisionAtLMetric requires coords, should be enabled due to format="structure"
-    assert "PrecisionAtLMetric" in metric_names
+    # PrecisionAtLMetric requires coords, must not infer availability from format="structure"
+    assert "PrecisionAtLMetric" not in metric_names
     assert "PerplexityMetric" in metric_names
 
 
@@ -597,7 +586,7 @@ def test_build_metrics_auto_detect_structure_folder(tmp_path):
                 "eval": {
                     "pdb_val": {
                         "path": str(pdb_folder),
-                        # No format specified - should auto-detect
+                        # No format specified - metadata alone does not load coordinates
                     }
                 },
             },
@@ -605,14 +594,14 @@ def test_build_metrics_auto_detect_structure_folder(tmp_path):
         }
     )
 
-    # Build for pdb_val dataset (should auto-detect structure folder)
+    # Build for pdb_val dataset (metadata alone does not load coordinates structure folder)
     metrics = build_metrics(
         cfg, objective="mlm", has_coords=False, eval_name="pdb_val"
     )
     metric_names = {type(m).__name__ for m in metrics}
 
-    # PrecisionAtLMetric requires coords, should be enabled due to auto-detection
-    assert "PrecisionAtLMetric" in metric_names
+    # PrecisionAtLMetric requires coords, must not infer availability from auto-detection
+    assert "PrecisionAtLMetric" not in metric_names
     assert "PerplexityMetric" in metric_names
 
 
@@ -649,8 +638,8 @@ def test_build_metrics_auto_detect_mmcif_folder(tmp_path):
     )
     metric_names = {type(m).__name__ for m in metrics}
 
-    # Should auto-detect mmCIF folder
-    assert "PrecisionAtLMetric" in metric_names
+    # An existing suffix does not prove coordinates were loaded
+    assert "PrecisionAtLMetric" not in metric_names
 
 
 def test_build_metrics_no_auto_detect_for_parquet_folder(tmp_path):
@@ -689,3 +678,42 @@ def test_build_metrics_no_auto_detect_for_parquet_folder(tmp_path):
     # Should NOT auto-detect as structure folder (no PDB/CIF files)
     assert "PrecisionAtLMetric" not in metric_names
 
+
+
+@pytest.fixture
+def default_config():
+    from pathlib import Path
+    from hydra import compose, initialize_config_dir
+    with initialize_config_dir(config_dir=str(Path(__file__).resolve().parents[2]/'src/stok/configs'), version_base=None):
+        cfg = compose(config_name='config')
+        OmegaConf.set_struct(cfg, False)
+        yield cfg
+
+
+def test_whitelist_enables_globally_disabled_metric(default_config, tmp_path):
+    from stok.eval.registry import resolve_eval_metrics
+    cfg = default_config
+    cfg.train.eval.metrics.lddt.enabled = False
+    cfg.data.eval = {'pdb': {'path': str(tmp_path), 'format': 'structure', 'metrics': {'only': ['lddt']}}}
+    selected = resolve_eval_metrics(cfg, 'pdb', objective='codebook')
+    assert set(selected) == {'lddt'}
+    assert selected['lddt']['explicit'] is True
+    cfg.data.eval.pdb.metrics.lddt = {'enabled': False}
+    assert resolve_eval_metrics(cfg, 'pdb', objective='codebook') == {}
+
+
+def test_auto_structure_flags_respect_explicit_false(default_config):
+    from stok.eval.registry import resolve_eval_metrics
+    cfg = default_config
+    cfg.train.decoding.eval_enabled = True
+    cfg.train.eval.metrics.tm_score.enabled = False
+    selected = resolve_eval_metrics(cfg, 'default', objective='codebook')
+    assert 'lddt' in selected and 'rmsd' in selected
+    assert 'tm_score' not in selected
+
+
+def test_unknown_metric_request_rejected(default_config):
+    from stok.eval.registry import resolve_eval_metrics
+    default_config.data.eval = {'val': {'path': 'x', 'metrics': {'only': ['typo']}}}
+    with pytest.raises(ValueError, match='Unknown metric'):
+        resolve_eval_metrics(default_config, 'val', objective='codebook')

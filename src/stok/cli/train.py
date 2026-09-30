@@ -1,15 +1,19 @@
+from functools import partial
+from contextlib import contextmanager, nullcontext
+from itertools import islice
 import math
 import os
 import random
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
 import torch
 import torch.nn as nn
-from accelerate.utils import set_seed
+from accelerate.utils import gather_object, set_seed
 from omegaconf import DictConfig, OmegaConf
 from torch.optim import AdamW
 from torch.utils.data import (
@@ -18,9 +22,10 @@ from torch.utils.data import (
     Dataset,
     IterableDataset,
     Sampler,
+    DistributedSampler,
 )
 
-from stok.data.collate import mlm_collate
+from stok.data.collate import align_coords, mlm_collate, tokenize_residues
 from stok.data.dataset import (
     PARQUET_EXTENSIONS,
     DummyMLMDataset,
@@ -29,25 +34,28 @@ from stok.data.dataset import (
     IterableTokenizedDataset,
     MapAsIterableDataset,
     TokenizedDataset,
+    distributed_rank,
+    _usable_samples,
 )
 from stok.eval import Evaluator, MetricLogger
+from stok.eval.registry import METRIC_REGISTRY, resolve_eval_metrics
 from stok.models.decoder import load_pretrained_decoder
 from stok.models.stok import STokModel
 from stok.utils.codebook import load_codebook
 from stok.utils.console import ConsoleLogger
-from stok.utils.decoding import logits_to_soft_codes_gumbel
+from stok.utils.decoding import decode_token_aligned_coords, logits_to_soft_codes_gumbel
+from stok.utils.masking import residue_mask_from_tokens
 from stok.utils.flops import compute_flops_6n, count_parameters, format_flops_scientific
-from stok.utils.losses import fape_loss
+from stok.utils.losses import fape_loss, token_ce_loss
 from stok.utils.tokenizer import Tokenizer
 
 
 def _maybe_get_accelerator():
-    try:
-        from accelerate import Accelerator
-
-        return Accelerator()
-    except Exception:
-        return None
+    from accelerate import Accelerator
+    accelerator = Accelerator()
+    if accelerator.distributed_type.name not in {"NO", "MULTI_CPU", "MULTI_GPU"}:
+        raise ValueError(f"Unsupported distributed backend: {accelerator.distributed_type}; use replicated DDP")
+    return accelerator
 
 
 def _get_model_device(model: nn.Module, accelerator) -> torch.device:
@@ -174,29 +182,17 @@ def _collect_rng_state() -> dict[str, Any]:
     return state
 
 
-def _restore_rng_state(state: dict[str, Any]):
+@contextmanager
+def _atomic_destination(path: Path):
+    """Replace a destination only after its complete sibling file is written."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    os.close(fd)
     try:
-        if "python" in state:
-            random.setstate(state["python"])
-        if "numpy" in state:
-            np_state = state["numpy"]
-            # accept both raw numpy state and "listified" variant
-            if isinstance(np_state, (list, tuple)) and len(np_state) >= 5:
-                key = np_state[1]
-                if isinstance(key, list):
-                    try:
-                        key = np.array(key, dtype=np.uint32)
-                    except Exception:
-                        key = np.array(key)
-                np_state = (np_state[0], key, np_state[2], np_state[3], np_state[4])
-            np.random.set_state(np_state)
-        if "torch" in state:
-            torch.set_rng_state(state["torch"])
-        if "cuda" in state and torch.cuda.is_available():
-            torch.cuda.set_rng_state_all(state["cuda"])
-    except Exception:
-        # best-effort restore; ignore incompatibilities
-        pass
+        yield temporary
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
 def _save_checkpoint(
@@ -208,6 +204,7 @@ def _save_checkpoint(
     global_step: int,
     cfg: DictConfig,
     accelerator,
+    micro_step: int = 0,
 ):
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -215,38 +212,13 @@ def _save_checkpoint(
         "optimizer": optimizer.state_dict(),
         "scheduler": scheduler.state_dict(),
         "global_step": int(global_step),
+        "micro_step": int(micro_step),
+        "step_unit": "optimizer_update",
         "config": OmegaConf.to_container(cfg, resolve=True),
         "rng_state": _collect_rng_state(),
     }
-    torch.save(payload, path.as_posix())
-
-
-def _try_load_latest_checkpoint(
-    ckpt_dir: Path,
-    *,
-    model: nn.Module,
-    optimizer: torch.optim.Optimizer,
-    scheduler: torch.optim.lr_scheduler._LRScheduler,
-    accelerator,
-) -> int:
-    """
-    Returns restored global_step if a checkpoint is loaded; otherwise 0.
-    """
-    latest = ckpt_dir / "latest.pt"
-    if not latest.exists():
-        return 0
-    # all processes load to keep state in sync under DDP
-    try:
-        ckpt = torch.load(latest.as_posix(), map_location="cpu")
-        _unwrap_model(model, accelerator).load_state_dict(ckpt["model"])
-        optimizer.load_state_dict(ckpt["optimizer"])
-        scheduler.load_state_dict(ckpt["scheduler"])
-        if "rng_state" in ckpt:
-            _restore_rng_state(ckpt["rng_state"])
-        return int(ckpt.get("global_step", 0))
-    except Exception:
-        # if anything goes wrong, start from scratch
-        return 0
+    with _atomic_destination(path) as temporary:
+        torch.save(payload, temporary)
 
 
 def _load_pretrained_encoder(
@@ -303,6 +275,7 @@ def _tokenize_and_align(
     max_len: int,
     ignore_index: int,
     pad_id: int,
+    num_classes: int | None = None,
 ):
     # if using DummySequenceDataset, batch is tuples(tokens, labels)
     if tokenizer is None:
@@ -316,37 +289,33 @@ def _tokenize_and_align(
     for item in batch:  # type: ignore[assignment]
         seq: str = item["sequence"]
 
-        enc = tokenizer(
-            seq,
-            add_special_tokens=True,
-            truncation=True,
-            max_length=max_len,
-            padding="max_length",
-            return_tensors="pt",
-        )
-        ids = enc["input_ids"][0]
+        if pad_id != tokenizer.pad_token_id:
+            raise ValueError("Model pad_id must match tokenizer padding")
+        ids = tokenize_residues(seq, tokenizer, max_len)
 
         # build labels aligned to tokens: CLS/EOS/PAD -> ignore_index
         L = ids.size(0)
         labels = torch.full((L,), ignore_index, dtype=torch.long)
 
-        # Null labels stay at their original residue positions.
-        structure_tokens = item.get("structure_tokens")
-        if structure_tokens is not None:
-            copy_len = min(len(structure_tokens), len(seq), max(0, L - 2))
-            values = structure_tokens[:copy_len]
-            labels[1 : 1 + copy_len] = values.masked_fill(values < 0, ignore_index)
+        # Handle indices if present (may be absent for structure folder datasets)
+        indices_raw = item.get("structure_tokens")
+        if indices_raw is not None:
+            indices: torch.Tensor = indices_raw.long()
+            if num_classes is not None and (indices >= num_classes).any():
+                raise ValueError(f"Sample {item.get('sequence_id', '?')}: class ID out of range")
+            copy_len = min(len(seq), int(indices.numel()), L - 2)
+            values = indices[:copy_len]
+            labels[1:1+copy_len] = values.masked_fill(values < 0, ignore_index)
 
         input_ids.append(ids)
         label_ids.append(labels)
         # optional coords tensor [max_len, 3, 3]
         c = item.get("coords")
-        if c is not None and isinstance(c, torch.Tensor):
-            coords_batch.append(c)
+        coords_batch.append(align_coords(c, residue_count=len(seq), token_length=L))
 
     tokens = torch.stack(input_ids, dim=0)
     labels = torch.stack(label_ids, dim=0)
-    if len(coords_batch) > 0:
+    if any(item.get("coords") is not None for item in batch):
         return tokens, labels, torch.stack(coords_batch, dim=0)
     else:
         return tokens, labels
@@ -490,6 +459,8 @@ class MixtureSampler(Sampler[int]):
         fractions: list[float],
         seed: int = 0,
         num_samples: Optional[int] = None,
+        rank: int = 0,
+        world_size: int = 1,
     ):
         if len(lengths) == 0:
             raise ValueError("MixtureSampler requires at least one dataset length")
@@ -504,6 +475,7 @@ class MixtureSampler(Sampler[int]):
             )
         fr = fr / float(fr.sum())
 
+        self.rank, self.world_size = rank, world_size
         self.lengths = [int(L) for L in lengths]
         self.fractions = fr.tolist()
         self.seed = int(seed)
@@ -514,16 +486,21 @@ class MixtureSampler(Sampler[int]):
         )
 
     def __len__(self) -> int:
-        return int(self.num_samples)
+        return self.num_samples // self.world_size
+
+    def set_epoch(self, epoch: int):
+        self._epoch = epoch
 
     def __iter__(self):
         rng = np.random.RandomState((self.seed + (self._epoch * 1009)) & 0xFFFFFFFF)
         self._epoch += 1
         fr = np.asarray(self.fractions, dtype=np.float64)
-        for _ in range(int(self.num_samples)):
+        usable = len(self) * self.world_size
+        for position in range(usable):
             ds_idx = int(rng.choice(len(self.lengths), p=fr))
             j = int(rng.randint(0, self.lengths[ds_idx]))
-            yield int(self.offsets[ds_idx] + j)
+            if position % self.world_size == self.rank:
+                yield int(self.offsets[ds_idx] + j)
 
 
 def _build_dataloaders(
@@ -533,6 +510,7 @@ def _build_dataloaders(
     pad_id: int,
     is_mlm: bool = False,
 ) -> tuple[DataLoader, dict[str, DataLoader]]:
+    rank, world_size = distributed_rank()
     batch_size: int = cfg.data.batch_size
     max_len: int = cfg.data.max_len
     num_workers: int = cfg.data.num_workers
@@ -547,6 +525,19 @@ def _build_dataloaders(
 
     eval_configs = _parse_eval_configs(cfg)
     train_configs = _parse_train_configs(cfg)
+    objective = "mlm" if is_mlm else "codebook"
+    fape_required = not is_mlm and bool(cfg.train.get("fape", {}).get("enabled", False))
+    def coordinate_setting(options, needed, required=False):
+        value = options.get("load_coords", user_load_coords)
+        alias = options.get("has_coords")
+        if alias is not None:
+            if "load_coords" in options and value is not None and bool(value) != bool(alias):
+                raise ValueError("Conflicting has_coords and load_coords settings")
+            value = alias
+        if value is False and required:
+            raise ValueError("load_coords=false conflicts with requested structure supervision/metrics")
+        return bool(needed) if value is None else bool(value), value is True
+
 
     tokenizer: Optional[Tokenizer] = None
     collate_fn = None
@@ -579,18 +570,18 @@ def _build_dataloaders(
         if allow_structure_folders and dataset_format == "structure":
             from stok.data.structure_dataset import StructureFolderDataset
 
-            return StructureFolderDataset(
+            ds = StructureFolderDataset(
                 folder_path=str(p),
                 max_length=max_len,
                 chain_id=chain_id,
-                recursive=recursive,
+                recursive=recursive, load_coords=load_coords,
             )
+            return ds
 
         # heuristic: directory containing parquet shards -> Iterable; else map-style
         if p.is_dir():
             has_parquet = any(
-                f.is_file() and f.suffix.lower() in PARQUET_EXTENSIONS
-                for f in p.iterdir()
+                f.is_file() and f.suffix.lower() in PARQUET_EXTENSIONS for f in p.iterdir()
             )
             if has_parquet:
                 shuffle_shards = bool(getattr(cfg.data, "shuffle_shards", True))
@@ -615,8 +606,9 @@ def _build_dataloaders(
                     folder_path=str(p),
                     max_length=max_len,
                     chain_id=chain_id,
-                    recursive=recursive,
+                    recursive=recursive, load_coords=load_coords,
                 )
+
             raise ValueError(f"{p}: expected a directory containing Parquet shards")
 
         return TokenizedDataset(
@@ -654,27 +646,33 @@ def _build_dataloaders(
                     max_len=max_len,
                     ignore_index=ignore_index,
                     pad_id=pad_id,
+                    num_classes=codebook_size,
                 )
 
             collate_fn = collate
 
         if len(train_configs) == 1:
             # Single dataset (backwards compatible)
+            train_load, force_coords = coordinate_setting(train_configs[0], fape_required, fape_required)
             train_ds = _pick_dataset(
                 str(train_configs[0]["path"]),
-                bool(user_load_coords) if not is_mlm else False,
+                train_load,
                 require_structure_tokens=not is_mlm,
             )
+            if force_coords and not train_ds.has_coords:
+                raise ValueError("load_coords=true requires a coordinate-capable training source")
         else:
             # Multiple datasets with fractions
             ds_pairs: list[tuple[Dataset | IterableDataset, float]] = []
             for tcfg in train_configs:
-                t_load_coords = tcfg.get("load_coords", user_load_coords)
+                t_load_coords, force_coords = coordinate_setting(tcfg, fape_required, fape_required)
                 ds = _pick_dataset(
                     str(tcfg["path"]),
-                    bool(t_load_coords) if not is_mlm else False,
+                    t_load_coords,
                     require_structure_tokens=not is_mlm,
                 )
+                if force_coords and not ds.has_coords:
+                    raise ValueError(f"load_coords=true requires coordinates: {tcfg['path']}")
                 ds_pairs.append((ds, float(tcfg["fraction"])))
 
             any_iterable = any(isinstance(ds, IterableDataset) for ds, _ in ds_pairs)
@@ -695,7 +693,7 @@ def _build_dataloaders(
                     iterables.append(itds)
                     fracs.append(float(frac))
                     try:
-                        total_samples += int(len(itds))  # type: ignore[arg-type]
+                        total_samples += itds.num_samples
                     except Exception:
                         total_samples = 0
                 train_ds = InterleavedIterableDataset(
@@ -712,9 +710,12 @@ def _build_dataloaders(
                 concat = ConcatDataset(map_datasets)
                 sampler = MixtureSampler(
                     lengths=lengths,
+                    rank=rank, world_size=world_size,
                     fractions=fracs,
                     seed=int(cfg.train.get("seed", 1337)),
                 )
+                concat.has_coords = any(getattr(ds, "has_coords", False) for ds in map_datasets)
+                concat.has_labels = any(getattr(ds, "has_labels", True) for ds in map_datasets)
                 train_ds = concat
                 train_sampler = sampler
     else:
@@ -748,6 +749,11 @@ def _build_dataloaders(
                 pad_id=pad_id,
             )
 
+    if fape_required and not getattr(train_ds, "has_coords", False):
+        raise ValueError("FAPE requires a training source with coordinates")
+    cfg.data.load_coords = bool(getattr(train_ds, "has_coords", False))
+    train_collate_fn = collate_fn
+
     # configure shuffle depending on dataset type / sampler usage
     is_iterable = isinstance(train_ds, IterableDataset)
     # only meaningful for multi-process loading
@@ -778,9 +784,19 @@ def _build_dataloaders(
                     max_len=max_len,
                     ignore_index=ignore_index,
                     pad_id=pad_id,
+                    num_classes=codebook_size,
                 )
 
             collate_fn = collate
+
+    if max_len < 3:
+        raise ValueError("data.max_len must be >= 3")
+    if tokenizer is not None:
+        if tokenizer.pad_token_id != pad_id or len(tokenizer) != int(cfg.model.encoder.vocab_size):
+            raise ValueError("Model vocabulary and pad_id must match tokenizer")
+        for key in ("bos_id", "eos_id"):
+            OmegaConf.update(cfg, f"model.encoder.{key}",
+                             getattr(tokenizer, key.replace("_id", "_token_id")), force_add=True)
 
     def _make_dl_kwargs(batch_sz: int):
         kwargs = {
@@ -794,6 +810,15 @@ def _build_dataloaders(
             kwargs["prefetch_factor"] = prefetch_factor
         return kwargs
 
+    if is_iterable:
+        train_ds.training_batch_size = batch_size
+        train_ds.num_workers = num_workers
+        dropped = train_ds.num_samples - _usable_samples(train_ds)
+        if rank == 0 and dropped:
+            print(f"Training stream drops {dropped} samples per pass for complete rank/worker batches")
+    elif train_sampler is None:
+        train_sampler = DistributedSampler(train_ds, num_replicas=world_size, rank=rank,
+            shuffle=True, seed=int(cfg.train.get("seed", 1337)), drop_last=True)
     if train_sampler is not None:
         train_loader = DataLoader(
             train_ds,  # type: ignore[arg-type]
@@ -808,33 +833,67 @@ def _build_dataloaders(
             drop_last=True,
             **_make_dl_kwargs(batch_size),
         )
+    train_loader.collate_fn = train_collate_fn or train_loader.collate_fn
+    if isinstance(train_ds, DummySequenceDataset):
+        from torch.utils.data import default_collate
+        train_loader.collate_fn = default_collate
     eval_loaders: dict[str, DataLoader] = {}
     for name, eval_cfg in eval_configs.items():
         eval_path = eval_cfg["path"]
         eval_batch_size = int(eval_cfg.get("batch_size", batch_size))
-        eval_load_coords = eval_cfg.get("load_coords", user_load_coords)
+        resolved = resolve_eval_metrics(cfg, name, objective=objective)
+        needs_coords = any(METRIC_REGISTRY[key].requires_coords for key in resolved)
+        requires_coords = any(settings["explicit"] and METRIC_REGISTRY[key].requires_coords
+                              for key, settings in resolved.items())
+        eval_load_coords, force_coords = coordinate_setting(eval_cfg, needs_coords, requires_coords)
         # Extract structure folder format options
         eval_format = eval_cfg.get("format")
         eval_chain_id = eval_cfg.get("chain_id")
         eval_recursive = bool(eval_cfg.get("recursive", False))
 
         # Structure folders always have coords, don't require indices
-        is_structure_format = eval_format == "structure"
         ds = _pick_dataset(
             eval_path,
-            bool(eval_load_coords) if not is_mlm and not is_structure_format else True,
-            require_structure_tokens=not is_mlm and not is_structure_format,
+            eval_load_coords,
+            require_structure_tokens=False,
             dataset_format=eval_format,
             chain_id=eval_chain_id,
             recursive=eval_recursive,
             allow_structure_folders=True,
         )
+        if force_coords and not ds.has_coords:
+            raise ValueError(f"Dataset {name}: load_coords=true requires a coordinate-capable source")
+        for metric_name, settings in resolved.items():
+            if not settings["explicit"]:
+                continue
+            if METRIC_REGISTRY[metric_name].requires_coords and not ds.has_coords:
+                raise ValueError(f"Dataset {name}, metric {metric_name}: missing coordinates")
+            if not is_mlm and metric_name in {"accuracy", "perplexity"} and not ds.has_labels:
+                raise ValueError(f"Dataset {name}, metric {metric_name}: missing labels")
+        eval_cfg["load_coords"] = bool(ds.has_coords)
+        if isinstance(ds, IterableDataset):
+            ds.shuffle_shards = False
+            ds.shuffle_rows = False
+            eval_sampler = None
+        else:
+            eval_sampler = range(rank, len(ds), world_size)
+        eval_kwargs = _make_dl_kwargs(eval_batch_size)
+        eval_seed = int(cfg.train.get("eval", {}).get("seed", cfg.train.get("seed", 1337)))
+        eval_kwargs["generator"] = torch.Generator().manual_seed(eval_seed)
+        if is_mlm:
+            eval_kwargs["collate_fn"] = partial(mlm_collate, tokenizer=tokenizer,
+                max_len=max_len, mask_prob=mask_prob, mask_token_prob=mask_token_prob,
+                random_token_prob=random_token_prob, pad_id=pad_id,
+                ignore_index=ignore_index, eval_seed=eval_seed, dataset_name=name)
         eval_loaders[name] = DataLoader(
             ds,
+            sampler=eval_sampler,
             shuffle=False,
             drop_last=False,
-            **_make_dl_kwargs(eval_batch_size),
+            **eval_kwargs,
         )
+        eval_loaders[name].metric_configs = resolved
+    cfg.data.eval = OmegaConf.create(eval_configs)
     return train_loader, eval_loaders
 
 
@@ -878,7 +937,58 @@ def _maybe_init_wandb(
     return wb
 
 
+def iter_windows(loader, size: int, accelerator=None):
+    if size < 1:
+        raise ValueError("Accumulation window size must be positive")
+    iterator = None
+    while True:
+        error = None
+        window = []
+        try:
+            if iterator is None:
+                iterator = iter(loader)
+            window = list(islice(iterator, size))
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+        _raise_rank_errors(error, accelerator, "Loading training window failed")
+        if accelerator:
+            sizes = gather_object([len(window)])
+            if len(set(sizes)) != 1:
+                raise RuntimeError(f"Unequal accumulation window lengths across ranks: {sizes}")
+        if not window:
+            return
+        yield window
+
+
+def _raise_rank_errors(error, accelerator, context: str):
+    errors = gather_object([error]) if accelerator else [error]
+    if any(errors):
+        raise RuntimeError(f"{context}: {errors}")
+
+
 def run_training(cfg: DictConfig):
+    if str(cfg.train.get("objective", "codebook")).lower() == "mlm":
+        for key in ("train.fape.enabled", "model.decoder.enabled", "train.decoding.eval_enabled"):
+            if OmegaConf.select(cfg, key, default=False):
+                raise ValueError(f"{key}=true is unsupported for MLM; geometry requires the codebook objective")
+    for key, supported in (("model.classifier.tie_to_codebook", True),
+                           ("model.codebook.trainable", False),
+                           ("model.decoder.freeze", True)):
+        if OmegaConf.select(cfg, key, default=supported) != supported:
+            raise ValueError(f"{key} only supports {supported} in the training CLI")
+    if str(cfg.train.optimizer.get("name", "adamw")).lower() != "adamw":
+        raise ValueError("train.optimizer.name only supports adamw")
+    if OmegaConf.select(cfg, "model.init.std") is not None:
+        raise ValueError("model.init.std is unsupported; initialization follows module defaults")
+    for name, value, minimum in (
+        ("grad_accum_steps", cfg.train.get("grad_accum_steps", 1), 1),
+        ("log_steps", cfg.train.get("log_steps", 1), 1),
+        ("eval.steps", cfg.train.eval.get("steps", 1), 1),
+        ("num_steps", cfg.train.get("num_steps", 0), 0),
+        ("epochs", cfg.train.get("epochs"), 0),
+    ):
+        if value is not None and int(value) < minimum:
+            raise ValueError(f"train.{name} must be >= {minimum}")
     os.environ["DS_LOG_LEVEL"] = "warn"  # set DeepSpeed log level to warn
 
     # set global seed (BEFORE Accelerator init)
@@ -936,7 +1046,6 @@ def run_training(cfg: DictConfig):
                 io_dirs["configs"],
             ]
         )
-        _save_config_snapshot(cfg, io_dirs["configs"] / "run.yaml")
     if accelerator:
         accelerator.wait_for_everyone()
 
@@ -993,6 +1102,14 @@ def run_training(cfg: DictConfig):
     if is_main:
         printer(f"Trainable parameters: {num_params:,}")
 
+    # data
+    train_loader, eval_loaders = _build_dataloaders(
+        cfg,
+        codebook_size=codebook_size,
+        pad_id=cfg.model.encoder.pad_id,
+        is_mlm=is_mlm,
+    )
+
     # load frozen geometric decoder for FAPE loss and/or eval metrics (optional)
     # Skip decoder setup for MLM objective
     decoder = None
@@ -1003,9 +1120,8 @@ def run_training(cfg: DictConfig):
     if not is_mlm:
         want_fape = bool(getattr(cfg.train, "fape", {}).get("enabled", False))
         # default to False; eval-time decoding is opt-in via config/override
-        want_eval_decode = bool(
-            getattr(cfg.train, "decoding", {}).get("eval_enabled", False)
-        )
+        want_eval_decode = any(METRIC_REGISTRY[name].requires_decoder
+            for loader in eval_loaders.values() for name in loader.metric_configs)
         # FAPE behavior toggles (with safe defaults)
         log_pred_nan_frac = bool(
             getattr(cfg.train, "fape", {}).get("log_pred_nan_frac", True)
@@ -1027,7 +1143,7 @@ def run_training(cfg: DictConfig):
                 pass
             decoder_enabled = True
 
-        if decoder_enabled and (want_fape or want_eval_decode):
+        if decoder_enabled:
             # resolve preset/path
             dec_preset = getattr(
                 cfg.model.decoder, "preset", None
@@ -1053,13 +1169,8 @@ def run_training(cfg: DictConfig):
                         f"{int(E.shape[1])}"
                     )
 
-    # data
-    train_loader, eval_loaders = _build_dataloaders(
-        cfg,
-        codebook_size=codebook_size,
-        pad_id=cfg.model.encoder.pad_id,
-        is_mlm=is_mlm,
-    )
+    if is_main:
+        _save_config_snapshot(cfg, io_dirs["configs"] / "run.yaml")
 
     # optimizer
     optimizer = AdamW(
@@ -1074,7 +1185,7 @@ def run_training(cfg: DictConfig):
     # derive steps_per_epoch when possible (used for both max_steps and logging)
     steps_per_epoch: Optional[int] = None
     try:
-        steps_per_epoch = math.ceil(len(train_loader))  # type: ignore[arg-type]
+        steps_per_epoch = math.ceil(len(train_loader) / grad_accum_steps)  # type: ignore[arg-type]
         if steps_per_epoch <= 0:
             steps_per_epoch = None
     except TypeError:
@@ -1123,15 +1234,7 @@ def run_training(cfg: DictConfig):
 
     # prepare with Accelerate (if available)
     if accelerator:
-        to_prepare = [model, optimizer, train_loader]
-        to_prepare.extend(eval_loaders.values())
-        prepared = accelerator.prepare(*to_prepare)
-        # Unpack prepared components in order
-        model = prepared[0]
-        optimizer = prepared[1]
-        train_loader = prepared[2]
-        eval_names = list(eval_loaders.keys())
-        eval_loaders = {name: prepared[3 + i] for i, name in enumerate(eval_names)}
+        model, optimizer = accelerator.prepare(model, optimizer)
     else:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model.to(device)
@@ -1142,6 +1245,7 @@ def run_training(cfg: DictConfig):
     # train loop
     model.train()
     global_step = 0
+    micro_step = 0
     running_loss = 0.0
     log_interval = int(cfg.train.get("log_steps", 50))
     eval_interval = int(cfg.train.get("eval", {}).get("steps", 1000))
@@ -1212,133 +1316,112 @@ def run_training(cfg: DictConfig):
         # linear
         return t0 + (t1 - t0) * (float(step) / float(T))
 
-    while global_step < max_steps:
-        for batch in train_loader:
-            # step/epoch bookkeeping (global_step is zero-based)
+    epoch = 0
+    epoch_limit = cfg.train.get("epochs")
+    device = _get_model_device(model, accelerator)
+    world_size = accelerator.num_processes if accelerator else 1
+    optimizer.zero_grad(set_to_none=True)
+    while global_step < max_steps and (epoch_limit is None or epoch < int(epoch_limit)):
+        if hasattr(train_loader.sampler, "set_epoch"):
+            train_loader.sampler.set_epoch(epoch)
+        epoch += 1
+        batches_in_pass = 0
+        updates_before_pass = global_step
+        for window in iter_windows(train_loader, grad_accum_steps, accelerator):
+            batches_in_pass += len(window)
             current_step = global_step + 1
-            current_epoch: Optional[float] = None
-            if steps_per_epoch is not None:
-                current_epoch = float(current_step) / float(steps_per_epoch)
-
-            # batch can be (tokens, labels) or (tokens, labels, coords)
-            if isinstance(batch, (list, tuple)) and len(batch) == 3:
-                tokens, labels, coords = batch
-            else:
-                tokens, labels = batch  # type: ignore[misc]
-                coords = None
-            if accelerator is None:
-                _dev = _get_model_device(model, accelerator)
-                tokens = tokens.to(_dev)
-                labels = labels.to(_dev)
-                if coords is not None:
-                    coords = coords.to(_dev)
-
-            # base model forward (token classification only)
-            outputs = model(tokens=tokens, labels=labels, ignore_index=ignore_index)
-            loss: torch.Tensor = outputs["loss"]
-
-            # optional FAPE loss using frozen decoder (codebook objective only)
-            if (
-                not is_mlm
-                and decoder is not None
-                and want_fape
-                and (global_step >= int(cfg.train.fape.start_step))
-            ):
-                if coords is not None:
-                    pad_id = int(cfg.model.encoder.pad_id)
-                    mask = tokens != pad_id
-                    tau = _anneal_tau(global_step)
-                    soft_codes = logits_to_soft_codes_gumbel(
-                        outputs["logits"],  # [B, L, C]
-                        _unwrap_model(model, accelerator).classifier.E,  # [C, d_code]
-                        tau=float(tau),
-                        hard=bool(getattr(cfg.train, "gumbel", {}).get("hard", False)),
-                    )
-                    bb = decoder(soft_codes, mask=mask)  # type: ignore[operator]
-                    pred_coords = bb.view(bb.size(0), bb.size(1), 3, 3)
-                    # metric: fraction of NaNs in predicted coords
-                    # can happen when encoder isn't producing coherent outputs (yet!)
-                    if log_pred_nan_frac:
-                        pred_nan_frac_t = torch.isnan(pred_coords).float().mean()
-                        outputs["pred_nan_frac"] = float(
-                            pred_nan_frac_t.detach().item()
-                        )
-                    # don't bother with FAPE loss if all predicted coords are NaN
-                    if torch.isnan(pred_coords).all():
-                        outputs["pred_coords"] = pred_coords
-                        outputs["structure_loss"] = None
-                    else:
-                        fape = fape_loss(
-                            pred_coords=pred_coords,
-                            true_coords=coords,
-                            residue_mask=mask,
-                        )
-                        outputs["pred_coords"] = pred_coords
-                        # Always expose FAPE value (even if NaN/Inf) for logging
-                        outputs["structure_loss"] = fape
-                        # Only add finite FAPE to the optimization loss
-                        if torch.isfinite(fape).item():
-                            loss = loss + float(cfg.train.fape.weight) * fape
-                elif is_main and (global_step == 0):
-                    printer(
-                        "FAPE enabled but no coords in dataset; skipping FAPE term."
-                    )
-
-            # normalize by grad accumulation
-            loss_to_backprop = loss / grad_accum_steps
+            current_epoch = (epoch - 1) + batches_in_pass / max(1, len(train_loader))
+            active_fape = decoder is not None and want_fape and global_step >= int(cfg.train.fape.start_step)
+            # Denominators precede forwards; only input batches are buffered.
+            n_tokens = sum(int((batch[1] != ignore_index).sum()) for batch in window)
+            n_structures = 0
+            processed_tokens = 0
+            for batch in window:
+                tokens = batch[0]
+                processed_tokens += int((tokens != int(cfg.model.encoder.pad_id)).sum())
+                if active_fape and len(batch) == 3:
+                    mask = residue_mask_from_tokens(tokens, pad_id=int(cfg.model.encoder.pad_id),
+                        bos_id=int(cfg.model.encoder.get("bos_id", 0)), eos_id=int(cfg.model.encoder.get("eos_id", 2)))
+                    n_structures += int((mask & torch.isfinite(batch[2]).all((-2, -1))).any(1).sum())
+            counts = torch.tensor([n_tokens, n_structures, processed_tokens], device=device, dtype=torch.long)
             if accelerator:
-                accelerator.backward(loss_to_backprop)
-            else:
-                loss_to_backprop.backward()
-
-            if (global_step + 1) % grad_accum_steps == 0:
-                if grad_clip is not None and grad_clip > 0:
+                counts = accelerator.reduce(counts, reduction="sum")
+            global_tokens, global_structures, processed_tokens = counts.tolist()
+            total_tokens += processed_tokens
+            micro_step += len(window)
+            if global_tokens == 0 and (global_structures == 0 or float(cfg.train.fape.weight) == 0):
+                continue
+            window_ce = 0.0
+            window_fape = 0.0
+            window_correct = 0
+            for micro_index, batch in enumerate(window):
+                sync = accelerator.no_sync(model) if accelerator and micro_index < len(window)-1 else nullcontext()
+                with sync:
+                    tokens, labels = (t.to(device) for t in batch[:2])
+                    coords = batch[2].to(device) if len(batch) == 3 else None
+                    error = None
+                    try:
+                        outputs = model(tokens=tokens)
+                        ce_sum = token_ce_loss(outputs["logits"], labels, ignore_index, reduction="sum")
+                        fape_sum = ce_sum * 0.0
+                        if active_fape and coords is not None:
+                            mask = residue_mask_from_tokens(tokens, pad_id=int(cfg.model.encoder.pad_id),
+                                bos_id=int(cfg.model.encoder.get("bos_id", 0)), eos_id=int(cfg.model.encoder.get("eos_id", 2)))
+                            eligible = (mask & torch.isfinite(coords).all((-2, -1))).any(1)
+                            if eligible.any():
+                                soft_codes = logits_to_soft_codes_gumbel(outputs["logits"],
+                                    _unwrap_model(model, accelerator).classifier.E,
+                                    tau=_anneal_tau(global_step), hard=bool(cfg.train.gumbel.get("hard", False)))
+                                pred_coords = decode_token_aligned_coords(decoder, soft_codes, mask)
+                                fape_sum = fape_loss(pred_coords, coords, mask) * eligible.sum()
+                                if log_pred_nan_frac:
+                                    running_pred_nan_frac_sum += float(torch.isnan(pred_coords[mask]).float().mean())
+                                    running_pred_nan_frac_count += 1
+                        loss = ce_sum * (world_size / global_tokens if global_tokens else 0.)
+                        loss = loss + float(cfg.train.fape.weight) * fape_sum * (world_size / global_structures if global_structures else 0.)
+                        if not torch.isfinite(loss):
+                            raise FloatingPointError("Nonfinite training loss")
+                    except Exception as exc:
+                        error = f"{type(exc).__name__}: {exc}"
+                    _raise_rank_errors(error, accelerator, "Training forward failed")
                     if accelerator:
-                        accelerator.clip_grad_norm_(model.parameters(), grad_clip)
+                        accelerator.backward(loss)
                     else:
-                        nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-                optimizer.step()
-                scheduler.step()
-                optimizer.zero_grad(set_to_none=True)
-
-            running_loss += float(loss.detach().item())
-
-            # Accumulate tokens for FLOPs tracking (non-padding tokens)
-            pad_id_for_count = int(cfg.model.encoder.pad_id)
-            batch_tokens = int((tokens != pad_id_for_count).sum().item())
-            total_tokens += batch_tokens
-
-            # accumulate loss components
-            cls_loss_tensor = outputs.get("classification_loss")
-            if cls_loss_tensor is not None:
-                running_cls_loss += float(cls_loss_tensor.detach().item())
-                running_cls_count += 1
-
-            # For MLM, compute masked token accuracy
-            if is_mlm:
-                with torch.no_grad():
-                    masked_acc = _compute_accuracy(
-                        outputs["logits"], labels, ignore_index
-                    )
-                    running_masked_acc_sum += masked_acc
-                    running_masked_acc_count += 1
-
-            # Codebook-specific accumulations
-            if not is_mlm:
-                fape_loss_tensor = outputs.get("structure_loss")
-                if fape_loss_tensor is not None:
-                    running_fape_loss += float(fape_loss_tensor.detach().item())
-                    running_fape_count += 1
-                if log_pred_nan_frac:
-                    _pnan = outputs.get("pred_nan_frac")
-                    if _pnan is not None:
-                        running_pred_nan_frac_sum += float(_pnan)
-                        running_pred_nan_frac_count += 1
+                        loss.backward()
+                    window_ce += float(ce_sum.detach())
+                    window_fape += float(fape_sum.detach())
+                    with torch.no_grad():
+                        valid = labels != ignore_index
+                        window_correct += int(((outputs["logits"].argmax(-1) == labels) & valid).sum())
+            if grad_clip > 0:
+                if accelerator:
+                    accelerator.clip_grad_norm_(model.parameters(), grad_clip)
+                else:
+                    nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            optimizer.step()
+            skipped = bool(accelerator and accelerator.optimizer_step_was_skipped)
+            optimizer.zero_grad(set_to_none=True)
+            if skipped:
+                continue
+            scheduler.step()
+            sums = torch.tensor([window_ce, window_fape, window_correct], device=device, dtype=torch.float64)
+            if accelerator:
+                sums = accelerator.reduce(sums, reduction="sum")
+            cls_mean = float(sums[0]) / max(1, global_tokens)
+            fape_mean = float(sums[1]) / max(1, global_structures)
+            running_loss += cls_mean + float(cfg.train.fape.weight) * fape_mean
+            if global_tokens:
+                running_cls_loss += float(sums[0])
+                running_cls_count += global_tokens
+                running_masked_acc_sum += float(sums[2])
+                running_masked_acc_count += global_tokens
+            if global_structures:
+                running_fape_loss += float(sums[1])
+                running_fape_count += global_structures
 
             # logging
             if current_step % log_interval == 0 and is_main:
-                with torch.no_grad():
-                    acc = _compute_accuracy(outputs["logits"], labels, ignore_index)
+                acc = running_masked_acc_sum / max(1, running_masked_acc_count)
                 lr = scheduler.get_last_lr()[0]
 
                 # compute averages over the current log interval
@@ -1354,7 +1437,7 @@ def run_training(cfg: DictConfig):
                 cumulative_flops = compute_flops_6n(num_params, total_tokens)
 
                 # build console log message
-                msg = f"step {current_step}/{max_steps}"
+                msg = f"step {current_step}/{max_steps} | micro_step {micro_step}"
                 if current_epoch is not None:
                     msg += f" | epoch {current_epoch:.3f}"
                 # add FLOPs (scientific notation for console)
@@ -1406,6 +1489,7 @@ def run_training(cfg: DictConfig):
                     payload: dict[str, float] = {
                         "train/loss": float(avg_total_loss),
                         "lr": float(lr),
+                        "train/micro_step": float(micro_step),
                     }
 
                     if is_mlm:
@@ -1479,46 +1563,45 @@ def run_training(cfg: DictConfig):
             # checkpointing
             ckpt_steps = cfg.train.get("checkpoint_steps")
             if (
-                is_main
-                and ckpt_steps is not None
+                ckpt_steps is not None
                 and int(ckpt_steps) > 0
                 and (global_step % int(ckpt_steps) == 0)
             ):
                 step_path = io_dirs["checkpoints"] / f"step_{global_step:08d}.pt"
-                _save_checkpoint(
-                    step_path,
-                    model=model,
-                    optimizer=optimizer,
-                    scheduler=scheduler,
-                    global_step=global_step,
-                    cfg=cfg,
-                    accelerator=accelerator,
-                )
-                # update latest pointer
-                try:
-                    shutil.copyfile(
-                        step_path.as_posix(),
-                        (io_dirs["checkpoints"] / "latest.pt").as_posix(),
-                    )
-                except Exception:
-                    pass
-                if accelerator:
-                    accelerator.wait_for_everyone()
+                checkpoint_error = None
+                if is_main:
+                    try:
+                        _save_checkpoint(
+                            step_path, model=model, optimizer=optimizer,
+                            scheduler=scheduler, global_step=global_step,
+                            cfg=cfg, accelerator=accelerator, micro_step=micro_step,
+                        )
+                        with _atomic_destination(io_dirs["checkpoints"] / "latest.pt") as temporary:
+                            shutil.copyfile(step_path, temporary)
+                    except Exception as exc:
+                        checkpoint_error = f"{type(exc).__name__}: {exc}"
+                errors = gather_object([checkpoint_error]) if accelerator else [checkpoint_error]
+                if any(errors):
+                    raise RuntimeError(f"Checkpoint failed: {errors}")
             if global_step >= max_steps:
                 break
+        if batches_in_pass == 0:
+            raise RuntimeError("Training loader produced no complete batches")
+        if global_step == updates_before_pass:
+            raise RuntimeError("Training pass made no successful optimizer update")
 
+    checkpoint_error = None
     if is_main:
-        # final checkpoint
-        final_path = io_dirs["model"] / "final.pt"
-        _save_checkpoint(
-            final_path,
-            model=model,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            global_step=global_step,
-            cfg=cfg,
-            accelerator=accelerator,
-        )
+        try:
+            _save_checkpoint(io_dirs["model"] / "final.pt", model=model, optimizer=optimizer,
+                scheduler=scheduler, global_step=global_step, micro_step=micro_step,
+                cfg=cfg, accelerator=accelerator)
+        except Exception as exc:
+            checkpoint_error = f"{type(exc).__name__}: {exc}"
+    errors = gather_object([checkpoint_error]) if accelerator else [checkpoint_error]
+    if any(errors):
+        raise RuntimeError(f"Final checkpoint failed: {errors}")
+    if is_main:
         console.close()
         console.print("Training complete.")
         if log_file_handle is not None:

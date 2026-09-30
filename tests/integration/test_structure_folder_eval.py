@@ -1,8 +1,6 @@
 """Integration tests for structure folder evaluation datasets."""
 
-import numpy as np
 import pandas as pd
-import pytest
 from click.testing import CliRunner
 from pathlib import Path
 
@@ -59,14 +57,14 @@ def _create_structure_folder(tmp_path: Path, n_files: int = 5) -> Path:
     return folder
 
 
-def _create_train_parquet(tmp_path: Path, n_rows: int, seq_len: int) -> Path:
+def _create_train_parquet(tmp_path: Path, n_rows: int, seq_len: int, indices_len: int) -> Path:
     """Create a training Parquet file with sequences and indices."""
     train_parquet = tmp_path / "train.parquet"
     rows = []
     for i in range(n_rows):
         seq = random_protein_sequence(seq_len, seq_len)
-        structure_tokens = [j % 128 for j in range(len(seq))]
-        rows.append({"sequence_id": f"train_{i}", "sequence": seq, "structure_tokens": structure_tokens})
+        indices = [j % 128 for j in range(len(seq))]
+        rows.append({"sequence_id": f"train_{i}", "sequence": seq, "structure_tokens": indices})
     
     df = pd.DataFrame(rows)
     df.to_parquet(train_parquet, index=False)
@@ -94,8 +92,9 @@ class TestStructureFolderEvalExplicit:
         runner = CliRunner()
 
         max_len = 16
+        indices_len = max_len - 2
 
-        train_parquet = _create_train_parquet(tmp_path, n_rows=8, seq_len=12)
+        train_parquet = _create_train_parquet(tmp_path, n_rows=8, seq_len=12, indices_len=indices_len)
         struct_folder = _create_structure_folder(tmp_path, n_files=4)
 
         overrides = [
@@ -139,8 +138,9 @@ class TestStructureFolderEvalAutoDetect:
         runner = CliRunner()
 
         max_len = 16
+        indices_len = max_len - 2
 
-        train_parquet = _create_train_parquet(tmp_path, n_rows=8, seq_len=12)
+        train_parquet = _create_train_parquet(tmp_path, n_rows=8, seq_len=12, indices_len=indices_len)
         struct_folder = _create_structure_folder(tmp_path, n_files=4)
 
         overrides = [
@@ -222,8 +222,9 @@ class TestStructureFolderMetricWhitelist:
         runner = CliRunner()
 
         max_len = 16
+        indices_len = max_len - 2
 
-        train_parquet = _create_train_parquet(tmp_path, n_rows=8, seq_len=12)
+        train_parquet = _create_train_parquet(tmp_path, n_rows=8, seq_len=12, indices_len=indices_len)
         struct_folder = _create_structure_folder(tmp_path, n_files=4)
 
         overrides = [
@@ -254,8 +255,8 @@ class TestStructureFolderMetricWhitelist:
         ]
 
         result = runner.invoke(cli, ["train", *overrides])
-        assert result.exit_code == 0, result.output
-        assert "Training complete." in result.output
+        assert result.exit_code != 0
+        assert "missing labels" in str(result.exception)
 
 
 class TestStructureFolderChainId:
@@ -266,8 +267,9 @@ class TestStructureFolderChainId:
         runner = CliRunner()
 
         max_len = 16
+        indices_len = max_len - 2
 
-        train_parquet = _create_train_parquet(tmp_path, n_rows=8, seq_len=12)
+        train_parquet = _create_train_parquet(tmp_path, n_rows=8, seq_len=12, indices_len=indices_len)
         struct_folder = _create_structure_folder(tmp_path, n_files=4)
 
         overrides = [

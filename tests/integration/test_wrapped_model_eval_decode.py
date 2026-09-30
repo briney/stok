@@ -10,20 +10,22 @@ def test_eval_decode_with_wrapped_model(monkeypatch, tmp_path):
     from hydra import compose, initialize_config_dir
     from stok.cli.train import run_training
     from stok.utils.codebook import load_codebook
-    from stok.models.decoder import GeometricDecoder
+    from stok.models.decoder import GeometricDecoder, _DECODER_ARCH
+    monkeypatch.setitem(_DECODER_ARCH, "lite", dict(d_model=32, n_heads=2, n_layers=1,
+        ffn_mult=1., max_length=128, num_memory_tokens=0, attn_kv_heads=1))
 
     # Build a tiny decoder ckpt matching the codebook preset
     codebook = load_codebook(preset="lite")
     d_code = int(codebook.shape[1])
     dec = GeometricDecoder(
-        d_model=1024,
-        n_heads=8,
-        n_layers=12,
-        ffn_mult=4.0,
-        max_length=1280,
+        d_model=32,
+        n_heads=2,
+        n_layers=1,
+        ffn_mult=1.0,
+        max_length=128,
         d_code=d_code,
         num_memory_tokens=0,
-        attn_kv_heads=2,
+        attn_kv_heads=1,
     )
     ckpt = tmp_path / "decoder-lite.pt"
     torch.save(dec.state_dict(), ckpt)
@@ -57,6 +59,7 @@ def test_eval_decode_with_wrapped_model(monkeypatch, tmp_path):
         device = torch.device("cpu")
         is_main_process = True
         num_processes = 1
+        optimizer_step_was_skipped = False
         print = print
 
         def prepare(self, *objs):
@@ -77,7 +80,10 @@ def test_eval_decode_with_wrapped_model(monkeypatch, tmp_path):
         def clip_grad_norm_(self, params, max_norm):
             nn.utils.clip_grad_norm_(list(params), max_norm)
 
-        def gather_for_metrics(self, t):
+        def reduce(self, t, reduction="sum"):
+            return t
+
+        def gather(self, t):
             return t
 
         def wait_for_everyone(self):
@@ -85,7 +91,18 @@ def test_eval_decode_with_wrapped_model(monkeypatch, tmp_path):
 
     monkeypatch.setattr("stok.cli.train._maybe_get_accelerator", lambda: FakeAccelerator())
 
+    from tests.integration.test_structure_folder_eval import _create_structure_folder
+    eval_path = _create_structure_folder(tmp_path, n_files=2)
+    from stok.eval import Evaluator
+    evaluated = []
+    original = Evaluator.evaluate
+    def evaluate(self, *args, **kwargs):
+        metrics = original(self, *args, **kwargs)
+        evaluated.append(metrics)
+        return metrics
+    monkeypatch.setattr(Evaluator, 'evaluate', evaluate)
     overrides = [
+        f"data.eval={eval_path}",
         # tiny model for speed
         "model.encoder.d_model=64",
         "model.encoder.n_layers=2",
@@ -118,4 +135,5 @@ def test_eval_decode_with_wrapped_model(monkeypatch, tmp_path):
         with initialize_config_dir(version_base=None, config_dir=str(cfg_dir)):
             cfg = compose(config_name="config", overrides=overrides)
     run_training(cfg)
+    assert evaluated and evaluated[0]["lddt/num_valid"] == 2
 

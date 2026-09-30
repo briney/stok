@@ -68,6 +68,7 @@ class StructureFolderDataset(Dataset):
         chain_id: str | None = None,
         strict: bool = False,
         recursive: bool = False,
+        load_coords: bool = True,
     ):
         self.folder_path = Path(folder_path)
         if not self.folder_path.is_dir():
@@ -102,7 +103,9 @@ class StructureFolderDataset(Dataset):
                 f"Supported extensions: {STRUCTURE_EXTENSIONS}"
             )
 
-        self.has_coords = True
+        # Flags for compatibility with existing dataset code
+        self.has_coords = bool(load_coords)
+        self.has_labels = False
 
     def __len__(self) -> int:
         """Return number of structure files in the dataset."""
@@ -160,6 +163,8 @@ class StructureFolderDataset(Dataset):
             "nan_masks": torch.tensor(mask, dtype=torch.bool),
         }
 
+        if not self.has_coords:
+            del out["coords"]
         return out
 
     def __repr__(self) -> str:

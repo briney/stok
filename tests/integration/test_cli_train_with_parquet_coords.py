@@ -1,6 +1,5 @@
 import pytest
 import pandas as pd
-import numpy as np
 from pathlib import Path
 
 from click.testing import CliRunner
@@ -75,5 +74,4 @@ def test_cli_train_with_parquet_and_coords_e2e(tmp_path):
     result = runner.invoke(cli, ["train", *overrides])  # type: ignore[arg-type]
     assert result.exit_code == 0, result.output
     assert "Training complete." in result.output
-
 

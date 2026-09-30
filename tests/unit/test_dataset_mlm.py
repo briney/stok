@@ -1,4 +1,5 @@
-"""Tests for dataset support for MLM training (without structure_tokens column)."""
+"""Tests for dataset support for MLM training (without indices column)."""
+
 
 import pandas as pd
 import pytest
@@ -10,7 +11,7 @@ class TestTokenizedDatasetMLM:
     """Tests for TokenizedDataset with require_structure_tokens=False."""
 
     def test_dataset_without_indices_column(self, tmp_path):
-        """Test that dataset loads correctly without structure_tokens column."""
+        """Test that dataset loads correctly without indices column."""
         parquet_path = tmp_path / "test.parquet"
         df = pd.DataFrame(
             {
@@ -36,7 +37,7 @@ class TestTokenizedDatasetMLM:
             {
                 "sequence_id": ["p1", "p2"],
                 "sequence": ["MVLSPADKTNVKA", "MNIFEMLRIDKGL"],
-                "structure_tokens": [[1] * 13, [1] * 12],
+                "structure_tokens": [list(range(1, 14)), list(range(1, 13))],
             }
         )
         df.to_parquet(parquet_path, index=False)
@@ -79,7 +80,7 @@ class TestTokenizedDatasetMLM:
             assert item["sequence"] == seq
 
     def test_parquet_dataset_without_indices(self, tmp_path):
-        """Test that Parquet dataset works without structure_tokens column."""
+        """Test that Parquet dataset works without indices column."""
         pytest.importorskip("pyarrow")
 
         parquet_path = tmp_path / "test.parquet"
@@ -150,7 +151,7 @@ class TestIterableDatasetMLM:
     """Tests for IterableTokenizedDataset with require_structure_tokens=False."""
 
     def test_iterable_dataset_without_indices(self, tmp_path):
-        """Test that iterable dataset works without structure_tokens column."""
+        """Test that iterable dataset works without indices column."""
         pytest.importorskip("pyarrow")
         from stok.data.dataset import IterableTokenizedDataset
 
@@ -184,5 +185,16 @@ class TestIterableDatasetMLM:
             assert "sequence" in item
             assert "sequence_id" in item
             # indices should not be present since we set require_structure_tokens=False
-            # and the parquet files don't have an structure_tokens column
+            # and the parquet files don't have an indices column
 
+
+
+def test_optional_missing_label_array_preserves_all_positions(tmp_path):
+    from stok.data.dataset import TokenizedDataset
+    source = tmp_path/'mixed.parquet'
+    pd.DataFrame([{'sequence_id': 'unlabeled', 'sequence': 'LAG', 'structure_tokens': [None] * 3},
+                  {'sequence_id': 'labeled', 'sequence': 'LAG', 'structure_tokens': [0, 1, 2]}]).to_parquet(source)
+    dataset = TokenizedDataset(str(source), max_length=6, require_structure_tokens=False)
+    assert dataset.has_labels
+    assert dataset[0]['structure_tokens'].tolist() == [-1]*3
+    assert dataset[1]['structure_tokens'][:3].tolist() == [0, 1, 2]

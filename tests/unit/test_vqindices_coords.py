@@ -1,7 +1,6 @@
 import numpy as np
 import pandas as pd
 import pytest
-from pathlib import Path
 
 import torch
 
@@ -29,7 +28,7 @@ def test_dataset_parquet_with_coords_returns_coords_tensor(tmp_path):
             {
                 "sequence_id": f"p{i}",
                 "sequence": seq,
-                "structure_tokens": list(range(L)),
+                "structure_tokens": list(range(L)),  # arbitrary
                 "coordinates": _make_coords(L),
             }
         )
@@ -69,3 +68,12 @@ def test_dataset_parquet_without_coords_omits_key(tmp_path):
     item = ds[0]
     assert "coords" not in item
 
+
+def test_parser_preserves_missing_positions_and_rejects_bad_lengths(tmp_path):
+    from stok.data.dataset import _build_output_from_row
+    row = {'sequence_id': 'p', 'sequence': 'LAG', 'structure_tokens': [7, None, 9]}
+    item = _build_output_from_row(row, max_length=6, has_coords=False)
+    assert item['structure_tokens'].tolist() == [7, -1, 9]
+    row['structure_tokens'] = [7, 9]
+    with pytest.raises(ValueError, match='p.*length'):
+        _build_output_from_row(row, max_length=6, has_coords=False)

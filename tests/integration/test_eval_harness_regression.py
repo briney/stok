@@ -20,7 +20,7 @@ def test_eval_harness_produces_expected_metrics_codebook(tmp_path):
         {
             "sequence_id": [f"train_{i}" for i in range(10)],
             "sequence": ["MKTAYIAKQRQISFVKSHFSRQ" for _ in range(10)],
-            "structure_tokens": [list(range(22)) for _ in range(10)],
+            "structure_tokens": [list(range(len("MKTAYIAKQRQISFVKSHFSRQ"))) for _ in range(10)],
         }
     )
     train_data.to_parquet(train_parquet, index=False)
@@ -29,7 +29,7 @@ def test_eval_harness_produces_expected_metrics_codebook(tmp_path):
         {
             "sequence_id": [f"eval_{i}" for i in range(5)],
             "sequence": ["MKTAYIAKQRQISFVKSHFS" for _ in range(5)],
-            "structure_tokens": [list(range(20)) for _ in range(5)],
+            "structure_tokens": [list(range(len("MKTAYIAKQRQISFVKSHFS"))) for _ in range(5)],
         }
     )
     eval_data.to_parquet(eval_parquet, index=False)
@@ -134,7 +134,7 @@ def test_eval_harness_multiple_eval_datasets(tmp_path):
         {
             "sequence_id": [f"train_{i}" for i in range(10)],
             "sequence": ["MKTAYIAKQRQISFVKSHFSRQ" for _ in range(10)],
-            "structure_tokens": [list(range(22)) for _ in range(10)],
+            "structure_tokens": [list(range(len("MKTAYIAKQRQISFVKSHFSRQ"))) for _ in range(10)],
         }
     )
     train_data.to_parquet(train_parquet, index=False)
@@ -143,7 +143,7 @@ def test_eval_harness_multiple_eval_datasets(tmp_path):
         {
             "sequence_id": [f"val_{i}" for i in range(5)],
             "sequence": ["MKTAYIAKQRQISFVKSHFS" for _ in range(5)],
-            "structure_tokens": [list(range(20)) for _ in range(5)],
+            "structure_tokens": [list(range(len("MKTAYIAKQRQISFVKSHFS"))) for _ in range(5)],
         }
     )
     eval_val_data.to_parquet(eval_val_parquet, index=False)
@@ -152,7 +152,7 @@ def test_eval_harness_multiple_eval_datasets(tmp_path):
         {
             "sequence_id": [f"test_{i}" for i in range(5)],
             "sequence": ["MKTAYIAKQRQISFVKSHFS" for _ in range(5)],
-            "structure_tokens": [list(range(20)) for _ in range(5)],
+            "structure_tokens": [list(range(len("MKTAYIAKQRQISFVKSHFS"))) for _ in range(5)],
         }
     )
     eval_test_data.to_parquet(eval_test_parquet, index=False)

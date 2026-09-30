@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from stok.utils.losses import fape_loss
@@ -86,9 +87,8 @@ def test_fape_nan_in_predictions_all_nan_returns_zero_and_finite():
     true_coords = _stable_ncac_coords(B, L)
     pred_coords = torch.full_like(true_coords, float("nan"))
 
-    loss = fape_loss(pred_coords, true_coords)
-    assert torch.isfinite(loss)
-    assert torch.allclose(loss, torch.tensor(0.0, dtype=loss.dtype), atol=0.0, rtol=0.0)
+    with pytest.raises(ValueError, match="Nonfinite predictions"):
+        fape_loss(pred_coords, true_coords)
 
 
 def test_fape_nan_in_predictions_partial():
@@ -101,8 +101,46 @@ def test_fape_nan_in_predictions_partial():
     pred_coords[:, : L // 2, :, :] = true_coords[:, : L // 2, :, :] + delta[:, : L // 2, :, :]
     pred_coords[:, L // 2 :, :, :] = float("nan")
 
-    loss = fape_loss(pred_coords, true_coords)
-    assert torch.isfinite(loss)
-    # With perturbations on valid half, expect positive loss
-    assert loss.item() > 0.0
+    with pytest.raises(ValueError, match="Nonfinite predictions"):
+        fape_loss(pred_coords, true_coords)
 
+
+@pytest.mark.parametrize('amp', [False, True])
+def test_nan_padding_matches_unpadded_gradients(amp):
+    torch.manual_seed(42)
+    true = _stable_ncac_coords(1, 5)
+    true[:, -1] = float('nan')
+    pred = torch.randn(1, 5, 3, 3, requires_grad=True)
+    reference = pred[:, :4].detach().clone().requires_grad_()
+    with torch.autocast('cpu', dtype=torch.bfloat16, enabled=amp):
+        loss = fape_loss(pred, true, residue_mask=torch.ones(1, 5, dtype=torch.bool))
+        expected = fape_loss(reference, true[:, :4])
+    loss.backward()
+    expected.backward()
+    torch.testing.assert_close(loss, expected)
+    assert torch.isfinite(pred.grad).all()
+    torch.testing.assert_close(pred.grad[:, :4], reference.grad)
+    assert torch.count_nonzero(pred.grad[:, -1]) == 0
+
+
+def test_fape_empty_targets_connected_zero_and_no_batch_dilution():
+    true = _stable_ncac_coords(2, 5)
+    true[1] = float('nan')
+    pred = torch.randn(2, 5, 3, 3, requires_grad=True)
+    torch.testing.assert_close(fape_loss(pred, true), fape_loss(pred[:1], true[:1]))
+    empty = fape_loss(pred, torch.full_like(true, float('nan')))
+    empty.backward()
+    assert empty.item() == 0
+    assert torch.equal(pred.grad, torch.zeros_like(pred))
+
+
+def test_fape_gradient_through_decoder_adapter():
+    from stok.utils.decoding import decode_token_aligned_coords
+    mask = torch.tensor([[False, True, True, True, False]])
+    codes = torch.randn(1, 5, 9, requires_grad=True)
+    pred = decode_token_aligned_coords(lambda x, mask: x, codes, mask)
+    true = _stable_ncac_coords(1, 5)
+    loss = fape_loss(pred, true, mask)
+    loss.backward()
+    assert torch.isfinite(codes.grad).all()
+    assert codes.grad.abs().sum() > 0

@@ -13,7 +13,7 @@ from click.testing import CliRunner
 from omegaconf import OmegaConf
 
 from stok.cli.cli import cli
-from stok.eval.registry import build_metrics, _get_dataset_has_coords
+from stok.eval.registry import build_metrics
 from stok.eval.metrics.contact import PrecisionAtLMetric, _compute_contact_map
 from stok.data.structure_dataset import StructureFolderDataset
 from stok.data.collate import mlm_collate
@@ -204,7 +204,7 @@ class TestPAtLMetricDirectly:
         metric = PrecisionAtLMetric(
             contact_threshold=8.0,
             min_seq_sep=3,
-            use_attention=True,  # Will try attention first
+            use_attention=False,  # Explicit similarity mode
         )
 
         B, L = 2, 32
@@ -212,7 +212,7 @@ class TestPAtLMetricDirectly:
         labels = torch.full((B, L), -100)
         coords = torch.randn(B, L, 3, 3) * 10.0
 
-        # No attention weights provided - should fall back to logits
+        # Explicit similarity mode uses logits when hidden states are absent
         outputs = {
             "logits": torch.randn(B, L, 32),
             "loss": torch.tensor(2.5),
@@ -236,24 +236,6 @@ class TestPAtLMetricDirectly:
 class TestMetricBuildingWithStructureFolder:
     """Test that metrics are correctly built for structure folder datasets."""
 
-    def test_get_dataset_has_coords_structure_format(self, tmp_path):
-        """Verify _get_dataset_has_coords returns True for structure format."""
-        cfg = OmegaConf.create(
-            {
-                "data": {
-                    "eval": {
-                        "cameo": {
-                            "path": str(tmp_path),
-                            "format": "structure",
-                        }
-                    }
-                }
-            }
-        )
-
-        has_coords = _get_dataset_has_coords(cfg, "cameo", default_has_coords=False)
-        assert has_coords is True, "Structure format should have coords"
-
     def test_p_at_l_metric_built_for_mlm_with_coords(self, tmp_path):
         """Verify p_at_l metric is built when conditions are met."""
         cfg = OmegaConf.create(
@@ -274,7 +256,7 @@ class TestMetricBuildingWithStructureFolder:
             cfg=cfg,
             objective="mlm",
             decoder=None,
-            has_coords=False,  # Default is False, but structure format overrides
+            has_coords=True,  # Actual loaded dataset capability
             eval_name="cameo",
         )
 
@@ -376,6 +358,7 @@ class TestEvaluatorAttentionPropagation:
         )
 
         # Check that metrics were built correctly
+        evaluator.has_coords = True
         metrics = evaluator._get_metrics("cameo")
         metric_names = [m.name for m in metrics]
 
@@ -454,6 +437,7 @@ class TestEvaluatorAttentionPropagation:
         )
 
         # Check that metrics were built with correct num_layers
+        evaluator.has_coords = True
         metrics = evaluator._get_metrics("cameo")
         p_at_l = next(
             (m for m in metrics if m.name == "p_at_l"),

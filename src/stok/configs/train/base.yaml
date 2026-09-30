@@ -12,11 +12,13 @@ scheduler:
 
 seed: 1337
 
+# All step budgets/cadences count successful optimizer updates.
+# epochs, when set, governs passes; final partial accumulation windows are flushed.
 # step/epoch governance
 num_steps: 10000
 epochs: null
 
-# intervals (in steps)
+# intervals (in successful optimizer updates)
 log_steps: 50
 checkpoint_steps: null
 
@@ -105,14 +107,14 @@ eval:
 
     # structure metrics (require decoder and coordinates)
     lddt:
-      enabled: false  # Enable via decoding.eval_enabled or per-dataset override
+      enabled: null  # Auto-enable with decoding.eval_enabled; explicit bool wins
       # objectives: [codebook]
       # requires_decoder: true
       # requires_coords: true
     tm_score:
-      enabled: false
+      enabled: null
     rmsd:
-      enabled: false
+      enabled: null
     fape:
       enabled: false
 
@@ -132,6 +134,7 @@ eval:
       num_layers: null  # null = 10% of encoder layers (rounded up); or set explicit int
       # logistic regression mode
       use_logistic_regression: false
+      logreg_max_feature_bytes: 1073741824  # retained features+labels across ranks, not attention peak
       logreg_n_train: 20       # number of structures for training per iteration
       logreg_lambda: 0.15      # L1 regularization strength (sklearn C = 1/lambda)
       logreg_n_iterations: 5   # number of random train/test sampling iterations

@@ -1,209 +1,115 @@
-"""Classification-based evaluation metrics."""
-
-from __future__ import annotations
-
+"""Token-weighted classification metrics with explicit observation counts."""
 import math
-from typing import ClassVar
-
 import torch
-from omegaconf import DictConfig
-
 from stok.eval.base import MetricBase
 from stok.eval.registry import register_metric
+from stok.utils.losses import token_ce_loss
+
+
+def _valid_labels(labels, tokens, cfg):
+    if labels is None:
+        return torch.zeros_like(tokens, dtype=torch.bool)
+    return labels != cfg.model.classifier.get("ignore_index", -100)
 
 
 @register_metric("accuracy")
 class AccuracyMetric(MetricBase):
-    """Token-level classification accuracy metric.
+    name = "acc"
+    objectives = {"codebook"}
 
-    Computes the fraction of correctly predicted tokens, ignoring positions
-    marked with the ignore_index.
-    """
-
-    name: ClassVar[str] = "acc"
-    objectives: ClassVar[set[str] | None] = {"codebook"}
-    requires_decoder: ClassVar[bool] = False
-    requires_coords: ClassVar[bool] = False
-
-    def __init__(self, ignore_index: int = -100, **kwargs):
-        """Initialize accuracy metric.
-
-        Args:
-            ignore_index: Label index to ignore in accuracy computation.
-            **kwargs: Additional arguments (ignored).
-        """
+    def __init__(self, ignore_index=-100, **kwargs):
         super().__init__(**kwargs)
         self.ignore_index = ignore_index
-        self._correct: float = 0.0
-        self._total: float = 0.0
+        self.reset()
 
-    def update(
-        self,
-        outputs: dict,
-        tokens: torch.Tensor,
-        labels: torch.Tensor,
-        coords: torch.Tensor | None,
-        cfg: DictConfig,
-    ) -> None:
-        """Accumulate accuracy from a batch."""
+    def update(self, outputs, tokens, labels, coords, cfg):
+        valid = _valid_labels(labels, tokens, cfg)
+        count = int(valid.sum())
+        self.num_skipped += valid.numel() - count
+        if not count:
+            return
         logits = outputs["logits"]
-        ignore_idx = cfg.model.classifier.get("ignore_index", self.ignore_index)
+        if ((labels[valid] < 0) | (labels[valid] >= logits.size(-1))).any():
+            self.num_failed += count
+            raise ValueError("Invalid target class ID in accuracy")
+        if not torch.isfinite(logits[valid]).all():
+            self.num_failed += count
+            raise ValueError("Nonfinite classification predictions")
+        self._correct += int((logits.argmax(-1)[valid] == labels[valid]).sum())
+        self._total += count
+        self.num_valid += count
 
-        with torch.no_grad():
-            preds = logits.argmax(dim=-1)
-            mask = labels != ignore_idx
-            if mask.sum().item() > 0:
-                self._correct += (preds[mask] == labels[mask]).sum().item()
-                self._total += mask.sum().item()
+    def compute(self):
+        result = self.diagnostics()
+        if self._total and not self.num_failed:
+            result[self.name] = self._correct / self._total
+        return result
 
-    def compute(self) -> dict[str, float]:
-        """Compute accuracy from accumulated values."""
-        acc = self._correct / max(1.0, self._total)
-        return {self.name: acc}
+    def reset(self):
+        self._correct = self._total = 0.
+        self.reset_population()
 
-    def reset(self) -> None:
-        """Reset accumulated state."""
-        self._correct = 0.0
-        self._total = 0.0
+    def state_tensors(self):
+        return [torch.tensor([self._correct, self._total, *self.population_values()], dtype=torch.float64)]
 
-    def state_tensors(self) -> list[torch.Tensor]:
-        """Return state as tensors for distributed aggregation."""
-        return [torch.tensor([self._correct, self._total])]
-
-    def load_state_tensors(self, tensors: list[torch.Tensor]) -> None:
-        """Load state from gathered tensors."""
+    def load_state_tensors(self, tensors):
         if tensors:
-            t = tensors[0]
-            self._correct = float(t[0].item())
-            self._total = float(t[1].item())
+            self._correct, self._total = tensors[0][:2].tolist()
+            self.load_population(tensors[0], self._total)
 
 
 @register_metric("masked_accuracy")
-class MaskedAccuracyMetric(MetricBase):
-    """Masked token accuracy for MLM pre-training.
-
-    Identical computation to AccuracyMetric but restricted to MLM objective
-    and uses a different metric name for clarity.
-    """
-
-    name: ClassVar[str] = "mask_acc"
-    objectives: ClassVar[set[str] | None] = {"mlm"}
-    requires_decoder: ClassVar[bool] = False
-    requires_coords: ClassVar[bool] = False
-
-    def __init__(self, ignore_index: int = -100, **kwargs):
-        """Initialize masked accuracy metric.
-
-        Args:
-            ignore_index: Label index to ignore in accuracy computation.
-            **kwargs: Additional arguments (ignored).
-        """
-        super().__init__(**kwargs)
-        self.ignore_index = ignore_index
-        self._correct: float = 0.0
-        self._total: float = 0.0
-
-    def update(
-        self,
-        outputs: dict,
-        tokens: torch.Tensor,
-        labels: torch.Tensor,
-        coords: torch.Tensor | None,
-        cfg: DictConfig,
-    ) -> None:
-        """Accumulate masked accuracy from a batch."""
-        logits = outputs["logits"]
-        ignore_idx = cfg.model.classifier.get("ignore_index", self.ignore_index)
-
-        with torch.no_grad():
-            preds = logits.argmax(dim=-1)
-            mask = labels != ignore_idx
-            if mask.sum().item() > 0:
-                self._correct += (preds[mask] == labels[mask]).sum().item()
-                self._total += mask.sum().item()
-
-    def compute(self) -> dict[str, float]:
-        """Compute masked accuracy from accumulated values."""
-        acc = self._correct / max(1.0, self._total)
-        return {self.name: acc}
-
-    def reset(self) -> None:
-        """Reset accumulated state."""
-        self._correct = 0.0
-        self._total = 0.0
-
-    def state_tensors(self) -> list[torch.Tensor]:
-        """Return state as tensors for distributed aggregation."""
-        return [torch.tensor([self._correct, self._total])]
-
-    def load_state_tensors(self, tensors: list[torch.Tensor]) -> None:
-        """Load state from gathered tensors."""
-        if tensors:
-            t = tensors[0]
-            self._correct = float(t[0].item())
-            self._total = float(t[1].item())
+class MaskedAccuracyMetric(AccuracyMetric):
+    name = "mask_acc"
+    objectives = {"mlm"}
 
 
 @register_metric("perplexity")
 class PerplexityMetric(MetricBase):
-    """Perplexity metric computed as exp(cross-entropy loss).
-
-    Applies to both MLM and codebook objectives.
-    """
-
-    name: ClassVar[str] = "ppl"
-    objectives: ClassVar[set[str] | None] = None  # Works for all objectives
-    requires_decoder: ClassVar[bool] = False
-    requires_coords: ClassVar[bool] = False
+    name = "ppl"
 
     def __init__(self, **kwargs):
-        """Initialize perplexity metric.
-
-        Args:
-            **kwargs: Additional arguments (ignored).
-        """
         super().__init__(**kwargs)
-        self._loss_sum: float = 0.0
-        self._batch_count: float = 0.0
+        self.reset()
 
-    def update(
-        self,
-        outputs: dict,
-        tokens: torch.Tensor,
-        labels: torch.Tensor,
-        coords: torch.Tensor | None,
-        cfg: DictConfig,
-    ) -> None:
-        """Accumulate loss for perplexity computation."""
-        # Use classification_loss if available (more specific), else total loss
-        loss_tensor = outputs.get("classification_loss", outputs.get("loss"))
-        if loss_tensor is not None:
-            with torch.no_grad():
-                self._loss_sum += float(loss_tensor.item())
-                self._batch_count += 1.0
-
-    def compute(self) -> dict[str, float]:
-        """Compute perplexity from accumulated loss."""
-        if self._batch_count > 0:
-            avg_loss = self._loss_sum / self._batch_count
-            ppl = math.exp(avg_loss) if avg_loss < 100 else float("inf")
+    def update(self, outputs, tokens, labels, coords, cfg):
+        valid = _valid_labels(labels, tokens, cfg)
+        count = int(valid.sum())
+        self.num_skipped += valid.numel() - count
+        if not count:
+            return
+        if "logits" in outputs:
+            loss_sum = token_ce_loss(outputs["logits"], labels,
+                cfg.model.classifier.get("ignore_index", -100), reduction="sum")
         else:
-            ppl = float("inf")
-        return {self.name: ppl}
+            # Compatibility for callers supplying a mean CE instead of logits.
+            loss_sum = outputs.get("classification_loss", outputs.get("loss"))
+            if loss_sum is None:
+                raise ValueError("Perplexity requires logits or classification loss")
+            loss_sum = loss_sum * count
+        if not torch.isfinite(loss_sum):
+            self.num_failed += count
+            raise ValueError("Nonfinite classification loss")
+        self._loss_sum += float(loss_sum)
+        self._token_count += count
+        self.num_valid += count
 
-    def reset(self) -> None:
-        """Reset accumulated state."""
-        self._loss_sum = 0.0
-        self._batch_count = 0.0
+    def compute(self):
+        result = self.diagnostics()
+        if self._token_count and not self.num_failed:
+            mean = self._loss_sum / self._token_count
+            result[self.name] = math.exp(mean) if mean < 709 else float("inf")
+        return result
 
-    def state_tensors(self) -> list[torch.Tensor]:
-        """Return state as tensors for distributed aggregation."""
-        return [torch.tensor([self._loss_sum, self._batch_count])]
+    def reset(self):
+        self._loss_sum = 0.
+        self._token_count = 0
+        self.reset_population()
 
-    def load_state_tensors(self, tensors: list[torch.Tensor]) -> None:
-        """Load state from gathered tensors."""
+    def state_tensors(self):
+        return [torch.tensor([self._loss_sum, self._token_count, *self.population_values()], dtype=torch.float64)]
+
+    def load_state_tensors(self, tensors):
         if tensors:
-            t = tensors[0]
-            self._loss_sum = float(t[0].item())
-            self._batch_count = float(t[1].item())
-
+            self._loss_sum, self._token_count = tensors[0][:2].tolist()
+            self.load_population(tensors[0], self._token_count)
