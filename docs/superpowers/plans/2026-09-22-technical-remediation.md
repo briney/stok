@@ -298,7 +298,7 @@ Execute the listed order for a simple serial workflow. Tasks 4, 5, and 11 are in
 
 The probe accepts `--case coverage|eval-tail`, `--output PATH`, `--workers N`, and `--accum N`, and writes `rank_{rank}.json` with `ids`, `micro_steps`, and `optimizer_steps`. Task 6 adds `empty-labels` when its implementation exists. Create source data once before launching ranks; every process must consume the same fixture.
 
-- [ ] Add `coverage` and `eval-tail` probe cases emitting rank-local IDs for single-file Parquet, sharded Parquet, map mixtures, and map/iterable mixtures. Use the same typed schema for all sources and test workers 0 and 2. For evaluation N=5 and two ranks, assert these identities rather than just counts:
+- [x] Add `coverage` and `eval-tail` probe cases emitting rank-local IDs for single-file Parquet, sharded Parquet, map mixtures, and map/iterable mixtures. Use the same typed schema for all sources and test workers 0 and 2. For evaluation N=5 and two ranks, assert these identities rather than just counts:
 
   ```python
   import json
@@ -311,8 +311,8 @@ The probe accepts `--case coverage|eval-tail`, `--output PATH`, `--workers N`, a
   ```
 
   Also test N=1 across two ranks and a train size below the global worker/batch minimum. Launch the probe with the same `subprocess.run`/torch-distributed-run pattern and timeout as Task 1, replacing `-m stok.train` with `-m tests.utils.distributed_probe` and supplying the arguments above.
-- [ ] Run `pytest tests/integration/test_distributed_training.py -q`; demonstrate coverage/epoch differences in the old preparation path.
-- [ ] Prepare only model/optimizer through Accelerate. Propagate Accelerator initialization errors instead of silently falling back to independent processes, and validate the supported backend before work begins. Install native samplers/stream partitioning described in the design, move tensors explicitly on every path, and derive steps from the resulting loader. Partition iterable positions globally across workers, not separately within each shard. For an ordered stream, the ownership rule is:
+- [x] Run `pytest tests/integration/test_distributed_training.py -q`; demonstrate coverage/epoch differences in the old preparation path.
+- [x] Prepare only model/optimizer through Accelerate. Propagate Accelerator initialization errors instead of silently falling back to independent processes, and validate the supported backend before work begins. Install native samplers/stream partitioning described in the design, move tensors explicitly on every path, and derive steps from the resulting loader. Partition iterable positions globally across workers, not separately within each shard. For an ordered stream, the ownership rule is:
 
   ```python
   usable = total if evaluating else (total // global_batch) * global_batch
@@ -323,8 +323,8 @@ The probe accepts `--case coverage|eval-tail`, `--output PATH`, `--workers N`, a
   ```
 
   Apply ownership to deterministic shuffled positions, not inconsistent rank-local shuffles. Mixture repetitions are expected; verify the combined drawn stream matches the single-rank reference, not uniqueness of underlying protein IDs. Do not double-partition nested mixture children.
-- [ ] Use unwrapped evaluation forwards for uneven rank lengths. All ranks reduce fixed metric state with sum exactly once at the end, including empty ranks. Route variable state through one object gather. Test buffers/model mode and restore the model's incoming train/eval mode afterward.
-- [ ] Run distributed tests, iterable unit tests, and multi-train/multi-eval integration tests. Commit: `fix: make native loaders the sole distributed data owner`.
+- [x] Use unwrapped evaluation forwards for uneven rank lengths. All ranks reduce fixed metric state with sum exactly once at the end, including empty ranks. Route variable state through one object gather. Test buffers/model mode and restore the model's incoming train/eval mode afterward.
+- [x] Run distributed tests, iterable unit tests, and multi-train/multi-eval integration tests. Commit: `fix: make native loaders the sole distributed data owner`.
 
 ## Task 6 — Normalize accumulation windows and advance successful updates
 
@@ -709,3 +709,4 @@ verification is recorded below and committed separately.
 | 2 | Coordinate schema validation plus strict collator label lengths before truncation; updated stale short-label fixtures. Positional gaps, mixed coordinates, biological masks, and differentiable residue-only decoding retained. | Two new label-length cases failed before the fix. Named alignment/Parquet/decoder/structure/mixed-shard modules: **128 passed**. |
 | 3 | Verified sanitized geometric operands, finite masked gradients, connected empty FAPE, valid-only protein means, and unavailable underdetermined alignment. Existing implementation retained. | FAPE, structural metrics/independent references, and decoder/FAPE integration: **19 passed, 2 accelerator-only skipped**. Fresh accelerator checks belong to Task 14. |
 | 4 | Retained connected zero loss/gradients for empty supervision, class bounds, and mean/sum CE. Added the explicitly requested finite-FP16 reduction-overflow regression for both reductions; it passes the existing multiply-before-sum implementation. | CE, MLM model, and Parquet modules: **94 passed**. |
+| 5 | Verified native sampler/stream ownership, rank/worker batching, mixture streams, persistent-worker epoch shuffling, unpadded evaluation, supported backends, and restored model mode. Existing implementation retained. | Task 1's real distributed checks cover ownership and uneven/empty evaluation ranks; iterable and multi-train/multi-eval modules: **6 passed**. |
