@@ -25,6 +25,8 @@ def token_ce_loss(
     if invalid.any():
         labels_flat = labels_flat.clone()
         labels_flat[invalid] = ignore_index
+    if (labels_flat == ignore_index).all():
+        return (logits_flat * 0).sum()
     return F.cross_entropy(
         logits_flat,
         labels_flat,

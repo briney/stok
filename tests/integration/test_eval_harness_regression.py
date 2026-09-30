@@ -13,26 +13,26 @@ from stok.cli.cli import cli
 def test_eval_harness_produces_expected_metrics_codebook(tmp_path):
     """Test that eval harness produces expected metrics for codebook objective."""
     # Create minimal train/eval data
-    train_csv = tmp_path / "train.csv"
-    eval_csv = tmp_path / "eval.csv"
+    train_parquet = tmp_path / "train.parquet"
+    eval_parquet = tmp_path / "eval.parquet"
 
     train_data = pd.DataFrame(
         {
-            "pid": [f"train_{i}" for i in range(10)],
-            "protein_sequence": ["MKTAYIAKQRQISFVKSHFSRQ" for _ in range(10)],
-            "indices": ["0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20" for _ in range(10)],
+            "sequence_id": [f"train_{i}" for i in range(10)],
+            "sequence": ["MKTAYIAKQRQISFVKSHFSRQ" for _ in range(10)],
+            "structure_tokens": [list(range(22)) for _ in range(10)],
         }
     )
-    train_data.to_csv(train_csv, index=False)
+    train_data.to_parquet(train_parquet, index=False)
 
     eval_data = pd.DataFrame(
         {
-            "pid": [f"eval_{i}" for i in range(5)],
-            "protein_sequence": ["MKTAYIAKQRQISFVKSHFS" for _ in range(5)],
-            "indices": ["0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17" for _ in range(5)],
+            "sequence_id": [f"eval_{i}" for i in range(5)],
+            "sequence": ["MKTAYIAKQRQISFVKSHFS" for _ in range(5)],
+            "structure_tokens": [list(range(20)) for _ in range(5)],
         }
     )
-    eval_data.to_csv(eval_csv, index=False)
+    eval_data.to_parquet(eval_parquet, index=False)
 
     runner = CliRunner()
     overrides = [
@@ -48,8 +48,8 @@ def test_eval_harness_produces_expected_metrics_codebook(tmp_path):
         "data.max_len=32",
         "data.num_workers=0",
         "data.pin_memory=false",
-        f"data.train={train_csv.as_posix()}",
-        f"+data.eval.validation={eval_csv.as_posix()}",
+        f"data.train={train_parquet.as_posix()}",
+        f"+data.eval.validation={eval_parquet.as_posix()}",
         "train.num_steps=4",
         "train.log_steps=2",
         "train.eval.steps=2",
@@ -70,24 +70,24 @@ def test_eval_harness_produces_expected_metrics_codebook(tmp_path):
 def test_eval_harness_produces_expected_metrics_mlm(tmp_path):
     """Test that eval harness produces expected metrics for MLM objective."""
     # Create minimal train/eval data (no indices needed for MLM)
-    train_csv = tmp_path / "train.csv"
-    eval_csv = tmp_path / "eval.csv"
+    train_parquet = tmp_path / "train.parquet"
+    eval_parquet = tmp_path / "eval.parquet"
 
     train_data = pd.DataFrame(
         {
-            "pid": [f"train_{i}" for i in range(10)],
-            "protein_sequence": ["MKTAYIAKQRQISFVKSHFSRQ" for _ in range(10)],
+            "sequence_id": [f"train_{i}" for i in range(10)],
+            "sequence": ["MKTAYIAKQRQISFVKSHFSRQ" for _ in range(10)],
         }
     )
-    train_data.to_csv(train_csv, index=False)
+    train_data.to_parquet(train_parquet, index=False)
 
     eval_data = pd.DataFrame(
         {
-            "pid": [f"eval_{i}" for i in range(5)],
-            "protein_sequence": ["MKTAYIAKQRQISFVKSHFS" for _ in range(5)],
+            "sequence_id": [f"eval_{i}" for i in range(5)],
+            "sequence": ["MKTAYIAKQRQISFVKSHFS" for _ in range(5)],
         }
     )
-    eval_data.to_csv(eval_csv, index=False)
+    eval_data.to_parquet(eval_parquet, index=False)
 
     runner = CliRunner()
     overrides = [
@@ -103,8 +103,8 @@ def test_eval_harness_produces_expected_metrics_mlm(tmp_path):
         "data.max_len=32",
         "data.num_workers=0",
         "data.pin_memory=false",
-        f"data.train={train_csv.as_posix()}",
-        f"+data.eval.validation={eval_csv.as_posix()}",
+        f"data.train={train_parquet.as_posix()}",
+        f"+data.eval.validation={eval_parquet.as_posix()}",
         "train.num_steps=4",
         "train.log_steps=2",
         "train.eval.steps=2",
@@ -126,36 +126,36 @@ def test_eval_harness_produces_expected_metrics_mlm(tmp_path):
 def test_eval_harness_multiple_eval_datasets(tmp_path):
     """Test that eval harness works with multiple eval datasets."""
     # Create minimal train/eval data
-    train_csv = tmp_path / "train.csv"
-    eval_val_csv = tmp_path / "eval_val.csv"
-    eval_test_csv = tmp_path / "eval_test.csv"
+    train_parquet = tmp_path / "train.parquet"
+    eval_val_parquet = tmp_path / "eval_val.parquet"
+    eval_test_parquet = tmp_path / "eval_test.parquet"
 
     train_data = pd.DataFrame(
         {
-            "pid": [f"train_{i}" for i in range(10)],
-            "protein_sequence": ["MKTAYIAKQRQISFVKSHFSRQ" for _ in range(10)],
-            "indices": ["0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20" for _ in range(10)],
+            "sequence_id": [f"train_{i}" for i in range(10)],
+            "sequence": ["MKTAYIAKQRQISFVKSHFSRQ" for _ in range(10)],
+            "structure_tokens": [list(range(22)) for _ in range(10)],
         }
     )
-    train_data.to_csv(train_csv, index=False)
+    train_data.to_parquet(train_parquet, index=False)
 
     eval_val_data = pd.DataFrame(
         {
-            "pid": [f"val_{i}" for i in range(5)],
-            "protein_sequence": ["MKTAYIAKQRQISFVKSHFS" for _ in range(5)],
-            "indices": ["0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17" for _ in range(5)],
+            "sequence_id": [f"val_{i}" for i in range(5)],
+            "sequence": ["MKTAYIAKQRQISFVKSHFS" for _ in range(5)],
+            "structure_tokens": [list(range(20)) for _ in range(5)],
         }
     )
-    eval_val_data.to_csv(eval_val_csv, index=False)
+    eval_val_data.to_parquet(eval_val_parquet, index=False)
 
     eval_test_data = pd.DataFrame(
         {
-            "pid": [f"test_{i}" for i in range(5)],
-            "protein_sequence": ["MKTAYIAKQRQISFVKSHFS" for _ in range(5)],
-            "indices": ["0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17" for _ in range(5)],
+            "sequence_id": [f"test_{i}" for i in range(5)],
+            "sequence": ["MKTAYIAKQRQISFVKSHFS" for _ in range(5)],
+            "structure_tokens": [list(range(20)) for _ in range(5)],
         }
     )
-    eval_test_data.to_csv(eval_test_csv, index=False)
+    eval_test_data.to_parquet(eval_test_parquet, index=False)
 
     runner = CliRunner()
     overrides = [
@@ -171,9 +171,9 @@ def test_eval_harness_multiple_eval_datasets(tmp_path):
         "data.max_len=32",
         "data.num_workers=0",
         "data.pin_memory=false",
-        f"data.train={train_csv.as_posix()}",
-        f"+data.eval.validation={eval_val_csv.as_posix()}",
-        f"+data.eval.test={eval_test_csv.as_posix()}",
+        f"data.train={train_parquet.as_posix()}",
+        f"+data.eval.validation={eval_val_parquet.as_posix()}",
+        f"+data.eval.test={eval_test_parquet.as_posix()}",
         "train.num_steps=4",
         "train.log_steps=2",
         "train.eval.steps=2",

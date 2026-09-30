@@ -22,6 +22,7 @@ from torch.utils.data import (
 
 from stok.data.collate import mlm_collate
 from stok.data.dataset import (
+    PARQUET_EXTENSIONS,
     DummyMLMDataset,
     DummySequenceDataset,
     InterleavedIterableDataset,
@@ -308,12 +309,12 @@ def _tokenize_and_align(
         tokens, labels = zip(*batch)  # type: ignore[arg-type]
         return torch.stack(tokens, dim=0), torch.stack(labels, dim=0)
 
-    # else TokenizedDataset dicts with 'seq' and optionally 'indices'
+    # else TokenizedDataset dicts with 'sequence' and optionally 'structure_tokens'
     input_ids = []
     label_ids = []
     coords_batch: list[torch.Tensor] = []
     for item in batch:  # type: ignore[assignment]
-        seq: str = item["seq"]
+        seq: str = item["sequence"]
 
         enc = tokenizer(
             seq,
@@ -329,16 +330,12 @@ def _tokenize_and_align(
         L = ids.size(0)
         labels = torch.full((L,), ignore_index, dtype=torch.long)
 
-        # Handle indices if present (may be absent for structure folder datasets)
-        indices_raw = item.get("indices")
-        if indices_raw is not None:
-            indices: torch.Tensor = indices_raw.long()
-            # copy only non-negative indices; positions 1..(1+copy_len) receive labels,
-            # respecting truncation before EOS
-            valid_indices = indices[indices >= 0]
-            copy_len = min(int(valid_indices.numel()), max(0, L - 2))
-            if copy_len > 0:
-                labels[1 : 1 + copy_len] = valid_indices[:copy_len]
+        # Null labels stay at their original residue positions.
+        structure_tokens = item.get("structure_tokens")
+        if structure_tokens is not None:
+            copy_len = min(len(structure_tokens), len(seq), max(0, L - 2))
+            values = structure_tokens[:copy_len]
+            labels[1 : 1 + copy_len] = values.masked_fill(values < 0, ignore_index)
 
         input_ids.append(ids)
         label_ids.append(labels)
@@ -569,16 +566,17 @@ def _build_dataloaders(
     def _pick_dataset(
         path: str,
         load_coords: bool,
-        require_indices: bool = True,
+        require_structure_tokens: bool = True,
         *,
         dataset_format: str | None = None,
         chain_id: str | None = None,
         recursive: bool = False,
+        allow_structure_folders: bool = False,
     ):
         p = Path(path)
 
         # Explicit structure folder format
-        if dataset_format == "structure":
+        if allow_structure_folders and dataset_format == "structure":
             from stok.data.structure_dataset import StructureFolderDataset
 
             return StructureFolderDataset(
@@ -590,8 +588,9 @@ def _build_dataloaders(
 
         # heuristic: directory containing parquet shards -> Iterable; else map-style
         if p.is_dir():
-            has_parquet = (
-                any(p.glob("*.parquet")) or any(p.glob("*.parq")) or any(p.glob("*.pq"))
+            has_parquet = any(
+                f.is_file() and f.suffix.lower() in PARQUET_EXTENSIONS
+                for f in p.iterdir()
             )
             if has_parquet:
                 shuffle_shards = bool(getattr(cfg.data, "shuffle_shards", True))
@@ -602,14 +601,14 @@ def _build_dataloaders(
                     shuffle_shards=shuffle_shards,
                     shuffle_rows=shuffle_rows,
                     load_coords=bool(load_coords),
-                    require_indices=require_indices,
+                    require_structure_tokens=require_structure_tokens,
                 )
 
             # Auto-detect structure folder (no parquet, has structure files)
             has_structures = any(
                 f.suffix.lower() in structure_exts for f in p.iterdir() if f.is_file()
             )
-            if has_structures:
+            if allow_structure_folders and has_structures:
                 from stok.data.structure_dataset import StructureFolderDataset
 
                 return StructureFolderDataset(
@@ -618,12 +617,13 @@ def _build_dataloaders(
                     chain_id=chain_id,
                     recursive=recursive,
                 )
+            raise ValueError(f"{p}: expected a directory containing Parquet shards")
 
         return TokenizedDataset(
             dataset_path=str(path),
             max_length=max_len,
             load_coords=bool(load_coords),
-            require_indices=require_indices,
+            require_structure_tokens=require_structure_tokens,
         )
 
     if len(train_configs) > 0:
@@ -663,7 +663,7 @@ def _build_dataloaders(
             train_ds = _pick_dataset(
                 str(train_configs[0]["path"]),
                 bool(user_load_coords) if not is_mlm else False,
-                require_indices=not is_mlm,
+                require_structure_tokens=not is_mlm,
             )
         else:
             # Multiple datasets with fractions
@@ -673,7 +673,7 @@ def _build_dataloaders(
                 ds = _pick_dataset(
                     str(tcfg["path"]),
                     bool(t_load_coords) if not is_mlm else False,
-                    require_indices=not is_mlm,
+                    require_structure_tokens=not is_mlm,
                 )
                 ds_pairs.append((ds, float(tcfg["fraction"])))
 
@@ -823,10 +823,11 @@ def _build_dataloaders(
         ds = _pick_dataset(
             eval_path,
             bool(eval_load_coords) if not is_mlm and not is_structure_format else True,
-            require_indices=not is_mlm and not is_structure_format,
+            require_structure_tokens=not is_mlm and not is_structure_format,
             dataset_format=eval_format,
             chain_id=eval_chain_id,
             recursive=eval_recursive,
+            allow_structure_folders=True,
         )
         eval_loaders[name] = DataLoader(
             ds,

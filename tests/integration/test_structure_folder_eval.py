@@ -59,31 +59,31 @@ def _create_structure_folder(tmp_path: Path, n_files: int = 5) -> Path:
     return folder
 
 
-def _create_train_csv(tmp_path: Path, n_rows: int, seq_len: int, indices_len: int) -> Path:
-    """Create a training CSV file with sequences and indices."""
-    train_csv = tmp_path / "train.csv"
+def _create_train_parquet(tmp_path: Path, n_rows: int, seq_len: int) -> Path:
+    """Create a training Parquet file with sequences and indices."""
+    train_parquet = tmp_path / "train.parquet"
     rows = []
     for i in range(n_rows):
         seq = random_protein_sequence(seq_len, seq_len)
-        indices = " ".join(str(j % 128) for j in range(indices_len))
-        rows.append({"pid": f"train_{i}", "protein_sequence": seq, "indices": indices})
+        structure_tokens = [j % 128 for j in range(len(seq))]
+        rows.append({"sequence_id": f"train_{i}", "sequence": seq, "structure_tokens": structure_tokens})
     
     df = pd.DataFrame(rows)
-    df.to_csv(train_csv, index=False)
-    return train_csv
+    df.to_parquet(train_parquet, index=False)
+    return train_parquet
 
 
-def _create_mlm_train_csv(tmp_path: Path, n_rows: int, seq_len: int) -> Path:
-    """Create a training CSV file for MLM (no indices)."""
-    train_csv = tmp_path / "train_mlm.csv"
+def _create_mlm_train_parquet(tmp_path: Path, n_rows: int, seq_len: int) -> Path:
+    """Create a training Parquet file for MLM (no indices)."""
+    train_parquet = tmp_path / "train_mlm.parquet"
     rows = []
     for i in range(n_rows):
         seq = random_protein_sequence(seq_len, seq_len)
-        rows.append({"pid": f"train_{i}", "protein_sequence": seq})
+        rows.append({"sequence_id": f"train_{i}", "sequence": seq})
     
     df = pd.DataFrame(rows)
-    df.to_csv(train_csv, index=False)
-    return train_csv
+    df.to_parquet(train_parquet, index=False)
+    return train_parquet
 
 
 class TestStructureFolderEvalExplicit:
@@ -94,13 +94,12 @@ class TestStructureFolderEvalExplicit:
         runner = CliRunner()
 
         max_len = 16
-        indices_len = max_len - 2
 
-        train_csv = _create_train_csv(tmp_path, n_rows=8, seq_len=12, indices_len=indices_len)
+        train_parquet = _create_train_parquet(tmp_path, n_rows=8, seq_len=12)
         struct_folder = _create_structure_folder(tmp_path, n_files=4)
 
         overrides = [
-            f"data.train={train_csv.as_posix()}",
+            f"data.train={train_parquet.as_posix()}",
             # Structure folder eval with explicit format
             f"+data.eval.struct_test.path={struct_folder.as_posix()}",
             "+data.eval.struct_test.format=structure",
@@ -140,13 +139,12 @@ class TestStructureFolderEvalAutoDetect:
         runner = CliRunner()
 
         max_len = 16
-        indices_len = max_len - 2
 
-        train_csv = _create_train_csv(tmp_path, n_rows=8, seq_len=12, indices_len=indices_len)
+        train_parquet = _create_train_parquet(tmp_path, n_rows=8, seq_len=12)
         struct_folder = _create_structure_folder(tmp_path, n_files=4)
 
         overrides = [
-            f"data.train={train_csv.as_posix()}",
+            f"data.train={train_parquet.as_posix()}",
             # Structure folder eval WITHOUT explicit format (should auto-detect)
             f"+data.eval.auto_test.path={struct_folder.as_posix()}",
             # Tiny model
@@ -182,12 +180,12 @@ class TestStructureFolderMLM:
 
         max_len = 16
 
-        train_csv = _create_mlm_train_csv(tmp_path, n_rows=8, seq_len=12)
+        train_parquet = _create_mlm_train_parquet(tmp_path, n_rows=8, seq_len=12)
         struct_folder = _create_structure_folder(tmp_path, n_files=4)
 
         overrides = [
             "train.objective=mlm",
-            f"data.train={train_csv.as_posix()}",
+            f"data.train={train_parquet.as_posix()}",
             # Structure folder eval
             f"+data.eval.struct_eval.path={struct_folder.as_posix()}",
             "+data.eval.struct_eval.format=structure",
@@ -224,13 +222,12 @@ class TestStructureFolderMetricWhitelist:
         runner = CliRunner()
 
         max_len = 16
-        indices_len = max_len - 2
 
-        train_csv = _create_train_csv(tmp_path, n_rows=8, seq_len=12, indices_len=indices_len)
+        train_parquet = _create_train_parquet(tmp_path, n_rows=8, seq_len=12)
         struct_folder = _create_structure_folder(tmp_path, n_files=4)
 
         overrides = [
-            f"data.train={train_csv.as_posix()}",
+            f"data.train={train_parquet.as_posix()}",
             # Structure folder eval with metric whitelist
             f"+data.eval.struct_metrics.path={struct_folder.as_posix()}",
             "+data.eval.struct_metrics.format=structure",
@@ -269,13 +266,12 @@ class TestStructureFolderChainId:
         runner = CliRunner()
 
         max_len = 16
-        indices_len = max_len - 2
 
-        train_csv = _create_train_csv(tmp_path, n_rows=8, seq_len=12, indices_len=indices_len)
+        train_parquet = _create_train_parquet(tmp_path, n_rows=8, seq_len=12)
         struct_folder = _create_structure_folder(tmp_path, n_files=4)
 
         overrides = [
-            f"data.train={train_csv.as_posix()}",
+            f"data.train={train_parquet.as_posix()}",
             # Structure folder eval with chain_id
             f"+data.eval.chain_test.path={struct_folder.as_posix()}",
             "+data.eval.chain_test.format=structure",

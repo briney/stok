@@ -143,10 +143,10 @@ def train_cmd(
     """Run encoder training.
 
     Forwards any unknown options/arguments as Hydra overrides.
-    Example: stok train train.num_steps=5000 data.train=/path/train.csv
+    Example: stok train train.num_steps=5000 data.train=/path/train.parquet
 
     Custom config files can be provided to override defaults:
-      stok train --model-config ./my_model.yaml data.train=/path/train.csv
+      stok train --model-config ./my_model.yaml data.train=/path/train.parquet
     """
     overrides = list(ctx.args)
     with as_file(files("stok").joinpath("configs")) as cfg_dir:

@@ -14,7 +14,7 @@ def test_tokenize_and_align_alignment_and_ignore_index():
     indices = torch.tensor([3, 1, 4, 1], dtype=torch.long)
 
     tokens, labels = _tokenize_and_align(
-        [{"seq": seq, "indices": indices}],
+        [{"sequence": seq, "structure_tokens": indices}],
         tokenizer,
         max_len=max_len,
         ignore_index=ignore_index,
@@ -47,7 +47,7 @@ def test_tokenize_and_align_ignores_negative_indices():
     raw_indices = torch.tensor([2, 5, 1, -1, -1, -1], dtype=torch.long)
 
     tokens, labels = _tokenize_and_align(
-        [{"seq": seq, "indices": raw_indices}],
+        [{"sequence": seq, "structure_tokens": raw_indices}],
         tokenizer,
         max_len=max_len,
         ignore_index=ignore_index,

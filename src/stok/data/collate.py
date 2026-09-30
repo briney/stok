@@ -44,7 +44,7 @@ def mlm_collate(
       - remaining are kept unchanged
 
     Args:
-        batch: List of dicts with 'seq' key containing amino acid sequences.
+        batch: List of dicts with 'sequence' key containing amino acid sequences.
             May also contain 'coords' key with coordinate tensors [L, 3, 3].
         tokenizer: Tokenizer instance for encoding sequences.
         max_len: Maximum sequence length.
@@ -69,7 +69,7 @@ def mlm_collate(
     coords_list: list[torch.Tensor] = []
 
     for item in batch:
-        seq: str = item["seq"]
+        seq: str = item["sequence"]
 
         enc = tokenizer(
             seq,

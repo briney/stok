@@ -103,20 +103,20 @@ def test_cli_train_mlm_logs_perplexity(tmp_path):
     assert "ppl" in result.output
 
 
-def test_cli_train_mlm_with_csv_dataset(tmp_path):
-    """Test MLM training with a real CSV dataset (without indices column)."""
-    # Create CSV with sequences only (no indices)
-    train_csv = tmp_path / "train.csv"
+def test_cli_train_mlm_with_parquet_dataset(tmp_path):
+    """Test MLM training with a real Parquet dataset (without indices column)."""
+    # Create Parquet with sequences only (no indices)
+    train_parquet = tmp_path / "train.parquet"
     df = pd.DataFrame(
         {
-            "pid": [f"train_{i}" for i in range(20)],
-            "protein_sequence": [
+            "sequence_id": [f"train_{i}" for i in range(20)],
+            "sequence": [
                 "MVLSPADKTNVKAAWGKVGAHAGEYGAEALERMFLSFPTT"[: 20 + (i % 10)]
                 for i in range(20)
             ],
         }
     )
-    df.to_csv(train_csv, index=False)
+    df.to_parquet(train_parquet, index=False)
 
     runner = CliRunner()
     overrides = [
@@ -132,7 +132,7 @@ def test_cli_train_mlm_with_csv_dataset(tmp_path):
         "data.max_len=64",
         "data.num_workers=0",
         "data.pin_memory=false",
-        f"data.train={train_csv.as_posix()}",
+        f"data.train={train_parquet.as_posix()}",
         "train.num_steps=3",
         "train.log_steps=1",
         "train.eval.steps=100000",
@@ -146,32 +146,32 @@ def test_cli_train_mlm_with_csv_dataset(tmp_path):
 
 
 def test_cli_train_mlm_with_eval_dataset(tmp_path):
-    """Test MLM training with train and eval CSV datasets."""
-    # Create train CSV
-    train_csv = tmp_path / "train.csv"
+    """Test MLM training with train and eval Parquet datasets."""
+    # Create train Parquet
+    train_parquet = tmp_path / "train.parquet"
     df_train = pd.DataFrame(
         {
-            "pid": [f"train_{i}" for i in range(20)],
-            "protein_sequence": [
+            "sequence_id": [f"train_{i}" for i in range(20)],
+            "sequence": [
                 "MVLSPADKTNVKAAWGKVGAHAGEYGAEALERMFLSFPTT"[: 20 + (i % 10)]
                 for i in range(20)
             ],
         }
     )
-    df_train.to_csv(train_csv, index=False)
+    df_train.to_parquet(train_parquet, index=False)
 
-    # Create eval CSV
-    eval_csv = tmp_path / "eval.csv"
+    # Create eval Parquet
+    eval_parquet = tmp_path / "eval.parquet"
     df_eval = pd.DataFrame(
         {
-            "pid": [f"eval_{i}" for i in range(10)],
-            "protein_sequence": [
+            "sequence_id": [f"eval_{i}" for i in range(10)],
+            "sequence": [
                 "MNIFEMLRIDKGLQVVAVKAPGFGDNRKNQLKDFLSFA"[: 15 + (i % 8)]
                 for i in range(10)
             ],
         }
     )
-    df_eval.to_csv(eval_csv, index=False)
+    df_eval.to_parquet(eval_parquet, index=False)
 
     runner = CliRunner()
     overrides = [
@@ -187,8 +187,8 @@ def test_cli_train_mlm_with_eval_dataset(tmp_path):
         "data.max_len=64",
         "data.num_workers=0",
         "data.pin_memory=false",
-        f"data.train={train_csv.as_posix()}",
-        f"+data.eval.validation={eval_csv.as_posix()}",
+        f"data.train={train_parquet.as_posix()}",
+        f"+data.eval.validation={eval_parquet.as_posix()}",
         "train.num_steps=4",
         "train.log_steps=2",
         "train.eval.steps=2",  # Trigger eval

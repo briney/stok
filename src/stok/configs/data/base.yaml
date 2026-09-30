@@ -8,6 +8,10 @@ load_coords: null      # null=auto; false/true to force coordinates loading
 prefetch_factor: 4     # per-worker prefetch depth (only used when num_workers > 0)
 
 
+# Typed Parquet datasets: sequence_id (string), sequence (string), and
+# structure_tokens (list of integers, required for codebook; optional for MLM).
+# Null token elements are ignored without changing residue alignment.
+# Optional coordinates: per-residue N/CA/C coordinates shaped [L, 3, 3].
 # file paths for datasets
 # Training dataset(s). Supports both:
 #   - Single dataset (100% sampling):

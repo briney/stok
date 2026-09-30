@@ -8,16 +8,16 @@ from stok.data.dataset import IterableTokenizedDataset
 pytest.importorskip("pyarrow")
 
 
-def _write_shard(dir_path: Path, name: str, rows: int, indices_len: int = 5):
+def _write_shard(dir_path: Path, name: str, rows: int):
     dir_path.mkdir(parents=True, exist_ok=True)
     data = []
     for i in range(rows):
         seq = "ACDEFGHIKLMNPQRSTVWY"[: (6 + (i % 10))]
         data.append(
             {
-                "pid": f"{name}_{i}",
-                "protein_sequence": seq,
-                "indices": list(range(indices_len)),
+                "sequence_id": f"{name}_{i}",
+                "sequence": seq,
+                "structure_tokens": list(range(len(seq))),
             }
         )
     df = pd.DataFrame(data)
@@ -44,8 +44,8 @@ def test_iterable_epoch_shuffle_changes_order(tmp_path):
     _write_shard(d, "y", rows=4)
     ds = IterableTokenizedDataset(d.as_posix(), max_length=16, shuffle_shards=True, shuffle_rows=True, seed=0)
     # collect pids for two epochs and ensure order differs
-    epoch1 = [item["pid"] for item in ds]
-    epoch2 = [item["pid"] for item in ds]
+    epoch1 = [item["sequence_id"] for item in ds]
+    epoch2 = [item["sequence_id"] for item in ds]
     assert len(epoch1) == len(epoch2) == len(ds)
     assert epoch1 != epoch2
 

@@ -36,27 +36,17 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
   - Pass criteria: CLI exits with code 0 and prints `Training complete.`.
   - Notes: Includes an RMSNorm variant to ensure `model.encoder.norm=rmsnorm` works end-to-end.
 
-- CLI training with CSV (`integration/test_cli_train_with_csv.py`)
-  - Purpose: End-to-end training on a tiny real CSV-backed dataset to validate tokenizer alignment and `TokenizedDataset` integration.
-  - Scope: Generates small `train.csv` and `eval.csv` with columns `pid,protein_sequence,indices`, sets a small `data.max_len` and indices length (`max_len-2`), uses the same tiny model overrides, and triggers evaluation (`train.eval.steps=2`).
-  - Pass criteria: CLI exits with code 0, prints an eval line that includes step, epoch, and loss (e.g., `eval/default | step ... | epoch ... | loss ...`), and ends with `Training complete.`.
-
-- CLI training with CSV (variable-length sequences) (`integration/test_cli_train_with_csv_varlen.py`)
-  - Purpose: Ensure CSV-backed training works correctly when protein sequence lengths vary and indices are truncated/padded consistently with `data.max_len`.
-  - Scope: Generates small `train.csv` and `eval.csv` with variable-length sequences, fixes the indices vector length to `max_len-2`, and reuses the tiny model and data loader overrides from the main CSV test to exercise tokenization and alignment under length variation.
-  - Pass criteria: CLI exits with code 0 and ends with `Training complete.`; no shape or alignment errors occur despite varying raw sequence lengths.
-
 - CLI training with Parquet (`integration/test_cli_train_with_parquet.py`)
   - Purpose: End-to-end training on a tiny real Parquet-backed dataset to validate tokenizer alignment and `TokenizedDataset` integration for nested list indices.
-  - Scope: Generates small `train.parquet` and `eval.parquet` with columns `pid,protein_sequence,indices` where `indices` is a list[int] (no padding tokens). Uses the same tiny model overrides and triggers evaluation (`train.eval.steps=2`).
+  - Scope: Generates small `train.parquet` and `eval.parquet` with columns `sequence_id,sequence,structure_tokens` where `structure_tokens` is a list[int] (no padding tokens). Uses the same tiny model overrides and triggers evaluation (`train.eval.steps=2`).
   - Pass criteria: CLI exits with code 0 and ends with `Training complete.`.
-  - Notes: Requires a Parquet engine (e.g., `pyarrow` or `fastparquet`). The test auto-skips if no engine is available.
+  - Notes: Requires a Parquet engine (`pyarrow`). The test auto-skips if no engine is available.
 
 - CLI training with Parquet + coordinates (`integration/test_cli_train_with_parquet_coords.py`)
   - Purpose: End-to-end training on a tiny Parquet-backed dataset that includes optional N–CA–C coordinates to validate dataset loading and training compatibility.
-  - Scope: Generates `train.parquet` and `eval.parquet` with columns `pid,protein_sequence,indices,coordinates` where `coordinates` is a nested list shaped `[L, 3, 3]` (atoms ordered N, CA, C). Uses the same tiny model overrides and triggers evaluation (`train.eval.steps=2`).
+  - Scope: Generates `train.parquet` and `eval.parquet` with columns `sequence_id,sequence,structure_tokens,coordinates` where `coordinates` is a nested list shaped `[L, 3, 3]` (atoms ordered N, CA, C). Uses the same tiny model overrides and triggers evaluation (`train.eval.steps=2`).
   - Pass criteria: CLI exits with code 0 and ends with `Training complete.`.
-  - Notes: Requires a Parquet engine (e.g., `pyarrow` or `fastparquet`). The test auto-skips if no engine is available.
+  - Notes: Requires a Parquet engine (`pyarrow`). The test auto-skips if no engine is available.
 
 - CLI training with Parquet shards (iterable) + single-file eval (`integration/test_cli_train_with_parquet_shards_mixed.py`)
   - Purpose: Validate shard-wise iterable training dataset compatibility with a map-style single-file eval dataset in the same run.
@@ -66,7 +56,7 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
 
 - CLI training with multiple eval datasets (`integration/test_cli_train_multi_eval.py`)
   - Purpose: Validate Hydra overrides for multiple eval datasets and per-dataset logging.
-  - Scope: Generates CSV train plus two eval CSVs; passes `+data.eval.validation=...` and `+data.eval.test=...` overrides; short run with `train.eval.steps=2`.
+  - Scope: Generates Parquet train plus two eval files; passes `+data.eval.validation=...` and `+data.eval.test=...` overrides; short run with `train.eval.steps=2`.
   - Pass criteria: CLI exits with code 0; output contains per-dataset eval lines (`eval/validation | step ... | epoch ...`, `eval/test | ...`); ends with `Training complete.`.
 
 - CLI training with MLM objective (`integration/test_cli_train_mlm.py`)
@@ -74,7 +64,7 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
   - Scope: Tests include:
     - Smoke test with dummy data and `train.objective=mlm`
     - Logging of `mask_acc` (masked token accuracy) and `ppl` (perplexity) metrics
-    - Training on CSV datasets without `indices` column
+    - Training on Parquet datasets without `structure_tokens` column
     - Training with eval datasets
     - Checkpoint saving with MLM objective
     - Regression test ensuring codebook objective still works
@@ -151,7 +141,7 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
     - **End-to-end MLM with CAMEO eval** (`TestEndToEndMLMWithCameoEval`):
       - Full CLI training with CAMEO structure folder, verifies P@L appears in output
       - Structure folder auto-detection (no explicit `format=structure`)
-      - P@L not logged when coords unavailable (CSV-only eval dataset)
+      - P@L not logged when coords unavailable (sequence-only Parquet eval dataset)
   - Pass criteria: All 14 tests pass; P@L metric correctly computed and logged with real PDB data; attention weights flow through evaluator; NaN padding handled gracefully.
   - Notes: Requires `tests/test_data/cameo/` with real CAMEO PDB files (5 files included: 7YPD_B.pdb, 8JVC_A.pdb, 8RF7_A.pdb, 8TYZ_B.pdb, 8XAT_B.pdb). Tests skip if CAMEO data not found.
 
@@ -198,11 +188,15 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
     - Error raised for invalid head types or missing codebook
   - Pass criteria: All assertions pass; model outputs have expected shapes and types.
 
+- Typed Parquet contract (`unit/test_parquet_dataset.py`)
+  - Covers single files and shards with integer token lists and null elements, residue alignment through truncation, sequence-only MLM, and zero token loss for all-null labels.
+  - Rejects legacy names, CSV inputs, incorrect token types, negative tokens, mismatched lengths, whole null lists, and missing required columns in any shard.
+
 - Dataset MLM support (`unit/test_dataset_mlm.py`)
-  - Purpose: Validate dataset loading without `indices` column for MLM pre-training.
+  - Purpose: Validate dataset loading without `structure_tokens` column for MLM pre-training.
   - Scope: Tests include:
-    - `TokenizedDataset` loads CSV/Parquet without `indices` column when `require_indices=False`
-    - Dataset raises error when indices required but missing
+    - `TokenizedDataset` loads Parquet without `structure_tokens` column when `require_structure_tokens=False`
+    - Dataset raises error when structure tokens are required but missing
     - `DummyMLMDataset` produces correct sequence lengths and valid amino acid characters
     - `IterableTokenizedDataset` works without indices column
   - Pass criteria: Datasets load correctly; items contain expected keys; sequences are valid.
@@ -225,7 +219,7 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
   - Pass criteria: For each case, LR segments are monotonic as expected and remain within `[0, 1]`; accuracy equals the expected value.
 
 - Tokenize and align (`unit/test_tokenize_and_align.py`)
-  - Purpose: Verify token-label alignment for CSV inputs.
+  - Purpose: Verify token-label alignment for Parquet inputs.
   - Scope: Uses real `Tokenizer` and `_tokenize_and_align` with a short sequence and indices; asserts BOS/EOS/PAD positions are ignored, supervised span starts at position 1, and indices are truncated to `max_len-2`.
   - Pass criteria: Output shapes match `max_len`; labels at [0] are `ignore_index`; labels[1:1+copy_len] equal provided indices slice; remaining positions include `ignore_index`.
 
@@ -234,7 +228,6 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
   - Scope:
     - Parquet with `coordinates` column: item includes `coords` tensor with shape `[max_len, 3, 3]`, padded/truncated with `NaN`s; atom order N, CA, C preserved.
     - Parquet without `coordinates` column: `coords` key is omitted.
-    - CSV inputs: `coords` key is always omitted.
   - Pass criteria: Assertions on presence/absence of `coords`, shape, NaN padding, and expected leading residue coordinates pass.
 
 - IterableTokenizedDataset basics (`unit/test_iterable_vqindices_dataset.py`)
@@ -394,7 +387,7 @@ This directory contains tests for the Stagger project, organized for fast, CPU-o
   - Purpose: Validate `StructureFolderDataset` for loading PDB/mmCIF folders.
   - Scope: Tests include:
     - Load folder with PDB files, verify `__len__` and `__getitem__`
-    - Output dict has keys: `pid`, `seq`, `coords`, `masks`, `nan_masks` (no `indices`)
+    - Output dict has keys: `sequence_id`, `sequence`, `coords`, `masks`, `nan_masks` (no `structure_tokens`)
     - Coords shape is `[max_length, 3, 3]` with NaN padding
     - Truncation for sequences longer than `max_length`
     - `recursive=True` searches subdirectories

@@ -1,4 +1,5 @@
-import csv
+import pyarrow as pa
+import pyarrow.parquet as pq
 from pathlib import Path
 
 from click.testing import CliRunner
@@ -7,35 +8,32 @@ from stok.cli.cli import cli
 from tests.utils.synthetic import random_protein_sequence
 
 
-def _write_csv(path: Path, n_rows: int, seq_min_len: int, seq_max_len: int, indices_len: int):
+def _write_parquet(path: Path, n_rows: int, seq_min_len: int, seq_max_len: int):
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["pid", "protein_sequence", "indices"])  # header
-        indices_str = " ".join(["0"] * indices_len)
-        for i in range(n_rows):
-            seq = random_protein_sequence(seq_min_len, seq_max_len)
-            writer.writerow([f"p{i}", seq, indices_str])
+    rows = []
+    for i in range(n_rows):
+        seq = random_protein_sequence(seq_min_len, seq_max_len)
+        rows.append({"sequence_id": f"p{i}", "sequence": seq, "structure_tokens": [0] * len(seq)})
+    pq.write_table(pa.Table.from_pylist(rows), path)
 
 
 def test_cli_train_with_multiple_eval_datasets(tmp_path):
     runner = CliRunner()
 
     max_len = 16
-    indices_len = max_len - 2  # align with token positions excluding BOS/EOS
 
-    train_csv = tmp_path / "train.csv"
-    eval_val_csv = tmp_path / "eval_val.csv"
-    eval_test_csv = tmp_path / "eval_test.csv"
-    _write_csv(train_csv, n_rows=8, seq_min_len=12, seq_max_len=28, indices_len=indices_len)
-    _write_csv(eval_val_csv, n_rows=4, seq_min_len=12, seq_max_len=28, indices_len=indices_len)
-    _write_csv(eval_test_csv, n_rows=4, seq_min_len=12, seq_max_len=28, indices_len=indices_len)
+    train_parquet = tmp_path / "train.parquet"
+    eval_val_parquet = tmp_path / "eval_val.parquet"
+    eval_test_parquet = tmp_path / "eval_test.parquet"
+    _write_parquet(train_parquet, n_rows=8, seq_min_len=12, seq_max_len=28)
+    _write_parquet(eval_val_parquet, n_rows=4, seq_min_len=12, seq_max_len=28)
+    _write_parquet(eval_test_parquet, n_rows=4, seq_min_len=12, seq_max_len=28)
 
     overrides = [
-        f"data.train={train_csv.as_posix()}",
+        f"data.train={train_parquet.as_posix()}",
         # multiple eval datasets via dict keys
-        f"+data.eval.validation={eval_val_csv.as_posix()}",
-        f"+data.eval.test={eval_test_csv.as_posix()}",
+        f"+data.eval.validation={eval_val_parquet.as_posix()}",
+        f"+data.eval.test={eval_test_parquet.as_posix()}",
         # tiny model for speed
         "model.encoder.d_model=64",
         "model.encoder.n_layers=2",
@@ -72,17 +70,16 @@ def test_cli_train_with_single_eval_dataset_via_data_eval_equals(tmp_path):
     runner = CliRunner()
 
     max_len = 16
-    indices_len = max_len - 2  # align with token positions excluding BOS/EOS
 
-    train_csv = tmp_path / "train.csv"
-    eval_csv = tmp_path / "eval.csv"
-    _write_csv(train_csv, n_rows=8, seq_min_len=12, seq_max_len=28, indices_len=indices_len)
-    _write_csv(eval_csv, n_rows=4, seq_min_len=12, seq_max_len=28, indices_len=indices_len)
+    train_parquet = tmp_path / "train.parquet"
+    eval_parquet = tmp_path / "eval.parquet"
+    _write_parquet(train_parquet, n_rows=8, seq_min_len=12, seq_max_len=28)
+    _write_parquet(eval_parquet, n_rows=4, seq_min_len=12, seq_max_len=28)
 
     overrides = [
-        f"data.train={train_csv.as_posix()}",
+        f"data.train={train_parquet.as_posix()}",
         # single eval dataset via data.eval=/path syntax
-        f"data.eval={eval_csv.as_posix()}",
+        f"data.eval={eval_parquet.as_posix()}",
         # tiny model for speed
         "model.encoder.d_model=64",
         "model.encoder.n_layers=2",

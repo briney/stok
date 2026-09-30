@@ -71,22 +71,58 @@ STōk supports two training objectives controlled by `train.objective`:
 - `codebook` (default): Predict structure tokens from a frozen VQ codebook
 - `mlm`: Masked language modeling pre-training on amino acid sequences
 
+### training data format
+
+Training data must be a Parquet file (`.parquet`, `.parq`, or `.pq`) or a
+flat directory of Parquet shards. The loader reads only the columns it needs
+and validates every file's schema. CSV/TSV and legacy column names are not supported.
+
+| Column | Arrow type | Required |
+| --- | --- | --- |
+| `sequence_id` | string | Always |
+| `sequence` | string | Always |
+| `structure_tokens` | list of integers (e.g. `list<int32>` or `list<int64>`) | Codebook training; optional for MLM |
+| `coordinates` | nested numeric lists, `[L, 3, 3]` | Optional |
+
+`sequence_id` and `sequence` must not be null. Each `structure_tokens` list
+must have exactly one element per residue, with nonnegative codebook IDs.
+Use null **elements** for unlabeled residues; their positions are preserved
+and ignored by the token loss. A whole null list is invalid. Store no padding
+or special tokens; collation adds them and truncates to `data.max_len`.
+Batches without labeled residues contribute zero token loss.
+
+For example, write a typed training file with PyArrow:
+
+```python
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+pq.write_table(pa.table({
+    "sequence_id": ["protein_1", "protein_2"],
+    "sequence": ["MKTV", "ACDE"],
+    "structure_tokens": pa.array(
+        [[12, 45, None, 19], [3, 7, 21, 6]],
+        type=pa.list_(pa.int32()),
+    ),
+}), "train.parquet")
+```
+
 ### codebook training (default)
 
 Single‑GPU (quick/dev):
 
 ```bash
 stok train \
-  data.train=/abs/path/to/train.csv \
-  data.eval=/abs/path/to/eval.csv
+  data.train=/abs/path/to/train.parquet \
+  data.eval=/abs/path/to/eval.parquet
 ```
 
 Multi‑GPU with Accelerate (spawns one process per GPU):
 
 ```bash
 accelerate launch -m stok.train \
-  data.train=/abs/path/to/train.csv \
-  data.eval=/abs/path/to/eval.csv
+  data.train=/abs/path/to/train.parquet \
+  data.eval=/abs/path/to/eval.parquet
 ```
 
 Notes:
@@ -150,12 +186,13 @@ stok train \
 
 **MLM dataset format:**
 
-For MLM training, datasets only need `pid` and `protein_sequence` columns—no `indices` column required:
+For MLM training, Parquet datasets only need `sequence_id` and `sequence`:
 
-```csv
-pid,protein_sequence
-protein_1,MVLSPADKTNVKAAWGKVGAHAGEYGAEALERMF
-protein_2,MNIFEMLRIDKGLQVVAVKAPGFGDNRKNQLKDF
+```python
+pq.write_table(pa.table({
+    "sequence_id": ["protein_1", "protein_2"],
+    "sequence": ["MVLSPADKTNVKAAWGKVGAHAGEYGAEALERMF", "MNIFEMLRIDKGLQVVAVKAPGFGDNRKNQLKDF"],
+}), "sequences.parquet")
 ```
 
 **MLM metrics:**
@@ -187,7 +224,7 @@ When `data.train` (or `data.eval`) is a directory containing Parquet files, trai
 - Partitions samples across distributed ranks and DataLoader workers
 - Ensures each rank sees the same number of samples per epoch (global remainder dropped)
 
-Heuristic is automatic: directory of `*.parquet|*.parq|*.pq` → iterable; single file (CSV/TSV/Parquet) → map‑style. You can tune iterable behavior:
+Heuristic is automatic: directory of `*.parquet|*.parq|*.pq` → iterable; single Parquet file → map‑style. You can tune iterable behavior:
 
 ```yaml
 data:
@@ -233,7 +270,7 @@ When training from Parquet, you can optionally include a `coordinates` column co
 
 - Shape per row: `[L, 3, 3]` where `L` is sequence length, atoms ordered `[N(0), CA(1), C(2)]`.
 - If present, the dataset yields an additional tensor `coords` with shape `[max_len, 3, 3]`, padded/truncated to `data.max_len` with `NaN`s.
-- If absent, the dataset omits the `coords` key; CSV inputs never include `coords`.
+- If absent, the dataset omits the `coords` key. Shards missing coordinates within a dataset that has them yield `NaN` coordinates.
 
 When FAPE is enabled, the geometric decoder is auto‑enabled and the training loop decodes predicted structure tokens into coordinates to compute a FAPE loss against the provided `coords`. When eval‑time decoding is enabled, the decoder is also auto‑enabled to produce coordinates for structure metrics (lDDT/TM/RMSD). If neither FAPE nor eval‑time decoding is enabled, the decoder remains disabled.
 
@@ -338,8 +375,8 @@ You can specify a single eval dataset directly:
 
 ```bash
 stok train \
-  data.train=/abs/path/train.csv \
-  data.eval=/abs/path/eval.csv
+  data.train=/abs/path/train.parquet \
+  data.eval=/abs/path/eval.parquet
 ```
 
 When using `data.eval=/path`, eval metrics are logged under the name `default` (for example: `eval/default | step ...`).
@@ -367,9 +404,9 @@ Use Hydra CLI overrides to add, modify, or remove eval datasets:
 
 ```bash
 # Add multiple eval datasets with simple paths
-stok train data.train=/abs/path/train.csv \
-  +data.eval.validation=/abs/path/val.csv \
-  +data.eval.test=/abs/path/test.csv
+stok train data.train=/abs/path/train.parquet \
+  +data.eval.validation=/abs/path/val.parquet \
+  +data.eval.test=/abs/path/test.parquet
 
 # Add eval dataset with nested options
 stok train \

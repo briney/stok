@@ -27,9 +27,9 @@ def test_dataset_parquet_with_coords_returns_coords_tensor(tmp_path):
         L = len(seq)
         rows.append(
             {
-                "pid": f"p{i}",
-                "protein_sequence": seq,
-                "indices": list(range(min(L - 1, 5))),  # arbitrary
+                "sequence_id": f"p{i}",
+                "sequence": seq,
+                "structure_tokens": list(range(L)),
                 "coordinates": _make_coords(L),
             }
         )
@@ -58,9 +58,9 @@ def test_dataset_parquet_without_coords_omits_key(tmp_path):
         seq = "ACDEFGHIKLM"[: 6 + i]
         rows.append(
             {
-                "pid": f"q{i}",
-                "protein_sequence": seq,
-                "indices": list(range(4)),
+                "sequence_id": f"q{i}",
+                "sequence": seq,
+                "structure_tokens": list(range(len(seq))),
             }
         )
     pd.DataFrame(rows).to_parquet(pq, index=False)
@@ -68,25 +68,4 @@ def test_dataset_parquet_without_coords_omits_key(tmp_path):
     ds = TokenizedDataset(str(pq), max_length=8)
     item = ds[0]
     assert "coords" not in item
-
-
-def test_dataset_csv_never_includes_coords(tmp_path):
-    csv = tmp_path / "data.csv"
-    rows = []
-    for i in range(2):
-        seq = "ACDEFGHIKLM"[: 6 + i]
-        indices_str = " ".join(str(x) for x in range(4))
-        rows.append(
-            {
-                "pid": f"c{i}",
-                "protein_sequence": seq,
-                "indices": indices_str,
-            }
-        )
-    pd.DataFrame(rows).to_csv(csv, index=False)
-
-    ds = TokenizedDataset(str(csv), max_length=8)
-    item = ds[0]
-    assert "coords" not in item
-
 

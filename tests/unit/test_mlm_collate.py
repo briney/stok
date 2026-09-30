@@ -10,8 +10,8 @@ def test_mlm_collate_returns_correct_shapes():
     """Test that MLM collate returns tensors with expected shapes."""
     tokenizer = Tokenizer()
     batch = [
-        {"pid": "test1", "seq": "MVLSPADKTNVKAAWGKVGAHAGEYGAEALERMF"},
-        {"pid": "test2", "seq": "MNIFEMLRIDKGLQVVAVKAPGFGDNRKNQLKDF"},
+        {"sequence_id": "test1", "sequence": "MVLSPADKTNVKAAWGKVGAHAGEYGAEALERMF"},
+        {"sequence_id": "test2", "sequence": "MNIFEMLRIDKGLQVVAVKAPGFGDNRKNQLKDF"},
     ]
     max_len = 64
 
@@ -35,7 +35,7 @@ def test_mlm_collate_masks_approximately_correct_fraction():
     tokenizer = Tokenizer()
     # Use longer sequences for more stable statistics
     batch = [
-        {"pid": f"test{i}", "seq": "MVLSPADKTNVKAAWGKVGAHAGEYGAEALERMFLSFA" * 3}
+        {"sequence_id": f"test{i}", "sequence": "MVLSPADKTNVKAAWGKVGAHAGEYGAEALERMFLSFA" * 3}
         for i in range(8)
     ]
     max_len = 128
@@ -65,7 +65,7 @@ def test_mlm_collate_applies_mask_token():
     """Test that MLM collate applies the <mask> token to some positions."""
     tokenizer = Tokenizer()
     batch = [
-        {"pid": "test1", "seq": "MVLSPADKTNVKAAWGKVGAHAGEYGAEALERMFLSFADD"},
+        {"sequence_id": "test1", "sequence": "MVLSPADKTNVKAAWGKVGAHAGEYGAEALERMFLSFADD"},
     ]
     max_len = 64
 
@@ -93,7 +93,7 @@ def test_mlm_collate_never_masks_special_tokens():
     """Test that MLM collate never masks special tokens (CLS, PAD, EOS, UNK)."""
     tokenizer = Tokenizer()
     batch = [
-        {"pid": "test1", "seq": "LAGVSER"},
+        {"sequence_id": "test1", "sequence": "LAGVSER"},
     ]
     max_len = 16
     special_token_ids = {0, 1, 2, 3}  # CLS, PAD, EOS, UNK
@@ -123,7 +123,7 @@ def test_mlm_collate_labels_match_original_tokens():
     """Test that labels at masked positions match the original token values."""
     tokenizer = Tokenizer()
     seq = "LAGVSERTIPDKQNFYMHWC"  # 20 AA
-    batch = [{"pid": "test1", "seq": seq}]
+    batch = [{"sequence_id": "test1", "sequence": seq}]
     max_len = 32
 
     # Tokenize the sequence to get original tokens
@@ -158,7 +158,7 @@ def test_mlm_collate_random_token_replacement():
     """Test that some tokens are replaced with random tokens (not <mask>)."""
     tokenizer = Tokenizer()
     batch = [
-        {"pid": f"test{i}", "seq": "MVLSPADKTNVKAAWGKVGAHAGEYGAEALERMFLSFADD" * 2}
+        {"sequence_id": f"test{i}", "sequence": "MVLSPADKTNVKAAWGKVGAHAGEYGAEALERMFLSFADD" * 2}
         for i in range(4)
     ]
     max_len = 128
@@ -167,7 +167,7 @@ def test_mlm_collate_random_token_replacement():
     original_encodings = []
     for item in batch:
         enc = tokenizer(
-            item["seq"],
+            item["sequence"],
             add_special_tokens=True,
             truncation=True,
             max_length=max_len,
@@ -215,13 +215,13 @@ def test_mlm_collate_returns_coords_when_present():
     # Create batch with coordinates
     batch = [
         {
-            "pid": "test1",
-            "seq": "MVLSPADKTN",
+            "sequence_id": "test1",
+            "sequence": "MVLSPADKTN",
             "coords": torch.randn(max_len, 3, 3),
         },
         {
-            "pid": "test2",
-            "seq": "LAGVSERQNF",
+            "sequence_id": "test2",
+            "sequence": "LAGVSERQNF",
             "coords": torch.randn(max_len, 3, 3),
         },
     ]
@@ -251,8 +251,8 @@ def test_mlm_collate_returns_2tuple_without_coords():
 
     # Create batch WITHOUT coordinates
     batch = [
-        {"pid": "test1", "seq": "MVLSPADKTN"},
-        {"pid": "test2", "seq": "LAGVSERQNF"},
+        {"sequence_id": "test1", "sequence": "MVLSPADKTN"},
+        {"sequence_id": "test2", "sequence": "LAGVSERQNF"},
     ]
 
     result = mlm_collate(

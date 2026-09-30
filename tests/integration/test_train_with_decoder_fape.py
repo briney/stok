@@ -22,17 +22,16 @@ def _make_coords(L: int) -> list[list[list[float]]]:
     return out
 
 
-def _write_parquet_with_coords(path: Path, n_rows: int, seq_min_len: int, seq_max_len: int, indices_len: int):
+def _write_parquet_with_coords(path: Path, n_rows: int, seq_min_len: int, seq_max_len: int):
     path.parent.mkdir(parents=True, exist_ok=True)
     rows = []
-    indices_val = [0] * indices_len
     for i in range(n_rows):
         L = np.random.randint(seq_min_len, seq_max_len + 1)
         seq = "".join(np.random.choice(list("ACDEFGHIKLMNPQRSTVWY"), size=L))
         rows.append({
-            "pid": f"pc{i}",
-            "protein_sequence": seq,
-            "indices": indices_val,
+            "sequence_id": f"pc{i}",
+            "sequence": seq,
+            "structure_tokens": [0] * len(seq),
             "coordinates": _make_coords(L),
         })
     df = pd.DataFrame(rows)
@@ -67,12 +66,11 @@ def test_training_with_decoder_and_fape(tmp_path):
     runner = CliRunner()
 
     max_len = 16
-    indices_len = max_len - 2  # align with token positions excluding BOS/EOS
 
     train_pq = tmp_path / "train.parquet"
     eval_pq = tmp_path / "eval.parquet"
-    _write_parquet_with_coords(train_pq, n_rows=4, seq_min_len=12, seq_max_len=18, indices_len=indices_len)
-    _write_parquet_with_coords(eval_pq, n_rows=2, seq_min_len=12, seq_max_len=18, indices_len=indices_len)
+    _write_parquet_with_coords(train_pq, n_rows=4, seq_min_len=12, seq_max_len=18)
+    _write_parquet_with_coords(eval_pq, n_rows=2, seq_min_len=12, seq_max_len=18)
 
     ckpt_path = _make_decoder_ckpt(tmp_path, preset="lite")
 

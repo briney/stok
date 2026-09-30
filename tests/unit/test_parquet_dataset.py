@@ -1,0 +1,207 @@
+import pyarrow as pa
+import pyarrow.parquet as pq
+import pytest
+import torch
+from omegaconf import OmegaConf
+
+from stok.cli.train import _build_dataloaders, _tokenize_and_align
+from stok.data.dataset import IterableTokenizedDataset, TokenizedDataset
+from stok.utils.losses import token_ce_loss
+from stok.utils.tokenizer import Tokenizer
+
+
+def write_parquet(path, tokens=(4, None, 7, None), token_type=None):
+    if token_type is None:
+        token_type = pa.int32()
+    table = pa.table(
+        {
+            "sequence_id": ["p1"],
+            "sequence": ["ACDE"],
+            "structure_tokens": pa.array([tokens], type=pa.list_(token_type)),
+        }
+    )
+    pq.write_table(table, path)
+
+
+@pytest.mark.parametrize("sharded", [False, True])
+@pytest.mark.parametrize("token_type", [pa.int32(), pa.int64()])
+def test_null_tokens_preserve_residue_alignment(tmp_path, sharded, token_type):
+    path = tmp_path / "data.parquet"
+    write_parquet(path, token_type=token_type)
+    if sharded:
+        ds = IterableTokenizedDataset(str(tmp_path), max_length=8)
+        item = next(iter(ds))
+    else:
+        ds = TokenizedDataset(str(path), max_length=8)
+        item = ds[0]
+
+    assert item["sequence_id"] == "p1"
+    assert item["sequence"] == "ACDE"
+    assert item["structure_tokens"].tolist() == [4, -1, 7, -1]
+    _, labels = _tokenize_and_align(
+        [item],
+        Tokenizer(),
+        max_len=8,
+        ignore_index=-100,
+        pad_id=1,
+    )
+    assert labels.tolist() == [[-100, 4, -100, 7, -100, -100, -100, -100]]
+
+    _, truncated = _tokenize_and_align(
+        [item],
+        Tokenizer(),
+        max_len=4,
+        ignore_index=-100,
+        pad_id=1,
+    )
+    assert truncated.tolist() == [[-100, 4, -100, -100]]
+
+
+@pytest.mark.parametrize("sharded", [False, True])
+def test_sequence_only_parquet_for_mlm(tmp_path, sharded):
+    path = tmp_path / "data.parquet"
+    pq.write_table(pa.table({"sequence_id": ["p1"], "sequence": ["ACDE"]}), path)
+    cls = IterableTokenizedDataset if sharded else TokenizedDataset
+    ds = cls(
+        str(tmp_path if sharded else path), max_length=8, require_structure_tokens=False
+    )
+    item = next(iter(ds)) if sharded else ds[0]
+    assert item == {"sequence_id": "p1", "sequence": "ACDE"}
+
+
+@pytest.mark.parametrize(
+    "tokens,token_type",
+    [
+        ("4 5 7 8", pa.string()),
+        ([4.0, 5.0, 7.0, 8.0], pa.list_(pa.float64())),
+    ],
+)
+@pytest.mark.parametrize("sharded", [False, True])
+def test_rejects_untyped_structure_tokens(tmp_path, tokens, token_type, sharded):
+    path = tmp_path / "bad.parquet"
+    table = pa.table(
+        {
+            "sequence_id": ["p1"],
+            "sequence": ["ACDE"],
+            "structure_tokens": pa.array([tokens], type=token_type),
+        }
+    )
+    pq.write_table(table, path)
+    cls = IterableTokenizedDataset if sharded else TokenizedDataset
+    with pytest.raises(ValueError, match="structure_tokens.*integer"):
+        cls(str(tmp_path if sharded else path), max_length=8)
+
+
+@pytest.mark.parametrize(
+    "tokens,match",
+    [
+        ([1, 2], "length"),
+        ([1, -1, 2, 3], "negative"),
+        (None, "null"),
+    ],
+)
+@pytest.mark.parametrize("sharded", [False, True])
+def test_rejects_invalid_token_rows(tmp_path, tokens, match, sharded):
+    path = tmp_path / "bad.parquet"
+    write_parquet(path, tokens=tokens)
+    cls = IterableTokenizedDataset if sharded else TokenizedDataset
+    ds = cls(str(tmp_path if sharded else path), max_length=8)
+    with pytest.raises(ValueError, match=match):
+        next(iter(ds)) if sharded else ds[0]
+
+
+def test_checks_required_columns_in_every_shard(tmp_path):
+    write_parquet(tmp_path / "a.parquet")
+    pq.write_table(
+        pa.table({"sequence_id": ["p2"], "sequence": ["ACDE"]}), tmp_path / "b.parquet"
+    )
+    with pytest.raises(ValueError, match="b.parquet.*structure_tokens"):
+        IterableTokenizedDataset(str(tmp_path), max_length=8)
+
+
+def test_rejects_legacy_column_names(tmp_path):
+    path = tmp_path / "old.parquet"
+    pq.write_table(
+        pa.table(
+            {"pid": ["p1"], "protein_sequence": ["ACDE"], "indices": [[1, 2, 3, 4]]}
+        ),
+        path,
+    )
+    with pytest.raises(ValueError, match="sequence"):
+        TokenizedDataset(str(path), max_length=8)
+
+
+def test_rejects_csv(tmp_path):
+    path = tmp_path / "data.csv"
+    path.write_text("sequence_id,sequence,structure_tokens\np1,ACDE,1 2 3 4\n")
+    with pytest.raises(ValueError, match="Parquet"):
+        TokenizedDataset(str(path), max_length=8)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
+def test_all_null_tokens_have_zero_loss_and_gradients(tmp_path, dtype):
+    path = tmp_path / "data.parquet"
+    write_parquet(path, tokens=[None] * 4)
+    item = TokenizedDataset(str(path), max_length=8)[0]
+    _, labels = _tokenize_and_align(
+        [item],
+        Tokenizer(),
+        max_len=8,
+        ignore_index=-100,
+        pad_id=1,
+    )
+    logits = torch.ones(1, 8, 10, dtype=dtype, requires_grad=True)
+    loss = token_ce_loss(logits, labels)
+    assert loss.item() == 0.0
+    loss.backward()
+    assert torch.count_nonzero(logits.grad) == 0
+
+
+@pytest.mark.parametrize("is_mlm", [False, True])
+def test_training_rejects_structure_folders(tmp_path, is_mlm):
+    (tmp_path / "protein.pdb").write_text("END\n")
+    cfg = OmegaConf.create(
+        {
+            "data": {
+                "train": str(tmp_path),
+                "batch_size": 1,
+                "max_len": 8,
+                "num_workers": 0,
+                "pin_memory": False,
+            },
+            "model": {"classifier": {"ignore_index": -100}},
+            "train": {},
+        }
+    )
+    with pytest.raises(ValueError, match="Parquet"):
+        _build_dataloaders(cfg, codebook_size=8, pad_id=1, is_mlm=is_mlm)
+
+
+@pytest.mark.parametrize("load_coords", [False, True])
+def test_shards_with_missing_optional_coordinates(tmp_path, load_coords):
+    write_parquet(tmp_path / "a.parquet")
+    table = pa.table(
+        {
+            "sequence_id": ["p2"],
+            "sequence": ["ACDE"],
+            "structure_tokens": [[1, 2, 3, 4]],
+            "coordinates": [[[[1.0, 2.0, 3.0]] * 3] * 4],
+        }
+    )
+    pq.write_table(table, tmp_path / "b.parquet")
+    ds = IterableTokenizedDataset(
+        str(tmp_path),
+        max_length=8,
+        load_coords=load_coords,
+        shuffle_shards=False,
+        shuffle_rows=False,
+    )
+    first, second = list(ds)
+    if load_coords:
+        assert torch.isnan(first["coords"]).all()
+        assert second["coords"].shape == (8, 3, 3)
+        assert second["coords"][0, 0].tolist() == [1.0, 2.0, 3.0]
+        assert torch.isnan(second["coords"][4:]).all()
+    else:
+        assert "coords" not in first
+        assert "coords" not in second

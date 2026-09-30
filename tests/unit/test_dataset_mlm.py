@@ -1,106 +1,102 @@
-"""Tests for dataset support for MLM training (without indices column)."""
-
-import tempfile
-from pathlib import Path
+"""Tests for dataset support for MLM training (without structure_tokens column)."""
 
 import pandas as pd
 import pytest
-import torch
 
 from stok.data.dataset import DummyMLMDataset, TokenizedDataset
 
 
 class TestTokenizedDatasetMLM:
-    """Tests for TokenizedDataset with require_indices=False."""
+    """Tests for TokenizedDataset with require_structure_tokens=False."""
 
     def test_dataset_without_indices_column(self, tmp_path):
-        """Test that dataset loads correctly without indices column."""
-        csv_path = tmp_path / "test.csv"
+        """Test that dataset loads correctly without structure_tokens column."""
+        parquet_path = tmp_path / "test.parquet"
         df = pd.DataFrame(
             {
-                "pid": ["p1", "p2", "p3"],
-                "protein_sequence": ["MVLSPADKTNVKA", "MNIFEMLRIDKGLQVVA", "ACDEFGHIK"],
+                "sequence_id": ["p1", "p2", "p3"],
+                "sequence": ["MVLSPADKTNVKA", "MNIFEMLRIDKGLQVVA", "ACDEFGHIK"],
             }
         )
-        df.to_csv(csv_path, index=False)
+        df.to_parquet(parquet_path, index=False)
 
-        ds = TokenizedDataset(str(csv_path), max_length=32, require_indices=False)
+        ds = TokenizedDataset(str(parquet_path), max_length=32, require_structure_tokens=False)
 
         assert len(ds) == 3
 
         item = ds[0]
-        assert "pid" in item
-        assert "seq" in item
-        assert "indices" not in item  # Should not have indices
+        assert "sequence_id" in item
+        assert "sequence" in item
+        assert "structure_tokens" not in item  # Should not have indices
 
     def test_dataset_with_indices_column_when_not_required(self, tmp_path):
         """Test that dataset includes indices when present even if not required."""
-        csv_path = tmp_path / "test.csv"
+        parquet_path = tmp_path / "test.parquet"
         df = pd.DataFrame(
             {
-                "pid": ["p1", "p2"],
-                "protein_sequence": ["MVLSPADKTNVKA", "MNIFEMLRIDKGL"],
-                "indices": ["1 2 3 4 5 6 7 8 9 10 11", "1 2 3 4 5 6 7 8 9 10 11"],
+                "sequence_id": ["p1", "p2"],
+                "sequence": ["MVLSPADKTNVKA", "MNIFEMLRIDKGL"],
+                "structure_tokens": [[1] * 13, [1] * 12],
             }
         )
-        df.to_csv(csv_path, index=False)
+        df.to_parquet(parquet_path, index=False)
 
-        ds = TokenizedDataset(str(csv_path), max_length=32, require_indices=False)
+        ds = TokenizedDataset(str(parquet_path), max_length=32, require_structure_tokens=False)
 
         item = ds[0]
-        assert "indices" in item  # Should have indices since they're in the file
+        assert "structure_tokens" in item  # Should have indices since they're in the file
 
     def test_dataset_raises_error_when_indices_required_but_missing(self, tmp_path):
         """Test that dataset raises error when indices required but not present."""
-        csv_path = tmp_path / "test.csv"
+        parquet_path = tmp_path / "test.parquet"
         df = pd.DataFrame(
             {
-                "pid": ["p1", "p2"],
-                "protein_sequence": ["MVLSPADKTNVKA", "MNIFEMLRIDKGL"],
+                "sequence_id": ["p1", "p2"],
+                "sequence": ["MVLSPADKTNVKA", "MNIFEMLRIDKGL"],
             }
         )
-        df.to_csv(csv_path, index=False)
+        df.to_parquet(parquet_path, index=False)
 
         with pytest.raises(ValueError, match="Missing required columns"):
-            TokenizedDataset(str(csv_path), max_length=32, require_indices=True)
+            TokenizedDataset(str(parquet_path), max_length=32, require_structure_tokens=True)
 
     def test_dataset_seq_content(self, tmp_path):
         """Test that sequence content is correctly loaded."""
-        csv_path = tmp_path / "test.csv"
+        parquet_path = tmp_path / "test.parquet"
         sequences = ["MVLSPADKTNVKA", "MNIFEMLRIDKGL", "ACDEFGHIK"]
         df = pd.DataFrame(
             {
-                "pid": ["p1", "p2", "p3"],
-                "protein_sequence": sequences,
+                "sequence_id": ["p1", "p2", "p3"],
+                "sequence": sequences,
             }
         )
-        df.to_csv(csv_path, index=False)
+        df.to_parquet(parquet_path, index=False)
 
-        ds = TokenizedDataset(str(csv_path), max_length=32, require_indices=False)
+        ds = TokenizedDataset(str(parquet_path), max_length=32, require_structure_tokens=False)
 
         for i, seq in enumerate(sequences):
             item = ds[i]
-            assert item["seq"] == seq
+            assert item["sequence"] == seq
 
     def test_parquet_dataset_without_indices(self, tmp_path):
-        """Test that Parquet dataset works without indices column."""
+        """Test that Parquet dataset works without structure_tokens column."""
         pytest.importorskip("pyarrow")
 
         parquet_path = tmp_path / "test.parquet"
         df = pd.DataFrame(
             {
-                "pid": ["p1", "p2"],
-                "protein_sequence": ["MVLSPADKTNVKA", "MNIFEMLRIDKGL"],
+                "sequence_id": ["p1", "p2"],
+                "sequence": ["MVLSPADKTNVKA", "MNIFEMLRIDKGL"],
             }
         )
         df.to_parquet(parquet_path)
 
-        ds = TokenizedDataset(str(parquet_path), max_length=32, require_indices=False)
+        ds = TokenizedDataset(str(parquet_path), max_length=32, require_structure_tokens=False)
 
         assert len(ds) == 2
         item = ds[0]
-        assert "seq" in item
-        assert "indices" not in item
+        assert "sequence" in item
+        assert "structure_tokens" not in item
 
 
 class TestDummyMLMDataset:
@@ -118,8 +114,8 @@ class TestDummyMLMDataset:
         ds = DummyMLMDataset(num_samples=10, seq_len=30)
 
         item = ds[0]
-        assert "pid" in item
-        assert "seq" in item
+        assert "sequence_id" in item
+        assert "sequence" in item
 
     def test_dummy_mlm_dataset_seq_length(self):
         """Test that DummyMLMDataset returns sequences of correct length."""
@@ -127,7 +123,7 @@ class TestDummyMLMDataset:
         ds = DummyMLMDataset(num_samples=10, seq_len=seq_len)
 
         item = ds[0]
-        assert len(item["seq"]) == seq_len
+        assert len(item["sequence"]) == seq_len
 
     def test_dummy_mlm_dataset_seq_characters(self):
         """Test that DummyMLMDataset uses valid amino acid characters."""
@@ -136,7 +132,7 @@ class TestDummyMLMDataset:
 
         for i in range(min(10, len(ds))):
             item = ds[i]
-            seq = item["seq"]
+            seq = item["sequence"]
             for char in seq:
                 assert char in valid_aa, f"Invalid character {char} in sequence"
 
@@ -146,15 +142,15 @@ class TestDummyMLMDataset:
 
         pids = set()
         for i in range(len(ds)):
-            pid = ds[i]["pid"]
+            pid = ds[i]["sequence_id"]
             assert pid not in pids, f"Duplicate PID: {pid}"
             pids.add(pid)
 
 class TestIterableDatasetMLM:
-    """Tests for IterableTokenizedDataset with require_indices=False."""
+    """Tests for IterableTokenizedDataset with require_structure_tokens=False."""
 
     def test_iterable_dataset_without_indices(self, tmp_path):
-        """Test that iterable dataset works without indices column."""
+        """Test that iterable dataset works without structure_tokens column."""
         pytest.importorskip("pyarrow")
         from stok.data.dataset import IterableTokenizedDataset
 
@@ -165,8 +161,8 @@ class TestIterableDatasetMLM:
         for i in range(2):
             df = pd.DataFrame(
                 {
-                    "pid": [f"p{i}_{j}" for j in range(5)],
-                    "protein_sequence": [
+                    "sequence_id": [f"p{i}_{j}" for j in range(5)],
+                    "sequence": [
                         f"MVLSPADKTNVKA{j}" for j in range(5)
                     ],
                 }
@@ -176,7 +172,7 @@ class TestIterableDatasetMLM:
         ds = IterableTokenizedDataset(
             str(shard_dir),
             max_length=32,
-            require_indices=False,
+            require_structure_tokens=False,
             shuffle_shards=False,
             shuffle_rows=False,
         )
@@ -185,8 +181,8 @@ class TestIterableDatasetMLM:
         assert len(items) == 10
 
         for item in items:
-            assert "seq" in item
-            assert "pid" in item
-            # indices should not be present since we set require_indices=False
-            # and the parquet files don't have an indices column
+            assert "sequence" in item
+            assert "sequence_id" in item
+            # indices should not be present since we set require_structure_tokens=False
+            # and the parquet files don't have an structure_tokens column
 
