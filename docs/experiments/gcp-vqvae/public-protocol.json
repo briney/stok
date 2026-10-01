@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "seed": 20260930,
+  "intended_use": "sequence_conditioned_structure_token_training",
+  "cohort_size": 40,
+  "selection_size": 20,
+  "heldout_size": 20,
+  "length_bins": [[25, 99], [100, 249], [250, 499], [500, 799], [800, 1280]],
+  "per_bin_per_split": {"complete": 2, "incomplete": 2},
+  "source": "RCSB PDB experimental protein entities",
+  "entry_filters": {
+    "initial_release_date": ["2010-01-01", "2025-12-31"],
+    "experimental_methods": ["X-RAY DIFFRACTION", "ELECTRON MICROSCOPY"],
+    "polymer_instance_count": [1, 8]
+  },
+  "sampling": "Order eligible entity IDs by SHA256(seed:entity_id); select the lexically first label chain of each entity, first deposited model. Split by SHA256(seed:cluster_anchor) modulo 2, 0 selection and 1 heldout. Retain at most one entity per RCSB 30-percent sequence cluster and one entity per PDB entry; fill metadata-only length/completeness quotas without examining model outputs. Parser/download failures and excess-quota candidates are logged outside source control.",
+  "cluster_identity_percent": 30,
+  "sequence_source": "deposited mmCIF polymer sequence; no observed-sequence fallback",
+  "conditions": ["native/reference", "native/linear", "native/observed_only", "unknown/reference", "unknown/linear", "unknown/observed_only", "polymer/reference"],
+  "candidate_policies": ["native/reference", "native/linear", "native/observed_only"],
+  "synthetic_gaps": [1, 3, 5, 15],
+  "synthetic_sources": "Only complete original chains; one internal gap and one N-terminal gap per length plus an oxygen-only omission",
+  "precision": "FP32, ambient autocast disabled",
+  "backend": "ROCm gfx1151, torch 2.14.0+rocm7.2, HIP 7.2, SDPA",
+  "context": "independent singleton full-chain inference, no production cropping",
+  "hard_gates": [
+    "Unique chain and cluster identities with disjoint selection/heldout groups",
+    "Frozen source-file and manifest hashes remain unchanged",
+    "Sequence positions and original coordinate/atom-mask snapshots match parsed source and every condition",
+    "All conditions use identical original token/geometry/scoring masks and report every exclusion",
+    "Available token IDs are in range and decoded coordinates are finite; missing outputs remain NaN",
+    "No imputed coordinates become evaluation targets or exported targets",
+    "Model states are unchanged; padding and supported grouping change zero available IDs"
+  ],
+  "metrics": ["lddt_ca", "tm_kabsch", "rmsd_backbone"],
+  "quality_reference": "native/reference",
+  "quality_loss_budget": {"lddt_ca": 0.02, "tm_kabsch": 0.02},
+  "quality_gate": "For source and each admitted synthetic variant separately, require at least five paired chains and the lower bound of the existing 1000-resample chain-level bootstrap 95-percent interval for candidate-minus-reference lDDT-CA and Kabsch-TM to be >= -0.02. Baseline self-differences are exactly zero. These are predeclared engineering noninferiority budgets for this use, not universal biological accuracy thresholds.",
+  "selection_ranking": "Among quality-eligible native policies, minimize pooled rigid-transform changed-ID rate across admitted source and synthetic cases; then minimize maximum observed-atom displacement on working coordinates; then maximize source mean lDDT-CA; then break exact ties observed_only, linear, reference. Keep unknown/polymer conditions diagnostic only.",
+  "heldout_rule": "Freeze a separate choice for Lite and Large using selection results only, before running any heldout inference. Apply identical gates once on heldout. If a gate fails, report failed qualification and do not package that candidate as a qualified stable policy; do not change budgets or select another policy using heldout results.",
+  "limitations": [
+    "Metadata-stratified bounded public cohort is not an unbiased sample of the PDB or an internal dataset",
+    "RCSB sequence clusters reduce close sequence overlap; they do not prove structural-family independence",
+    "Pretrained tokenizer training-set overlap is unknown; heldout means held out of this policy-selection experiment",
+    "Synthetic missing positions stay unlabeled; this is not missing-loop recovery",
+    "Only deposited first-model chains are processed; no multimer or biological-assembly support is claimed"
+  ]
+}

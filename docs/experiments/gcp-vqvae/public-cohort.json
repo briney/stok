@@ -1,0 +1,1494 @@
+{
+  "assembly_audit_sha256": "2f51156f9366836bab2ce73888715712723a53a94e1a0e32216bb39c23d81d66",
+  "assembly_outcomes": {
+    "absent_or_reused_cluster_or_entry": 633,
+    "filled_actual_completeness_quota": 2,
+    "filled_bin": 14611,
+    "filled_incomplete_quota": 441
+  },
+  "candidate_query": {
+    "query": {
+      "logical_operator": "and",
+      "nodes": [
+        {
+          "parameters": {
+            "attribute": "entity_poly.rcsb_sample_sequence_length",
+            "operator": "range",
+            "value": {
+              "from": 25,
+              "to": 1280
+            }
+          },
+          "service": "text",
+          "type": "terminal"
+        },
+        {
+          "parameters": {
+            "attribute": "entity_poly.rcsb_entity_polymer_type",
+            "operator": "exact_match",
+            "value": "Protein"
+          },
+          "service": "text",
+          "type": "terminal"
+        },
+        {
+          "parameters": {
+            "attribute": "rcsb_entry_info.deposited_polymer_entity_instance_count",
+            "operator": "range",
+            "value": {
+              "from": 1,
+              "to": 8
+            }
+          },
+          "service": "text",
+          "type": "terminal"
+        },
+        {
+          "parameters": {
+            "attribute": "rcsb_accession_info.initial_release_date",
+            "operator": "range",
+            "value": {
+              "from": "2010-01-01",
+              "to": "2025-12-31"
+            }
+          },
+          "service": "text",
+          "type": "terminal"
+        },
+        {
+          "parameters": {
+            "attribute": "exptl.method",
+            "operator": "in",
+            "value": [
+              "X-RAY DIFFRACTION",
+              "ELECTRON MICROSCOPY"
+            ]
+          },
+          "service": "text",
+          "type": "terminal"
+        }
+      ],
+      "type": "group"
+    },
+    "request_options": {
+      "results_content_type": [
+        "experimental"
+      ],
+      "return_all_hits": true
+    },
+    "return_type": "polymer_entity"
+  },
+  "candidate_response_sha256": "590cc09a909c0ea7cadd52987ff67526da12c17c4fceabd88a17f789a5780701",
+  "chains": [
+    {
+      "author_chain_id": "A",
+      "author_residue_range": [
+        1,
+        301
+      ],
+      "c_terminal_missing": 5,
+      "cluster_anchor": "10DV_1",
+      "complete": false,
+      "compressed_sha256": "c2d69898003e50c4894b98cd53e106a2bac0aef5a3db14f5d529a4e12e082080",
+      "description": "3C-like proteinase",
+      "download_url": "https://files.rcsb.org/download/7GHY.cif.gz",
+      "entity_id": "7GHY_1",
+      "geometry_count": 301,
+      "has_insertion_codes": false,
+      "label_chain_id": "A",
+      "length": 306,
+      "length_bin": [
+        250,
+        499
+      ],
+      "max_internal_gap": 0,
+      "max_missing_block": 5,
+      "missing_ratio": 0.016339869281045753,
+      "n_terminal_missing": 0,
+      "organisms": [
+        "Severe acute respiratory syndrome coronavirus 2"
+      ],
+      "pdb_id": "7GHY",
+      "sequence_id": "7GHY.A",
+      "sequence_sha256": "50ec190141bd451b4b7efdf7378d3a516e559004b5335ab9bb341a596691c92e",
+      "source_sha256": "98b4f0d22b4a59754c35f147fe1bf052e35fdd9ad847517363779be5a64ef4da",
+      "split": "selection",
+      "token_count": 301
+    },
+    {
+      "author_chain_id": "A",
+      "author_residue_range": [
+        3,
+        332
+      ],
+      "c_terminal_missing": 5,
+      "cluster_anchor": "11UC_1",
+      "complete": false,
+      "compressed_sha256": "265259fda26ff6b2673c362a97b6eda7468e3762fe4b2a9e489b8ef123d9bb03",
+      "description": "Casein kinase II subunit alpha",
+      "download_url": "https://files.rcsb.org/download/9QSV.cif.gz",
+      "entity_id": "9QSV_1",
+      "geometry_count": 330,
+      "has_insertion_codes": false,
+      "label_chain_id": "A",
+      "length": 359,
+      "length_bin": [
+        250,
+        499
+      ],
+      "max_internal_gap": 0,
+      "max_missing_block": 24,
+      "missing_ratio": 0.0807799442896936,
+      "n_terminal_missing": 24,
+      "organisms": [
+        "Homo sapiens"
+      ],
+      "pdb_id": "9QSV",
+      "sequence_id": "9QSV.A",
+      "sequence_sha256": "0056faf716a1507c8e08fccf586b005c83afdb4e27db0c77181d02b6057266ff",
+      "source_sha256": "db02fc3975ed985114251fb739c8c113c3109821b42a5d500105ed399a2df624",
+      "split": "selection",
+      "token_count": 330
+    },
+    {
+      "author_chain_id": "A",
+      "author_residue_range": [
+        2,
+        83
+      ],
+      "c_terminal_missing": 2,
+      "cluster_anchor": "1RWI_1",
+      "complete": false,
+      "compressed_sha256": "1da1755993914a4be5b617410e97ab32630bfef1acec91a4508cf6ab720420b6",
+      "description": "pizza2sr-pb protein",
+      "download_url": "https://files.rcsb.org/download/3WWF.cif.gz",
+      "entity_id": "3WWF_1",
+      "geometry_count": 82,
+      "has_insertion_codes": false,
+      "label_chain_id": "A",
+      "length": 90,
+      "length_bin": [
+        25,
+        99
+      ],
+      "max_internal_gap": 0,
+      "max_missing_block": 6,
+      "missing_ratio": 0.08888888888888889,
+      "n_terminal_missing": 6,
+      "organisms": [
+        null
+      ],
+      "pdb_id": "3WWF",
+      "sequence_id": "3WWF.A",
+      "sequence_sha256": "13c7c7ba78814e8732b3efc755ccf432e26ca5bb216472cefd49fce7247d1c6d",
+      "source_sha256": "2a55a443f46c857671557e4688d11a064e0b119193c8088ba222442c5e26658c",
+      "split": "selection",
+      "token_count": 82
+    },
+    {
+      "author_chain_id": "A",
+      "author_residue_range": [
+        14,
+        270
+      ],
+      "c_terminal_missing": 0,
+      "cluster_anchor": "10MU_3",
+      "complete": false,
+      "compressed_sha256": "cbec898210f4177a2f7156ce24fe9357921678c265188d31f6823bfbf8ece7d6",
+      "description": "Spike protein S1",
+      "download_url": "https://files.rcsb.org/download/7M8J.cif.gz",
+      "entity_id": "7M8J_1",
+      "geometry_count": 224,
+      "has_insertion_codes": false,
+      "label_chain_id": "A",
+      "length": 257,
+      "length_bin": [
+        250,
+        499
+      ],
+      "max_internal_gap": 27,
+      "max_missing_block": 27,
+      "missing_ratio": 0.12840466926070038,
+      "n_terminal_missing": 0,
+      "organisms": [
+        "Severe acute respiratory syndrome coronavirus 2"
+      ],
+      "pdb_id": "7M8J",
+      "sequence_id": "7M8J.A",
+      "sequence_sha256": "cb88d5737893478289fb78cdb1ca6723d793612ef50a738d2de9d2489a669d89",
+      "source_sha256": "792e18ac1f7c73c42043a4943fa8bfe5dca0525c6dabc41a0ae743afbadc8741",
+      "split": "heldout",
+      "token_count": 224
+    },
+    {
+      "author_chain_id": "B",
+      "author_residue_range": [
+        88,
+        406
+      ],
+      "c_terminal_missing": 0,
+      "cluster_anchor": "5O65_1",
+      "complete": false,
+      "compressed_sha256": "cb313a00e11d7960280cbd6801fe852e88cff88cba9657cec6659f9311d19492",
+      "description": "FapF",
+      "download_url": "https://files.rcsb.org/download/5O67.cif.gz",
+      "entity_id": "5O67_2",
+      "geometry_count": 291,
+      "has_insertion_codes": false,
+      "label_chain_id": "B",
+      "length": 334,
+      "length_bin": [
+        250,
+        499
+      ],
+      "max_internal_gap": 18,
+      "max_missing_block": 18,
+      "missing_ratio": 0.1317365269461078,
+      "n_terminal_missing": 15,
+      "organisms": [
+        "Pseudomonas sp. UK4"
+      ],
+      "pdb_id": "5O67",
+      "sequence_id": "5O67.B",
+      "sequence_sha256": "8d455bbb268ec6e6fc8da837f1963670afdee8010dbeccc327fe0842eb79f26d",
+      "source_sha256": "e8e533841b054f959c28ed3f99ae15330e00c9925e421f47355e16a4f231afa2",
+      "split": "heldout",
+      "token_count": 290
+    },
+    {
+      "author_chain_id": "A",
+      "author_residue_range": [
+        1,
+        121
+      ],
+      "c_terminal_missing": 0,
+      "cluster_anchor": "1L7L_1",
+      "complete": false,
+      "compressed_sha256": "e601f994fb24d794870e3e6f8c1ca5a4d0f3a4e95c706751feaa3845e79c3c93",
+      "description": "PA-I GALACTOPHILIC LECTIN",
+      "download_url": "https://files.rcsb.org/download/3ZYF.cif.gz",
+      "entity_id": "3ZYF_1",
+      "geometry_count": 121,
+      "has_insertion_codes": false,
+      "label_chain_id": "A",
+      "length": 122,
+      "length_bin": [
+        100,
+        249
+      ],
+      "max_internal_gap": 0,
+      "max_missing_block": 1,
+      "missing_ratio": 0.00819672131147541,
+      "n_terminal_missing": 1,
+      "organisms": [
+        "Pseudomonas aeruginosa PAO1"
+      ],
+      "pdb_id": "3ZYF",
+      "sequence_id": "3ZYF.A",
+      "sequence_sha256": "4b992438444e5580e88eec14328d65dc56021c00706daab77dfc20892b6dcdb6",
+      "source_sha256": "fa14de152180f5bd8bee8a5a161b799bed9a7b54b1e22dfdc38150dab2f7e9bf",
+      "split": "heldout",
+      "token_count": 121
+    },
+    {
+      "author_chain_id": "X",
+      "author_residue_range": [
+        23,
+        644
+      ],
+      "c_terminal_missing": 0,
+      "cluster_anchor": "1IVO_1",
+      "complete": false,
+      "compressed_sha256": "698505186c216def4cbf5f55166a1f39ad842031caf25e7efa76b5717996eacd",
+      "description": "Receptor tyrosine-protein kinase erbB-2",
+      "download_url": "https://files.rcsb.org/download/8FFJ.cif.gz",
+      "entity_id": "8FFJ_1",
+      "geometry_count": 619,
+      "has_insertion_codes": false,
+      "label_chain_id": "A",
+      "length": 622,
+      "length_bin": [
+        500,
+        799
+      ],
+      "max_internal_gap": 3,
+      "max_missing_block": 3,
+      "missing_ratio": 0.00482315112540193,
+      "n_terminal_missing": 0,
+      "organisms": [
+        "Homo sapiens"
+      ],
+      "pdb_id": "8FFJ",
+      "sequence_id": "8FFJ.A",
+      "sequence_sha256": "71b83f3b056716cbb356928c8196e9219a964cd44466ba6908f7b957ce8d4434",
+      "source_sha256": "edf92b98bfeaee4ecb04eaf013329a10b4071aad38e1e4f1927f79365c055281",
+      "split": "selection",
+      "token_count": 619
+    },
+    {
+      "author_chain_id": "A",
+      "author_residue_range": [
+        6,
+        884
+      ],
+      "c_terminal_missing": 24,
+      "cluster_anchor": "1JBK_1",
+      "complete": false,
+      "compressed_sha256": "28aa07fea8b759b5481019a9481026ec56b3bd6c076327c2059e2cf3b716392f",
+      "description": "Heat shock protein 104",
+      "download_url": "https://files.rcsb.org/download/5VY9.cif.gz",
+      "entity_id": "5VY9_1",
+      "geometry_count": 849,
+      "has_insertion_codes": false,
+      "label_chain_id": "A",
+      "length": 908,
+      "length_bin": [
+        800,
+        1280
+      ],
+      "max_internal_gap": 16,
+      "max_missing_block": 24,
+      "missing_ratio": 0.06497797356828194,
+      "n_terminal_missing": 5,
+      "organisms": [
+        "Saccharomyces cerevisiae S288C"
+      ],
+      "pdb_id": "5VY9",
+      "sequence_id": "5VY9.A",
+      "sequence_sha256": "14f77a0745e5fec0b3ac4eb6527036812a4b0fa9e4ef338469a34f8b63274c0e",
+      "source_sha256": "8a5f082f774151f09592a72ac3650ea5f50dc6094df8b16650865009c8f4b26e",
+      "split": "selection",
+      "token_count": 849
+    },
+    {
+      "author_chain_id": "A",
+      "author_residue_range": [
+        1,
+        230
+      ],
+      "c_terminal_missing": 8,
+      "cluster_anchor": "1EMC_1",
+      "complete": false,
+      "compressed_sha256": "9bbfab4536bc419bd7c5d722e844ba508f17b093c7c557a625d972f798632029",
+      "description": "De novo designed 1GFL-15",
+      "download_url": "https://files.rcsb.org/download/9JVR.cif.gz",
+      "entity_id": "9JVR_1",
+      "geometry_count": 227,
+      "has_insertion_codes": false,
+      "label_chain_id": "A",
+      "length": 237,
+      "length_bin": [
+        100,
+        249
+      ],
+      "max_internal_gap": 1,
+      "max_missing_block": 8,
+      "missing_ratio": 0.04219409282700422,
+      "n_terminal_missing": 1,
+      "organisms": [
+        "synthetic construct"
+      ],
+      "pdb_id": "9JVR",
+      "sequence_id": "9JVR.A",
+      "sequence_sha256": "ef3e5e7ced33c863ee40fe2b18ed3bc9c995360a912d3439b2f1284d9e7acf57",
+      "source_sha256": "ca5810c51ee4896a6c604107d580be3f720e1abc2463946133cd55326992abc7",
+      "split": "selection",
+      "token_count": 227
+    },
+    {
+      "author_chain_id": "A",
+      "author_residue_range": [
+        117,
+        910
+      ],
+      "c_terminal_missing": 50,
+      "cluster_anchor": "5NL2_1",
+      "complete": false,
+      "compressed_sha256": "0d3fad21ccbddc579456611c51dd96b6049f6cf129f31c90d6682c750983761e",
+      "description": "Anoctamin-1",
+      "download_url": "https://files.rcsb.org/download/7B5E.cif.gz",
+      "entity_id": "7B5E_1",
+      "geometry_count": 718,
+      "has_insertion_codes": false,
+      "label_chain_id": "A",
+      "length": 960,
+      "length_bin": [
+        800,
+        1280
+      ],
+      "max_internal_gap": 34,
+      "max_missing_block": 116,
+      "missing_ratio": 0.2520833333333333,
+      "n_terminal_missing": 116,
+      "organisms": [
+        "Mus musculus"
+      ],
+      "pdb_id": "7B5E",
+      "sequence_id": "7B5E.A",
+      "sequence_sha256": "697e0e9ed77b8a8490ed09c7138619ca3450e29ee913eef5d71a5700c4292202",
+      "source_sha256": "40940394f62944059f509d7dda9a882963c3a83c554ff6cfedf7385867502326",
+      "split": "selection",
+      "token_count": 718
+    },
+    {
+      "author_chain_id": "B",
+      "author_residue_range": [
+        6,
+        179
+      ],
+      "c_terminal_missing": 1,
+      "cluster_anchor": "1BYU_1",
+      "complete": false,
+      "compressed_sha256": "17a231b6464b89668e9dbe84004bd1e0278f7964460f72b97566842ab4f9385a",
+      "description": "GTP-binding nuclear protein Ran",
+      "download_url": "https://files.rcsb.org/download/7B51.cif.gz",
+      "entity_id": "7B51_1",
+      "geometry_count": 174,
+      "has_insertion_codes": false,
+      "label_chain_id": "A",
+      "length": 182,
+      "length_bin": [
+        100,
+        249
+      ],
+      "max_internal_gap": 0,
+      "max_missing_block": 7,
+      "missing_ratio": 0.04395604395604396,
+      "n_terminal_missing": 7,
+      "organisms": [
+        "Homo sapiens"
+      ],
+      "pdb_id": "7B51",
+      "sequence_id": "7B51.A",
+      "sequence_sha256": "07420f27d05cd6c18a17edd757858c1938557abe4a7789f3c89ffc82def1c084",
+      "source_sha256": "01814f0104b3d43e59955a51ea2e5f67dc68d1b85a74b2e7c3fe2040bfa1cdb8",
+      "split": "heldout",
+      "token_count": 174
+    },
+    {
+      "author_chain_id": "A",
+      "author_residue_range": [
+        1,
+        113
+      ],
+      "c_terminal_missing": 0,
+      "cluster_anchor": "1GA3_1",
+      "complete": false,
+      "compressed_sha256": "013d6040449158bcd4b1178cd21e4789ffa20140b53caac7f28e90fdb1827faf",
+      "description": "Interleukin-13",
+      "download_url": "https://files.rcsb.org/download/5E4E.cif.gz",
+      "entity_id": "5E4E_1",
+      "geometry_count": 111,
+      "has_insertion_codes": false,
+      "label_chain_id": "A",
+      "length": 113,
+      "length_bin": [
+        100,
+        249
+      ],
+      "max_internal_gap": 2,
+      "max_missing_block": 2,
+      "missing_ratio": 0.017699115044247787,
+      "n_terminal_missing": 0,
+      "organisms": [
+        "Homo sapiens"
+      ],
+      "pdb_id": "5E4E",
+      "sequence_id": "5E4E.A",
+      "sequence_sha256": "7fbb037223741b5d43cbea73ec52c49ce21c039d68639d15715b6c045998004c",
+      "source_sha256": "a9b0d2399c41050d19cae8fbe00ca69ecee9e3855bb7365abaeaf773e4a417b6",
+      "split": "selection",
+      "token_count": 111
+    },
+    {
+      "author_chain_id": "A",
+      "author_residue_range": [
+        31,
+        227
+      ],
+      "c_terminal_missing": 0,
+      "cluster_anchor": "2CL3_1",
+      "complete": true,
+      "compressed_sha256": "275d0c5169058e2cb7f009ae1daaea72d77e66ba753d3c407e8ca86fcc2e0870",
+      "description": "Cleavage and polyadenylation specificity factor subunit 5",
+      "download_url": "https://files.rcsb.org/download/5R4Q.cif.gz",
+      "entity_id": "5R4Q_1",
+      "geometry_count": 197,
+      "has_insertion_codes": false,
+      "label_chain_id": "A",
+      "length": 197,
+      "length_bin": [
+        100,
+        249
+      ],
+      "max_internal_gap": 0,
+      "max_missing_block": 0,
+      "missing_ratio": 0.0,
+      "n_terminal_missing": 0,
+      "organisms": [
+        "Homo sapiens"
+      ],
+      "pdb_id": "5R4Q",
+      "sequence_id": "5R4Q.A",
+      "sequence_sha256": "424bec71b2ed887a9c19a934c2310fbb1befc864a0f5725c2b9e21d4981efde7",
+      "source_sha256": "0c3301ad8ab2b8a5d087ca5c27d1e45902d02144bf817f1aeea7c4e81e087b7f",
+      "split": "selection",
+      "token_count": 197
+    },
+    {
+      "author_chain_id": "B",
+      "author_residue_range": [
+        1,
+        99
+      ],
+      "c_terminal_missing": 0,
+      "cluster_anchor": "1A1M_2",
+      "complete": true,
+      "compressed_sha256": "f5c251d2417a2f6f6a9fac8148afa2e088a35f3de676ba21d123f5bf3728e8a0",
+      "description": "Beta-2-microglobulin",
+      "download_url": "https://files.rcsb.org/download/3TIE.cif.gz",
+      "entity_id": "3TIE_2",
+      "geometry_count": 99,
+      "has_insertion_codes": false,
+      "label_chain_id": "B",
+      "length": 99,
+      "length_bin": [
+        25,
+        99
+      ],
+      "max_internal_gap": 0,
+      "max_missing_block": 0,
+      "missing_ratio": 0.0,
+      "n_terminal_missing": 0,
+      "organisms": [
+        "Homo sapiens"
+      ],
+      "pdb_id": "3TIE",
+      "sequence_id": "3TIE.B",
+      "sequence_sha256": "19916695f0fea2713c1617e79f23e054164c645cadbd8c368d7a9f44fdd20624",
+      "source_sha256": "04b0ec90356a8f9e19c3b331e6547cfad654f3cea61ebd8bd9a475959d7f24c7",
+      "split": "heldout",
+      "token_count": 99
+    },
+    {
+      "author_chain_id": "A",
+      "author_residue_range": [
+        23,
+        826
+      ],
+      "c_terminal_missing": 19,
+      "cluster_anchor": "10EN_1",
+      "complete": false,
+      "compressed_sha256": "074a1bbbb5009bf3d46712cd86986abebc260eb415edc70b9e7ab9a71bccc986",
+      "description": "N-methyl-D-aspartate receptor subunit NR1-8a",
+      "download_url": "https://files.rcsb.org/download/5IOV.cif.gz",
+      "entity_id": "5IOV_1",
+      "geometry_count": 803,
+      "has_insertion_codes": false,
+      "label_chain_id": "A",
+      "length": 822,
+      "length_bin": [
+        800,
+        1280
+      ],
+      "max_internal_gap": 1,
+      "max_missing_block": 19,
+      "missing_ratio": 0.024330900243309004,
+      "n_terminal_missing": 0,
+      "organisms": [
+        "Xenopus laevis"
+      ],
+      "pdb_id": "5IOV",
+      "sequence_id": "5IOV.A",
+      "sequence_sha256": "f7d05ea4d9f1105d24411ea839bb084ef28743ba86e709cd4050ce765f6d0186",
+      "source_sha256": "c479cb48a5ccc32a1bcef38421843b026a1951872cae2d102b5ae1c342677721",
+      "split": "heldout",
+      "token_count": 802
+    },
+    {
+      "author_chain_id": "A",
+      "author_residue_range": [
+        208,
+        1047
+      ],
+      "c_terminal_missing": 12,
+      "cluster_anchor": "3AIB_1",
+      "complete": false,
+      "compressed_sha256": "80bce96131e5b68fbcd6130f57b38f7c4d857f86fa3aa761ce3a494774738b76",
+      "description": "Glucosyltransferase-I",
+      "download_url": "https://files.rcsb.org/download/8UF5.cif.gz",
+      "entity_id": "8UF5_1",
+      "geometry_count": 839,
+      "has_insertion_codes": false,
+      "label_chain_id": "A",
+      "length": 869,
+      "length_bin": [
+        800,
+        1280
+      ],
+      "max_internal_gap": 1,
+      "max_missing_block": 17,
+      "missing_ratio": 0.03452243958573072,
+      "n_terminal_missing": 17,
+      "organisms": [
+        "Streptococcus mutans"
+      ],
+      "pdb_id": "8UF5",
+      "sequence_id": "8UF5.A",
+      "sequence_sha256": "3aed9c2de56d9fedb0ec2517c2a122a73b58a470375d68f2e9e790acbf18ba81",
+      "source_sha256": "2df5761a6692a1f71eb1b4bcf659a0495f55e362befd4a59dfc925159e8f8a41",
+      "split": "heldout",
+      "token_count": 839
+    },
+    {
+      "author_chain_id": "A",
+      "author_residue_range": [
+        1,
+        56
+      ],
+      "c_terminal_missing": 0,
+      "cluster_anchor": "1GJS_1",
+      "complete": true,
+      "compressed_sha256": "51ca287374460d5c33f9603bcc884af7a4b658ba3fe4b4dc4428c0cc5280b85e",
+      "description": "Immunoglobulin G-binding protein G",
+      "download_url": "https://files.rcsb.org/download/6NL9.cif.gz",
+      "entity_id": "6NL9_1",
+      "geometry_count": 56,
+      "has_insertion_codes": false,
+      "label_chain_id": "A",
+      "length": 56,
+      "length_bin": [
+        25,
+        99
+      ],
+      "max_internal_gap": 0,
+      "max_missing_block": 0,
+      "missing_ratio": 0.0,
+      "n_terminal_missing": 0,
+      "organisms": [
+        "Streptococcus"
+      ],
+      "pdb_id": "6NL9",
+      "sequence_id": "6NL9.A",
+      "sequence_sha256": "197106cf02c3a3f3e475aa747d211f4a9135c9aa01644dc2f2287d72d55e7984",
+      "source_sha256": "222f61beed47734306d29f85752545c5b00b743c258eb6fde46c33d39efefb88",
+      "split": "heldout",
+      "token_count": 56
+    },
+    {
+      "author_chain_id": "I",
+      "author_residue_range": [
+        31,
+        54
+      ],
+      "c_terminal_missing": 0,
+      "cluster_anchor": "4BOH_3",
+      "complete": false,
+      "compressed_sha256": "d009508b2bd8c278b50e2a6ae237df64440d5d058eac72abc945b8ff204e3970",
+      "description": "Thrombin inhibitor madanin 1",
+      "download_url": "https://files.rcsb.org/download/5L6N.cif.gz",
+      "entity_id": "5L6N_3",
+      "geometry_count": 24,
+      "has_insertion_codes": false,
+      "label_chain_id": "C",
+      "length": 35,
+      "length_bin": [
+        25,
+        99
+      ],
+      "max_internal_gap": 0,
+      "max_missing_block": 11,
+      "missing_ratio": 0.3142857142857143,
+      "n_terminal_missing": 11,
+      "organisms": [
+        "Haemaphysalis longicornis"
+      ],
+      "pdb_id": "5L6N",
+      "sequence_id": "5L6N.C",
+      "sequence_sha256": "320126469cdd20027d9249ab0e0140cfde38d933955552fcfb325bc764a9e939",
+      "source_sha256": "99e065d0bb3c8fd09b27fb622cf3e51487fc38afd8fe03cf70549cfe2aa5c1c3",
+      "split": "heldout",
+      "token_count": 24
+    },
+    {
+      "author_chain_id": "C",
+      "author_residue_range": [
+        155,
+        179
+      ],
+      "c_terminal_missing": 1,
+      "cluster_anchor": "5J3Q_2",
+      "complete": false,
+      "compressed_sha256": "a3ea74391f5e3fa5ba7536a6710d0d423b43a299a19f3d97b2323f08ff49debb",
+      "description": "Edc1",
+      "download_url": "https://files.rcsb.org/download/5J3T.cif.gz",
+      "entity_id": "5J3T_3",
+      "geometry_count": 25,
+      "has_insertion_codes": false,
+      "label_chain_id": "C",
+      "length": 26,
+      "length_bin": [
+        25,
+        99
+      ],
+      "max_internal_gap": 0,
+      "max_missing_block": 1,
+      "missing_ratio": 0.038461538461538464,
+      "n_terminal_missing": 0,
+      "organisms": [
+        "Schizosaccharomyces pombe"
+      ],
+      "pdb_id": "5J3T",
+      "sequence_id": "5J3T.C",
+      "sequence_sha256": "43aba4ebffc8a8a314c6cdb3fbf80f00431f1666633ae91e5cf60809bc4cb742",
+      "source_sha256": "48c3967adb9b91e008cdd417690a635df7964e2777a5edc6af07b75c83386b33",
+      "split": "selection",
+      "token_count": 25
+    },
+    {
+      "author_chain_id": "C",
+      "author_residue_range": [
+        188,
+        225
+      ],
+      "c_terminal_missing": 20,
+      "cluster_anchor": "5BUZ_3",
+      "complete": false,
+      "compressed_sha256": "28e9c7bceb2e1fa6ed95870decb546853fc464fa0db9ff29288f2b446299255b",
+      "description": "SNAP receptor-like protein",
+      "download_url": "https://files.rcsb.org/download/5BUZ.cif.gz",
+      "entity_id": "5BUZ_3",
+      "geometry_count": 38,
+      "has_insertion_codes": false,
+      "label_chain_id": "C",
+      "length": 67,
+      "length_bin": [
+        25,
+        99
+      ],
+      "max_internal_gap": 0,
+      "max_missing_block": 20,
+      "missing_ratio": 0.43283582089552236,
+      "n_terminal_missing": 9,
+      "organisms": [
+        "Thermochaetoides thermophila DSM 1495"
+      ],
+      "pdb_id": "5BUZ",
+      "sequence_id": "5BUZ.C",
+      "sequence_sha256": "038d69a048d23873938cabbf50c3cc2f0e141e5d0c4fdfb5dab37f75a4cc7a8b",
+      "source_sha256": "8be4f34fb13c62fe92f630ba76d7ceb7c560e1a8883089fab1677648aacc1100",
+      "split": "heldout",
+      "token_count": 38
+    },
+    {
+      "author_chain_id": "A",
+      "author_residue_range": [
+        172,
+        833
+      ],
+      "c_terminal_missing": 0,
+      "cluster_anchor": "12LP_1",
+      "complete": false,
+      "compressed_sha256": "9b660e34ec800deebb5701d7a88508039c8910d6ce04da0ea6755164a977e5db",
+      "description": "Lysine-specific histone demethylase 1A",
+      "download_url": "https://files.rcsb.org/download/5X60.cif.gz",
+      "entity_id": "5X60_1",
+      "geometry_count": 662,
+      "has_insertion_codes": false,
+      "label_chain_id": "A",
+      "length": 669,
+      "length_bin": [
+        500,
+        799
+      ],
+      "max_internal_gap": 0,
+      "max_missing_block": 7,
+      "missing_ratio": 0.01046337817638266,
+      "n_terminal_missing": 7,
+      "organisms": [
+        "Homo sapiens"
+      ],
+      "pdb_id": "5X60",
+      "sequence_id": "5X60.A",
+      "sequence_sha256": "c8ee9d4536c8148a29235830ced81914c982d29f76d31ce520022c85e18a687e",
+      "source_sha256": "9546bc69a447014f704ec9e664fd2dd926d64d6185d6d9085ba80e93f4e08cfb",
+      "split": "selection",
+      "token_count": 662
+    },
+    {
+      "author_chain_id": "A",
+      "author_residue_range": [
+        6,
+        508
+      ],
+      "c_terminal_missing": 4,
+      "cluster_anchor": "5N6H_1",
+      "complete": false,
+      "compressed_sha256": "ab9bf55096344b6c24749df86e13223767ee5655cbe5225dab7e6cfef33f9e69",
+      "description": "Apolipoprotein N-acyltransferase",
+      "download_url": "https://files.rcsb.org/download/5N6H.cif.gz",
+      "entity_id": "5N6H_1",
+      "geometry_count": 503,
+      "has_insertion_codes": false,
+      "label_chain_id": "A",
+      "length": 532,
+      "length_bin": [
+        500,
+        799
+      ],
+      "max_internal_gap": 0,
+      "max_missing_block": 25,
+      "missing_ratio": 0.05451127819548872,
+      "n_terminal_missing": 25,
+      "organisms": [
+        "Escherichia coli K-12"
+      ],
+      "pdb_id": "5N6H",
+      "sequence_id": "5N6H.A",
+      "sequence_sha256": "a1258e8f8d634eaed232c487b5cbe5b5bfe047ba2c374ab08ed7689f532b1929",
+      "source_sha256": "fbcec8518247d562663d796ed31a3099905324434952dddbfd7f4271d6fb4a6f",
+      "split": "heldout",
+      "token_count": 503
+    },
+    {
+      "author_chain_id": "A",
+      "author_residue_range": [
+        32,
+        606
+      ],
+      "c_terminal_missing": 10,
+      "cluster_anchor": "3ALW_1",
+      "complete": false,
+      "compressed_sha256": "53c660277c8656ed5059b46fc817b1c263d7503afe24b82b9da7b4408dd171fe",
+      "description": "Hemagglutinin,LINKER,CDw150",
+      "download_url": "https://files.rcsb.org/download/3ALX.cif.gz",
+      "entity_id": "3ALX_1",
+      "geometry_count": 515,
+      "has_insertion_codes": false,
+      "label_chain_id": "A",
+      "length": 559,
+      "length_bin": [
+        500,
+        799
+      ],
+      "max_internal_gap": 15,
+      "max_missing_block": 15,
+      "missing_ratio": 0.07871198568872988,
+      "n_terminal_missing": 7,
+      "organisms": [
+        "Measles morbillivirus",
+        "synthetic construct",
+        "Saguinus oedipus"
+      ],
+      "pdb_id": "3ALX",
+      "sequence_id": "3ALX.A",
+      "sequence_sha256": "b6e8b401bd1d496b3015f7639c7747c4036993f645f0bfeca5f0ad6b1ac284ad",
+      "source_sha256": "efd6357985bc054df0accf10e07f4a1b64091c237e46fce684f8e3d1ba59495c",
+      "split": "heldout",
+      "token_count": 515
+    },
+    {
+      "author_chain_id": "B",
+      "author_residue_range": [
+        1,
+        366
+      ],
+      "c_terminal_missing": 0,
+      "cluster_anchor": "1JQJ_1",
+      "complete": true,
+      "compressed_sha256": "27748070998dc82f10debd1861642ee329a5c80b2a9c2db005247dee08ac9056",
+      "description": "DNA POLYMERASE III SUBUNIT BETA",
+      "download_url": "https://files.rcsb.org/download/5FKU.cif.gz",
+      "entity_id": "5FKU_2",
+      "geometry_count": 366,
+      "has_insertion_codes": false,
+      "label_chain_id": "B",
+      "length": 366,
+      "length_bin": [
+        250,
+        499
+      ],
+      "max_internal_gap": 0,
+      "max_missing_block": 0,
+      "missing_ratio": 0.0,
+      "n_terminal_missing": 0,
+      "organisms": [
+        "Escherichia coli K-12"
+      ],
+      "pdb_id": "5FKU",
+      "sequence_id": "5FKU.B",
+      "sequence_sha256": "d75789d4440117116cb6f9c32e71fc4ba11af0335eeeebbf46978185aceadf94",
+      "source_sha256": "ace03f8c7f691a44b7a530f9c8ff9a4323ccdc565f4abc892825dc220857b9ee",
+      "split": "heldout",
+      "token_count": 366
+    },
+    {
+      "author_chain_id": "A",
+      "author_residue_range": [
+        90,
+        222
+      ],
+      "c_terminal_missing": 0,
+      "cluster_anchor": "1PK6_1",
+      "complete": true,
+      "compressed_sha256": "28099e215207fb739fc8c3fb0709379c9e693387e30ea792defc09499d8cb079",
+      "description": "Complement C1q subcomponent subunit A",
+      "download_url": "https://files.rcsb.org/download/6FCZ.cif.gz",
+      "entity_id": "6FCZ_1",
+      "geometry_count": 133,
+      "has_insertion_codes": false,
+      "label_chain_id": "A",
+      "length": 133,
+      "length_bin": [
+        100,
+        249
+      ],
+      "max_internal_gap": 0,
+      "max_missing_block": 0,
+      "missing_ratio": 0.0,
+      "n_terminal_missing": 0,
+      "organisms": [
+        "Homo sapiens"
+      ],
+      "pdb_id": "6FCZ",
+      "sequence_id": "6FCZ.A",
+      "sequence_sha256": "53b1ec1238dac9d76243d6401a7e7ce9dd32b1ac6f5f6044b2b45649f4cda54b",
+      "source_sha256": "cbc4915e3613097a499c37bf04be4704bcbee6b210644ff1c38522021eaaaec3",
+      "split": "heldout",
+      "token_count": 133
+    },
+    {
+      "author_chain_id": "A",
+      "author_residue_range": [
+        13,
+        140
+      ],
+      "c_terminal_missing": 0,
+      "cluster_anchor": "1KT0_1",
+      "complete": true,
+      "compressed_sha256": "115d94a760a7f656612afc7c5257603e254039ec6f646df82244e082f8613fe9",
+      "description": "Peptidyl-prolyl cis-trans isomerase FKBP5",
+      "download_url": "https://files.rcsb.org/download/9GQG.cif.gz",
+      "entity_id": "9GQG_1",
+      "geometry_count": 128,
+      "has_insertion_codes": false,
+      "label_chain_id": "A",
+      "length": 128,
+      "length_bin": [
+        100,
+        249
+      ],
+      "max_internal_gap": 0,
+      "max_missing_block": 0,
+      "missing_ratio": 0.0,
+      "n_terminal_missing": 0,
+      "organisms": [
+        "Homo sapiens"
+      ],
+      "pdb_id": "9GQG",
+      "sequence_id": "9GQG.A",
+      "sequence_sha256": "a0c08975efabb02730f876f9318b83a1659f866ff69bfbd93beb718ec392199b",
+      "source_sha256": "bd7e2b880dfe87b615e9beb09af2e630019441eac850b3f55bfe38bd4fce6da4",
+      "split": "heldout",
+      "token_count": 128
+    },
+    {
+      "author_chain_id": "A",
+      "author_residue_range": [
+        2,
+        294
+      ],
+      "c_terminal_missing": 0,
+      "cluster_anchor": "1UA2_1",
+      "complete": true,
+      "compressed_sha256": "72f51b727f335a6d655c21017ac457d4cf3f0bec089e1142a0adfc3fde41d725",
+      "description": "Mitogen-activated protein kinase kinase kinase kinase 1",
+      "download_url": "https://files.rcsb.org/download/7M0M.cif.gz",
+      "entity_id": "7M0M_1",
+      "geometry_count": 293,
+      "has_insertion_codes": false,
+      "label_chain_id": "A",
+      "length": 293,
+      "length_bin": [
+        250,
+        499
+      ],
+      "max_internal_gap": 0,
+      "max_missing_block": 0,
+      "missing_ratio": 0.0,
+      "n_terminal_missing": 0,
+      "organisms": [
+        "Homo sapiens"
+      ],
+      "pdb_id": "7M0M",
+      "sequence_id": "7M0M.A",
+      "sequence_sha256": "f637f1007e3955f2dedf57ecb96431f6b7d1bfce52bca04d27b8d16082810601",
+      "source_sha256": "baf01a963f149ac4e853ad5d635dbbeb90d889e404128629f453f6fdb004c779",
+      "split": "heldout",
+      "token_count": 293
+    },
+    {
+      "author_chain_id": "A",
+      "author_residue_range": [
+        1,
+        297
+      ],
+      "c_terminal_missing": 0,
+      "cluster_anchor": "11LT_1",
+      "complete": true,
+      "compressed_sha256": "679d5764757da832e2cf3ee1a99fe72474213a97a2e9ef4b1e8bae45f5344e16",
+      "description": "VP1",
+      "download_url": "https://files.rcsb.org/download/4CDU.cif.gz",
+      "entity_id": "4CDU_1",
+      "geometry_count": 297,
+      "has_insertion_codes": false,
+      "label_chain_id": "A",
+      "length": 297,
+      "length_bin": [
+        250,
+        499
+      ],
+      "max_internal_gap": 0,
+      "max_missing_block": 0,
+      "missing_ratio": 0.0,
+      "n_terminal_missing": 0,
+      "organisms": [
+        "Enterovirus A71"
+      ],
+      "pdb_id": "4CDU",
+      "sequence_id": "4CDU.A",
+      "sequence_sha256": "7748e466707acaeb32df3edcbcb09d6a70245d85bdcb442b219883e24f45fc64",
+      "source_sha256": "823743afe4ef524408309cad74f87b4d12389dd1821c095e099530cb11ec1fec",
+      "split": "selection",
+      "token_count": 297
+    },
+    {
+      "author_chain_id": "B",
+      "author_residue_range": [
+        1,
+        212
+      ],
+      "c_terminal_missing": 0,
+      "cluster_anchor": "1AHJ_2",
+      "complete": true,
+      "compressed_sha256": "0b1dc5a82f0ed3403ed4620ee971ed4c187aca3290c30a2719ec204c9ca7c077",
+      "description": "Nitrile hydratase subunit beta",
+      "download_url": "https://files.rcsb.org/download/3A8G.cif.gz",
+      "entity_id": "3A8G_2",
+      "geometry_count": 212,
+      "has_insertion_codes": false,
+      "label_chain_id": "B",
+      "length": 212,
+      "length_bin": [
+        100,
+        249
+      ],
+      "max_internal_gap": 0,
+      "max_missing_block": 0,
+      "missing_ratio": 0.0,
+      "n_terminal_missing": 0,
+      "organisms": [
+        "Rhodococcus erythropolis"
+      ],
+      "pdb_id": "3A8G",
+      "sequence_id": "3A8G.B",
+      "sequence_sha256": "beecdfbe855a5a468641d2699731885ca2f93983b13cb4849ee335bd70e2a6a6",
+      "source_sha256": "ccf3085a729644bda75ef30c4da1eb6e6c3e9454bb67669f2553d6f9fe0119ed",
+      "split": "selection",
+      "token_count": 212
+    },
+    {
+      "author_chain_id": "C",
+      "author_residue_range": [
+        -1,
+        1052
+      ],
+      "c_terminal_missing": 0,
+      "cluster_anchor": "11RM_1",
+      "complete": true,
+      "compressed_sha256": "ab2008dca9f94a1d87eff2140ba184c8dd43dfbe5c5f3f31eb62108cffd10717",
+      "description": "Exportin-1,Exportin-1",
+      "download_url": "https://files.rcsb.org/download/5YST.cif.gz",
+      "entity_id": "5YST_3",
+      "geometry_count": 1017,
+      "has_insertion_codes": false,
+      "label_chain_id": "C",
+      "length": 1017,
+      "length_bin": [
+        800,
+        1280
+      ],
+      "max_internal_gap": 0,
+      "max_missing_block": 0,
+      "missing_ratio": 0.0,
+      "n_terminal_missing": 0,
+      "organisms": [
+        "Saccharomyces cerevisiae S288C",
+        "Saccharomyces cerevisiae S288C"
+      ],
+      "pdb_id": "5YST",
+      "sequence_id": "5YST.C",
+      "sequence_sha256": "f2a9ae6aa4ef3e9a16dd8f246a8f26de47b9f1bc549b8de7000075e11766105b",
+      "source_sha256": "2d6fb1df4ed4abeaf10b1732047dbb0d11688268044ad11d2d4baad0e00c1bf2",
+      "split": "selection",
+      "token_count": 1017
+    },
+    {
+      "author_chain_id": "C",
+      "author_residue_range": [
+        1,
+        573
+      ],
+      "c_terminal_missing": 0,
+      "cluster_anchor": "7ZD5_1",
+      "complete": true,
+      "compressed_sha256": "1c56281ca1d7de4f22ab2628b301c97c372a2422cf1002a10791e6c3c79959ce",
+      "description": "ATP-binding/permease protein CydC",
+      "download_url": "https://files.rcsb.org/download/7ZDR.cif.gz",
+      "entity_id": "7ZDR_1",
+      "geometry_count": 573,
+      "has_insertion_codes": false,
+      "label_chain_id": "A",
+      "length": 573,
+      "length_bin": [
+        500,
+        799
+      ],
+      "max_internal_gap": 0,
+      "max_missing_block": 0,
+      "missing_ratio": 0.0,
+      "n_terminal_missing": 0,
+      "organisms": [
+        "Escherichia coli K-12"
+      ],
+      "pdb_id": "7ZDR",
+      "sequence_id": "7ZDR.A",
+      "sequence_sha256": "371ec8318d8e9f7d79b5753aab44ceee5bddff629e888959e89b58285e75e176",
+      "source_sha256": "f11fef8e36de92ebe158ffc99c5b240f56d569b6ffc613509003e6a29be2be90",
+      "split": "selection",
+      "token_count": 573
+    },
+    {
+      "author_chain_id": "A",
+      "author_residue_range": [
+        83,
+        741
+      ],
+      "c_terminal_missing": 0,
+      "cluster_anchor": "1SLI_1",
+      "complete": true,
+      "compressed_sha256": "936a5a30463e99f957e793321ee6b9d0df37e4497d30f228838a30de342e5c22",
+      "description": "Neuraminidase C",
+      "download_url": "https://files.rcsb.org/download/4YW5.cif.gz",
+      "entity_id": "4YW5_1",
+      "geometry_count": 659,
+      "has_insertion_codes": false,
+      "label_chain_id": "A",
+      "length": 659,
+      "length_bin": [
+        500,
+        799
+      ],
+      "max_internal_gap": 0,
+      "max_missing_block": 0,
+      "missing_ratio": 0.0,
+      "n_terminal_missing": 0,
+      "organisms": [
+        "Streptococcus pneumoniae TIGR4"
+      ],
+      "pdb_id": "4YW5",
+      "sequence_id": "4YW5.A",
+      "sequence_sha256": "5c2ce34b70cea8644fc2570ae60fa2ee719e074b0ac6ff0c7822b5f810070e58",
+      "source_sha256": "e3124e1317b780571ac1a58e044de0c606ee1417197276d7744530e187dec945",
+      "split": "selection",
+      "token_count": 659
+    },
+    {
+      "author_chain_id": "A",
+      "author_residue_range": [
+        17,
+        106
+      ],
+      "c_terminal_missing": 0,
+      "cluster_anchor": "2VJE_2",
+      "complete": true,
+      "compressed_sha256": "92871897363a07b83926efecff95267dbccc1d5ff6dfe3925beeb0f1b23a622c",
+      "description": "Protein Mdm4",
+      "download_url": "https://files.rcsb.org/download/4N5T.cif.gz",
+      "entity_id": "4N5T_1",
+      "geometry_count": 90,
+      "has_insertion_codes": false,
+      "label_chain_id": "A",
+      "length": 90,
+      "length_bin": [
+        25,
+        99
+      ],
+      "max_internal_gap": 0,
+      "max_missing_block": 0,
+      "missing_ratio": 0.0,
+      "n_terminal_missing": 0,
+      "organisms": [
+        "Danio rerio"
+      ],
+      "pdb_id": "4N5T",
+      "sequence_id": "4N5T.A",
+      "sequence_sha256": "ceb645619a228761dcd181deb5fc1c933c6c6814558caa561d15eba699bafb90",
+      "source_sha256": "7f443b2be9b88662005d8f98465eb70b8e4148e1e0bcaaad52d225798c6b1200",
+      "split": "selection",
+      "token_count": 90
+    },
+    {
+      "author_chain_id": "A",
+      "author_residue_range": [
+        20,
+        100
+      ],
+      "c_terminal_missing": 0,
+      "cluster_anchor": "1G5G_1",
+      "complete": true,
+      "compressed_sha256": "b4f0106b74ec872d1f15f63550a3b59792256d9c908258e14149046d06fe6352",
+      "description": "Fusion glycoprotein F2",
+      "download_url": "https://files.rcsb.org/download/4GIP.cif.gz",
+      "entity_id": "4GIP_1",
+      "geometry_count": 81,
+      "has_insertion_codes": false,
+      "label_chain_id": "A",
+      "length": 81,
+      "length_bin": [
+        25,
+        99
+      ],
+      "max_internal_gap": 0,
+      "max_missing_block": 0,
+      "missing_ratio": 0.0,
+      "n_terminal_missing": 0,
+      "organisms": [
+        "Simian virus 5 (strain W3)"
+      ],
+      "pdb_id": "4GIP",
+      "sequence_id": "4GIP.A",
+      "sequence_sha256": "28c2d24a2c8fafa4e2b250251664e8f1eb34ec635ba6e25a4694bc3db890ab8e",
+      "source_sha256": "c0f04babeb208f3c1d5cd16bf0cba4377e7f2c67630549b008f7de669f5c2857",
+      "split": "selection",
+      "token_count": 81
+    },
+    {
+      "author_chain_id": "A",
+      "author_residue_range": [
+        50,
+        318
+      ],
+      "c_terminal_missing": 0,
+      "cluster_anchor": "1WOM_1",
+      "complete": true,
+      "compressed_sha256": "cf4d89c8bf8b8aceaaae0775f8081e5e59ed3f1e16195fc8ac82d0d00ab04185",
+      "description": "Strigolactone esterase D14",
+      "download_url": "https://files.rcsb.org/download/9JQG.cif.gz",
+      "entity_id": "9JQG_1",
+      "geometry_count": 269,
+      "has_insertion_codes": false,
+      "label_chain_id": "A",
+      "length": 269,
+      "length_bin": [
+        250,
+        499
+      ],
+      "max_internal_gap": 0,
+      "max_missing_block": 0,
+      "missing_ratio": 0.0,
+      "n_terminal_missing": 0,
+      "organisms": [
+        "Oryza sativa Japonica Group"
+      ],
+      "pdb_id": "9JQG",
+      "sequence_id": "9JQG.A",
+      "sequence_sha256": "01178672136fc291ddb3fcc7b1d7f79282f5e3ff04a14a1a1942663a0e33f3b3",
+      "source_sha256": "282c88bdbf38d2f696f984277b69d71167f1d9301da671e008979825f4d6a19b",
+      "split": "selection",
+      "token_count": 269
+    },
+    {
+      "author_chain_id": "A",
+      "author_residue_range": [
+        27,
+        668
+      ],
+      "c_terminal_missing": 0,
+      "cluster_anchor": "1MWR_1",
+      "complete": true,
+      "compressed_sha256": "9424ec174ba7a06d690eb2660d91e94bed523bb0a4922fca095fa21c35907fd6",
+      "description": "PENICILLIN BINDING PROTEIN 2 PRIME",
+      "download_url": "https://files.rcsb.org/download/4CJN.cif.gz",
+      "entity_id": "4CJN_1",
+      "geometry_count": 642,
+      "has_insertion_codes": false,
+      "label_chain_id": "A",
+      "length": 642,
+      "length_bin": [
+        500,
+        799
+      ],
+      "max_internal_gap": 0,
+      "max_missing_block": 0,
+      "missing_ratio": 0.0,
+      "n_terminal_missing": 0,
+      "organisms": [
+        "Staphylococcus aureus subsp. aureus Mu50"
+      ],
+      "pdb_id": "4CJN",
+      "sequence_id": "4CJN.A",
+      "sequence_sha256": "e193e85714e3f60103c7a13f82193d305a3a04d974c79321e599cbd2dd891270",
+      "source_sha256": "ed078f4d4820c8f1a06a43c7d3ae6eba658fe30d18c6d6b6a52cf56baf1a0f54",
+      "split": "heldout",
+      "token_count": 642
+    },
+    {
+      "author_chain_id": "A",
+      "author_residue_range": [
+        2,
+        670
+      ],
+      "c_terminal_missing": 0,
+      "cluster_anchor": "1JQK_1",
+      "complete": true,
+      "compressed_sha256": "ea2e6890b1baa0cbe254e9426a22d220c4ab0054116046d2e1868491dc176125",
+      "description": "CO-dehydrogenase",
+      "download_url": "https://files.rcsb.org/download/9FOP.cif.gz",
+      "entity_id": "9FOP_1",
+      "geometry_count": 669,
+      "has_insertion_codes": false,
+      "label_chain_id": "A",
+      "length": 669,
+      "length_bin": [
+        500,
+        799
+      ],
+      "max_internal_gap": 0,
+      "max_missing_block": 0,
+      "missing_ratio": 0.0,
+      "n_terminal_missing": 0,
+      "organisms": [
+        "Carboxydothermus hydrogenoformans"
+      ],
+      "pdb_id": "9FOP",
+      "sequence_id": "9FOP.A",
+      "sequence_sha256": "a94a11843737c9fa220bee7acc61818207e552197eff078ba2bd6a22c5bf97b4",
+      "source_sha256": "ba9484315e04e934aa15990ac1b4d2696070856ac3d59411939df27460738d40",
+      "split": "heldout",
+      "token_count": 669
+    },
+    {
+      "author_chain_id": "A",
+      "author_residue_range": [
+        1,
+        903
+      ],
+      "c_terminal_missing": 0,
+      "cluster_anchor": "1CLQ_3",
+      "complete": true,
+      "compressed_sha256": "da04b989a02644821711f6b1c6cb441501995280c40c5f293e4b70593ea621e0",
+      "description": "DNA polymerase",
+      "download_url": "https://files.rcsb.org/download/4M42.cif.gz",
+      "entity_id": "4M42_1",
+      "geometry_count": 903,
+      "has_insertion_codes": false,
+      "label_chain_id": "A",
+      "length": 903,
+      "length_bin": [
+        800,
+        1280
+      ],
+      "max_internal_gap": 0,
+      "max_missing_block": 0,
+      "missing_ratio": 0.0,
+      "n_terminal_missing": 0,
+      "organisms": [
+        "Escherichia phage RB69"
+      ],
+      "pdb_id": "4M42",
+      "sequence_id": "4M42.A",
+      "sequence_sha256": "6bbf0348d1ec2c64441ff25fe408d5eb3ea72161c33aac160c9d81aa60404f90",
+      "source_sha256": "103fe29710979efdd5ff25b0a531008b400623ba513ebc04e29a3411a36f10b2",
+      "split": "selection",
+      "token_count": 903
+    },
+    {
+      "author_chain_id": "A",
+      "author_residue_range": [
+        1,
+        854
+      ],
+      "c_terminal_missing": 0,
+      "cluster_anchor": "1XKT_1",
+      "complete": true,
+      "compressed_sha256": "9c6769c6dad4fc927261771d04fa7b52299d01239c8ed36280b9ea09a030fc2b",
+      "description": "Fatty acid synthase",
+      "download_url": "https://files.rcsb.org/download/9MJ9.cif.gz",
+      "entity_id": "9MJ9_1",
+      "geometry_count": 854,
+      "has_insertion_codes": false,
+      "label_chain_id": "A",
+      "length": 854,
+      "length_bin": [
+        800,
+        1280
+      ],
+      "max_internal_gap": 0,
+      "max_missing_block": 0,
+      "missing_ratio": 0.0,
+      "n_terminal_missing": 0,
+      "organisms": [
+        "Homo sapiens"
+      ],
+      "pdb_id": "9MJ9",
+      "sequence_id": "9MJ9.A",
+      "sequence_sha256": "24189dd55a971824d47413ee46f2177df5a97047516b3ecff00d52a010206a63",
+      "source_sha256": "c39b18b2b2bfbae8b2c749f74885735814da1a89347828692ba2da1af8e63169",
+      "split": "heldout",
+      "token_count": 854
+    },
+    {
+      "author_chain_id": "A",
+      "author_residue_range": [
+        29,
+        889
+      ],
+      "c_terminal_missing": 0,
+      "cluster_anchor": "2JE8_1",
+      "complete": true,
+      "compressed_sha256": "0b6924c54ca2d72e4295636e2822ebc23429e43bf1ba85896d0896ed00c4b61c",
+      "description": "Beta-mannosidase",
+      "download_url": "https://files.rcsb.org/download/6BYE.cif.gz",
+      "entity_id": "6BYE_1",
+      "geometry_count": 861,
+      "has_insertion_codes": false,
+      "label_chain_id": "A",
+      "length": 861,
+      "length_bin": [
+        800,
+        1280
+      ],
+      "max_internal_gap": 0,
+      "max_missing_block": 0,
+      "missing_ratio": 0.0,
+      "n_terminal_missing": 0,
+      "organisms": [
+        "Xanthomonas citri subsp. citri 306"
+      ],
+      "pdb_id": "6BYE",
+      "sequence_id": "6BYE.A",
+      "sequence_sha256": "e872d70545fccc3fcd4464f2ace0fb36769117b79f006f4ab3ef0b999001f776",
+      "source_sha256": "c7299b4b0bfbc39a2ffd5d6956e0a13038f0e6d9aea6de8f120713fcc0451c5d",
+      "split": "heldout",
+      "token_count": 861
+    }
+  ],
+  "clusters_snapshot_bytes": 22559913,
+  "clusters_snapshot_sha256": "704e16b2887db691f303b891182f514ac00697f9d9432396d4a8fcffa0a19185",
+  "clusters_url": "https://cdn.rcsb.org/resources/sequence/clusters/clusters-by-entity-30.txt",
+  "eligible_entities": 143022,
+  "freeze_date": "2026-09-30",
+  "schema_version": 1,
+  "seed": 20260930
+}
