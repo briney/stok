@@ -64,6 +64,159 @@ model:
 
 Note: Decoder hyperparameters are not configured in YAML; they are defined in code and selected automatically by the same preset used for the codebook.
 
+## GCP-VQVAE structure inference and export
+
+STok includes the released Lite and Large GCP-VQVAE encoder, complete vector
+quantizer, and coordinate decoder. `base` remains an alias for Large. These are
+separate from the sequence tagger described below. No upstream checkout is
+needed at runtime. Default loading uses pinned, SHA-256-verified archives in
+`STOK_GCP_CACHE` (otherwise the XDG STok cache); imports never download weights.
+Pass a local checkpoint for offline use.
+
+```python
+import torch
+from stok.models.gcp_vqvae import load_pretrained_tokenizer
+from stok.models.decoder import load_pretrained_decoder
+from stok.data.structure_encoding import prepare_structure
+from stok.utils.structure_parser import parse_polymer_structure
+from stok.utils.decoding import decode_structure_tokens
+
+tokenizer = load_pretrained_tokenizer("lite", path="/weights/best_valid.pth")
+structure = parse_polymer_structure("chain.cif", chain_id="A", chain_namespace="label")
+graph, residues, labels = prepare_structure(
+    structure, sequence_mode="native", imputation="reference"
+)
+indices = tokenizer.encode(graph, residue_mask=residues, token_mask=labels)
+
+# Components are independently callable; forwards retain autograd support.
+with torch.inference_mode():
+    latents = tokenizer.encoder(graph, token_mask=labels)
+    codes, component_indices, loss = tokenizer.quantizer(latents, mask=labels)
+decoder = load_pretrained_decoder("lite", path="/weights/best_valid.pth")
+coordinates = decode_structure_tokens(
+    decoder, tokenizer.quantizer.codebook, indices, residue_mask=residues
+)  # [1,1280,3,3], N/CA/C in Å; holes and padding are NaN.
+aligned_ids = indices[0, : len(structure.sequence)]
+```
+
+The tokenizer owns all encoder parameters and quantizer initialization/EMA
+buffers. Saving `tokenizer.state_dict()` and passing that file back to its
+loader preserves both components. Published archives containing
+`model_state_dict` and extracted tensor dictionaries load strictly using
+`weights_only=True`; compiled `_orig_mod` keys are normalized without accepting
+collisions. A raw codebook matrix supplies lookup vectors, not a complete
+tokenizer. The decoder independently accepts published archives or its extracted
+state dictionary. Only the five verified unused Large auxiliary-head tensors
+are excluded. No tokenizer training/EMA/backward parity is claimed.
+
+The polymer parser uses mmCIF entity/label positions, PDB SEQRES, or a supplied
+construct sequence with a unique supported alignment. Author numbers and
+insertion codes identify residues without determining missing sequence length.
+Sequence conflicts, ambiguous mappings, and unspecified multiple chains are
+rejected. Select one zero-based model; chains are processed independently.
+Conformers use shared blank atoms plus the alternate with greatest summed
+backbone occupancy, with lexical ties. Modified monomers retain their deposited
+identity and normalize to a documented parent or X. Coordinate-only sequence
+requires explicit `allow_observed_sequence=True` and is recorded as observed,
+not as a full deposited polymer.
+
+`residue_mask` includes every real polymer position; `atom_mask` describes
+original N/CA/C/O observations; `token_mask` requires all four atoms;
+`geometry_mask` requires original N/CA/C; and `graph_node_mask` describes working
+graph inclusion. Unresolved positions and oxygen-only label omissions keep
+their slots. `-1` means unavailable internally, and becomes a null Parquet
+element. Decode helpers return NaN for these slots and skip all-missing rows.
+Strict `indices_to_codes` lookup remains available; `allow_missing=True` maps
+only `-1` to zero. Low-level decoder `true_lengths` overrides attention with a
+prefix and includes internal gaps; high-level decoding instead keeps explicit
+availability holes. Missing-loop completion is not supported.
+
+Preparation is explicit: `reference` reproduces upstream filling/correction;
+`linear` fills atoms without moving observations; `observed_only` omits unusable
+nodes and masks sequential feature stencils across gaps. All share the same
+25–1280 length and original-observation admission rules (at most 20% missing
+required-atom rows and at most 15 consecutive missing rows). Source observations
+are immutable, and filling never becomes exported ground truth. `native`
+retains observed identities, `unknown` replaces every identity input with X,
+and `polymer` supplies known identities at unresolved positions. The stored
+target sequence is unchanged. The [fixture smoke report](docs/experiments/gcp-vqvae/smoke-report.md)
+shows substantial all-X quality loss, especially for Large. Native-input tokens
+are sequence-conditioned; this workflow does not establish sequence-blind
+tokenization or inverse folding. The [public cohort report](docs/experiments/gcp-vqvae/public-report.md)
+records a frozen 40-chain selection/held-out study. Native/reference profiles
+for [Lite](src/stok/configs/gcp_vqvae/lite-native-reference-rocm-fp32.json) and
+[Large](src/stok/configs/gcp_vqvae/large-native-reference-rocm-fp32.json) support
+the recorded ROCm FP32 configuration with fixed 1280-position padding.
+Variable-padding comparisons are diagnostic and do not block this production
+path. The report preserves the original overstrict decision and its correction.
+Policies remain explicitly selected by the caller.
+The profiles reject mismatched tokenizer state/configuration and
+runtime settings before staging output. Its qualification records the exact
+tested Python/dependency versions, accelerator, backend and math flags;
+explicit experimental policies can omit qualification constraints.
+
+The [public roundtrip comparison](docs/experiments/gcp-vqvae/public-roundtrip-report.md)
+also runs both complete STok and upstream encoder/decoder stacks: all 30 supported
+chains matched exactly, with original-input backbone RMSD averaging 0.855 Å for
+Lite and 0.551 Å for Large. The report includes per-chain measurements and plots.
+
+From a repository checkout, this local fixture example uses an explicitly named
+**pilot baseline**, not a selected production policy:
+
+```bash
+stok tokenize-structures \
+  docs/experiments/gcp-vqvae/example.jsonl ./fixture-dataset \
+  --preset lite --checkpoint /weights/best_valid.pth \
+  --policy docs/experiments/gcp-vqvae/pilot-native-reference.json \
+  --rows-per-shard 1
+```
+
+Input is JSONL, one selected chain per unique caller-supplied `sequence_id`:
+
+```json
+{"sequence_id":"sample-A","path":"structures/sample.cif","chain_id":"A","chain_namespace":"label","model_index":0}
+```
+
+Paths resolve against the manifest directory. `chain_namespace` defaults to
+`author`, `model_index` to 0; optional `sequence` supplies a construct sequence.
+Unknown fields, duplicate IDs, malformed rows, and missing files are fatal.
+`--policy` requires the complete explicit JSON schema demonstrated by the pilot
+file: sequence source/fallback, conditioning, required atoms, preparation,
+full-chain context, length/coverage rules, no cropping, FP32 device, and policy
+revision. `implementation_sha256`, when supplied, must match the current
+tokenization pipeline. Execution provenance always records the actual source
+hashes/revision, dependency versions, matmul/TF32 settings and enabled SDPA
+backends. Application tokenization disables ambient autocast. For another device, change the policy
+device explicitly and pass the matching `--device`. BF16 is not approved.
+
+The output contains numbered Parquet shards, `rejections.jsonl`, and a completed
+`manifest.json`. Required columns remain `sequence_id`, `sequence`, and nullable
+`list<int64>` `structure_tokens`. Additional `residue_map` and `source` structs
+retain correspondence, source hashes, chain/entity/model and sequence-source
+metadata. Optional `coordinates` are original-frame `[L,3,3]` observations with
+NaNs, never imputed targets. `--no-include-coordinates` omits them. Every shard
+records matching encoder/quantizer state and config digests, codebook digest,
+policy, and execution provenance; dataset token identity does not require a
+decoder. Existing readers validate generated provenance and ignore additional
+columns. Inspect a completed dataset with
+`stok.data.structure_export.validate_structure_dataset(path)` to verify hashes,
+inventory, counts, and the reader contract.
+
+Generation preserves input order and full accepted chains. `--batch-size`
+groups a bounded number of chains using independent singleton forwards: upstream
+mixed-length tensor batches change terminal features and some IDs. Thus exported
+chain context stays independent of group/shard boundaries, at a throughput cost.
+Exact-ID checks cover the recorded cases; the public study also records rare
+GPU rounding-sensitive ID changes in padding comparisons. Training
+windows cropped later still carry full-chain token context. `--rows-per-shard`
+bounds each output shard. Mapping/coverage exclusions have stable reason codes;
+unexpected numerical/model errors abort. Existing destinations are refused,
+including concurrent publication. Failed runs leave a clearly marked hidden
+sibling staging directory without advertising a completed dataset. Atomic
+no-replace publication currently requires Linux `renameat2` or native Windows
+rename; unsupported platforms fail closed. One process and one selected device
+are used.
+
 ## training
 
 STōk supports two training objectives controlled by `train.objective`:

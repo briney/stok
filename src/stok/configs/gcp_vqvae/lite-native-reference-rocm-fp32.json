@@ -1,0 +1,55 @@
+{
+  "allow_observed_sequence": false,
+  "context_scope": "full_chain",
+  "cropping": "none",
+  "device": "cuda:0",
+  "dtype": "float32",
+  "graph_context": "independent_singleton",
+  "implementation_sha256": "6cc100d98fc5efd15db7afb173c1785cbc69827fb6e2209c3c8b13d76612d77c",
+  "imputation": "reference",
+  "max_length": 1280,
+  "max_missing_block": 15,
+  "max_missing_ratio": 0.2,
+  "min_length": 25,
+  "qualification": {
+    "execution": {
+      "accelerator": "Radeon 8060S Graphics",
+      "attention": "SDPA",
+      "cuda_matmul_allow_tf32": false,
+      "cudnn_allow_tf32": true,
+      "dependencies": {
+        "biopython": "1.88",
+        "graphein": "1.7.8",
+        "numpy": "1.26.4",
+        "pyarrow": "25.0.0",
+        "torch": "2.14.0+rocm7.2",
+        "torch-geometric": "2.8.0.post1",
+        "vector-quantize-pytorch": "1.25.2",
+        "x-transformers": "2.8.0"
+      },
+      "device": "cuda:0",
+      "dtype": "float32",
+      "matmul_precision": "highest",
+      "python": "3.12.14",
+      "sdp_backends_enabled": {
+        "cudnn": true,
+        "flash": true,
+        "math": true,
+        "memory_efficient": true
+      },
+      "torch_cuda": null,
+      "torch_hip": "7.2.53211"
+    },
+    "tokenizer_sha256": "c48a39acaa2c69264632efb004a7f75f15ea57d5d9fac47db675df4ad8e601ba"
+  },
+  "required_atoms": [
+    "N",
+    "CA",
+    "C",
+    "O"
+  ],
+  "schema_version": 1,
+  "sequence_mode": "native",
+  "sequence_source": "deposited_or_supplied",
+  "stok_revision": "0ad9509b3cf251ddbe579ed40e663c5c64615d3c"
+}

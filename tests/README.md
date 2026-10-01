@@ -413,6 +413,84 @@ As new tests are added, update this README with a concise description of each te
 
 ## Local validation
 
+### GCP-VQVAE reference oracle
+
+`unit/test_gcp_vqvae_reference.py` verifies the checked-in, offline preparation
+oracle: input/array hashes, unique case names, provenance, dimensions and masks.
+The small PDB/mmCIF inputs in `test_data/gcp_vqvae/inputs/` are backbone excerpts
+of the existing CAMEO fixture. They cover incomplete atoms/residues, insertion
+codes, negative author numbering, unequal lengths and upstream filtering.
+They exercise upstream's observed-sequence policy; polymer correspondence comes
+later in the implementation plan.
+
+The independent generator imports only the reference package during generation;
+verification imports NumPy alone. It requires the clean checkout at
+`68c4c284fe204de27fdf61db27fcc01136ea9f28`, the package metadata from that commit,
+`x-transformers==2.8.0`, and `vector-quantize-pytorch==1.25.2`. Install the reference
+package's own dependencies in a separate virtual environment, including native
+`torch-cluster`/`torch-scatter` extensions that match that environment's PyTorch.
+These extensions remain reference-only dependencies.
+
+Set `REFERENCE_CHECKOUT` to that checkout and `WEIGHTS_CACHE` to a local directory
+containing `lite/` and `large/`. Each preset directory must contain
+`best_valid.pth`, `config_vqvae.yaml`, `config_gcpnet_encoder.yaml`, and
+`config_geometric_decoder.yaml` from the pinned release. The checkpoint's remote
+filename is `checkpoints/best_valid.pth`; store it locally as `best_valid.pth`.
+The generator verifies every artifact's SHA-256 before creating output and never
+downloads weights. The revisions and digests are recorded in the generator and
+oracle manifest.
+
+```bash
+# Run with the reference environment's Python, from the STok checkout.
+python tests/reference/generate_gcp_vqvae.py \
+  --reference "$REFERENCE_CHECKOUT" --weights "$WEIGHTS_CACHE" \
+  --inputs tests/test_data/gcp_vqvae/inputs \
+  --output /tmp/gcp-vqvae-full-oracle --max-length 64
+
+# Fail, rather than skip, if either release or any required model case is missing.
+python tests/reference/generate_gcp_vqvae.py \
+  --verify /tmp/gcp-vqvae-full-oracle --require-models
+
+# Run in the STok test environment; no reference installation is needed to read it.
+STOK_GCP_REFERENCE_FIXTURES=/tmp/gcp-vqvae-full-oracle python -m pytest \
+  tests/unit/test_gcp_vqvae_reference.py \
+  tests/integration/test_gcp_vqvae_reference.py -q
+```
+
+Outputs include original observed rows/identities, upstream parsed and prepared
+coordinates/masks, actual upstream kNN graph/features, GCP embeddings, projection
+and transformer stages, VQ indices/codes, and coordinate decoder outputs. Both
+models have singleton, unequal-batch, decoder-hole and prefix-length cases.
+Only the five verified unused Large pairwise-head tensors are excluded during
+strict loading; the manifest reports their names. Full model arrays stay outside
+source control. Add `--preparation-only` to reproduce the small offline oracle.
+Output directories must not exist. Compare `manifest.json` and every `.npz` file
+between repeated runs; nondeterministic timestamps and actual local invocation
+paths are stored separately in `run.json`. The manifest's command uses documented
+directory placeholders so its canonical content is independent of local paths.
+
+The initial oracle was generated twice in CPU FP32 with a 64-position override,
+using the released weights and inference settings. This verifies deterministic
+reference capture on the compact cohort. It does **not** establish STok's full
+file-to-token parity, 1280-position production behavior, or accelerator support.
+Omit `--max-length 64` to capture the released 1280-position configuration.
+An unset `STOK_GCP_REFERENCE_FIXTURES` skips the integration inventory check with
+an explicit reason; a skip is not published-weight parity evidence.
+
+Fresh Python 3.10.21 and 3.13.15 installations passed a small encoder/quantizer
+inference check with both pinned dependencies. Python 3.13 built NumPy 1.26.4
+from source for Graphein's `numpy<2` requirement. Graphein's minimum is 1.7.8 to
+avoid resolver fallback to the obsolete 1.5.2 release with invalid dependency
+metadata. The package's `requires-python >=3.10` contract is retained.
+
+Task 1 acceptance: the complete CPU unit/integration suite passed **532 tests**,
+with only the two accelerator-only cases skipped; Ruff and `ty` passed. The
+oracle's 17 checks passed on Python 3.10 and 3.13. Its duplicate full captures
+had identical canonical manifests and NPZ bytes; every checked-in preparation
+array also matched its corresponding full-model capture. The full inventory
+check rejects missing/invalid prefix lengths and decoder-only replacements for
+file-to-graph cases. This is reference-oracle evidence, not STok parity evidence.
+
 Install the project with `python -m pip install -e '.[dev]'`. Use
 `OMP_NUM_THREADS=1 ACCELERATE_USE_CPU=true python -m pytest` for CPU checks.
 Distributed regression tests launch two local processes and require loopback
@@ -497,3 +575,170 @@ python -m build
 The existing CI matrix retains Python 3.10–3.13 and package checks. Native
 multi-process tests run in one dedicated CPU job with per-subprocess deadlines
 and a job timeout. No CI result is claimed merely from editing the workflow.
+
+### Complete GCP-VQVAE inference verification
+
+The full check uses local immutable release archives; no upstream package is
+imported by STok inference:
+
+```bash
+STOK_GCP_WEIGHTS=/path/to/release-directories \
+STOK_GCP_REFERENCE_FIXTURES=/path/to/full-oracle \
+OMP_NUM_THREADS=1 python -m pytest \
+  tests/unit/test_gcp_vqvae.py tests/unit/test_structure_encoding.py \
+  tests/unit/test_decoding_utils.py tests/integration/test_decoder_loader.py \
+  tests/integration/test_gcp_vqvae_parity.py -q
+```
+
+Use `--device cuda` during reference generation and `STOK_GCP_DEVICE=cuda`
+during verification for a separate accelerator capture. This spelling also
+selects ROCm. Graph construction runs on CPU in both paths; model computation
+uses the selected backend. Record the backend rather than comparing an
+accelerator run against CPU expectations. The generator records accelerator
+identity/runtime and retains FP32 as the only oracle dtype.
+
+September 30, 2026 evidence covers both releases, all seven accepted singleton
+files, the unequal batch, rejected files, and decoder holes/prefix lengths.
+CPU and Radeon 8060S (gfx1151, PyTorch 2.14.0+rocm7.2, ROCm 7.2.53211) use
+PyTorch SDPA. Captures exercise both 64- and released 1280-position padding;
+the coordinate input chains are 32–40 residues. This does not establish quality
+on a representative 1280-residue corpus or support for other accelerators.
+
+CPU stages use `rtol=atol=1e-5`. An initial ROCm 1280-position run missed this
+bound at one of 1,310,720 Lite transformer values: absolute error
+`1.1049211e-5` at `(0, 26, 396)` for the incomplete mmCIF case. Per-stage
+measurement across both releases gave these largest absolute differences:
+
+| Stage | Largest absolute difference |
+|---|---:|
+| GCP embedding | 2.8610e-6 |
+| Encoder projection | 3.3379e-6 |
+| Encoder transformer | 2.5272e-5 |
+| Encoder latent | 2.7418e-6 |
+| Quantized code | 0 |
+
+Native accelerator reductions and reference torch-scatter reductions produce
+small rounding differences that the transformer amplifies. ROCm transformer
+comparisons therefore use `rtol=1e-5, atol=2e-5`; other stages retain `1e-5`.
+Every token ID must still agree exactly. Two independent upstream ROCm captures
+were identical. STok quantizer buffers remain unchanged during inference.
+
+Two upstream behaviors need explicit interpretation:
+
+- In the 64-position oracle, batching the shorter chain changes five Lite and
+  two Large IDs relative to singleton encoding. Its padded terminal angle
+  features change. STok's explicit reference path reproduces the corresponding
+  batch, including these differences; production chain context must be explicit.
+- The pinned quantizer's direct `get_output_from_indices` uses Python negative
+  indexing, so `-1` selects the final embedding. Low-level decoder parity tests
+  retain captured reference code inputs. STok's `indices_to_codes` is strict by
+  default; `allow_missing=True` maps `-1` to zero. High-level decoding preserves
+  holes as NaNs and skips rows without labels.
+
+A separate 64-position ROCm BF16 autocast probe on complete, incomplete, and
+shorter chains changed respectively 5/3/3 Lite IDs and 2/4/1 Large IDs compared
+with FP32. Available reconstructed coordinates were finite. The corresponding
+CPU-versus-ROCm FP32 token comparisons had zero differences. These small probes
+do not approve BF16 for production or assess reconstruction quality.
+
+### Polymer correspondence
+
+`parse_polymer_structure` reads mmCIF entity/label metadata (or the deposited
+polymer scheme), or uniquely aligns PDB coordinate residues to SEQRES with
+Biopython's `PairwiseAligner`. Author IDs and insertion codes identify source
+residues; they never determine polymer length. A supplied sequence must agree
+with deposited sequence metadata; without it, supplied sequences require a
+unique coordinate mapping. Coordinate-only fallback is explicitly enabled with
+`allow_observed_sequence=True` and recorded as `sequence_source=observed`.
+
+Deposited monomer IDs stay in the residue map. One-letter parent normalization
+uses PDB MODRES/mmCIF chem-comp parent information, STok's documented AA3TO1
+mapping, then Biopython's extended mapping; unsupported parents become X.
+Conflicting/multiple parent or monomer assignments are rejected. Alternate
+backbone conformers use shared blank atoms and the nonblank altloc with greatest
+summed backbone occupancy; ties use lexical altloc order. Source coordinates,
+atom masks, residue maps, and metadata are read-only snapshots. Unspecified
+multiple chains, namespace collisions, ambiguous alignments, inconsistent
+scheme/atom identities, and duplicate author identities have categorized
+errors. The legacy observed-residue parser keeps its original population and
+N/CA/C return contract.
+
+`prepare_structure` keeps source observations separate from the working graph.
+Its residue/token masks have `[1,1280]` shape; attached `atom_mask`,
+`geometry_mask`, and `graph_node_mask` describe original atoms, original N/CA/C
+metric targets, and graph inclusion respectively. Reference token validity
+requires all four backbone atoms. An oxygen-only omission removes the label
+while retaining the original geometry target and native observed identity.
+`native`, `unknown`, and `polymer` control encoder identities independently of
+the unchanged target sequence. Reference filling is explicit and source arrays
+never become writable model inputs.
+
+`tokenize_structures` accepts a group of chains and returns ordered, unpadded
+CPU ID tensors with `-1` at unavailable labels. It deliberately performs
+singleton chain forwards, preserving dataset IDs independently of the group or
+shard boundaries. This costs throughput compared with true tensor batching;
+mixed-length reference batching retains its documented terminal-feature
+behavior. `iter_structure_manifest` validates JSONL identifiers, fields/types,
+chain namespaces, selected models, sequences, and paths with file/line context;
+relative paths resolve against the manifest directory. Duplicate IDs and
+unknown fields are fatal. Structure-folder evaluation masks now require finite
+original N/CA/C observations rather than merely a sequence position.
+
+### Policy experiments and aligned export
+
+The fixed native/unknown × reference/linear/observed-only matrix and separate
+polymer/reference ablation use the shared parser, preparation, model and metrics.
+`unit/test_gcp_vqvae_experiments.py` checks original targets, fixed masks,
+oxygen-only omissions, counts/rejections, unavailable decoder outputs, complete
+state fingerprints and config snapshots. `unit/test_structure_encoding.py`
+checks linear observation preservation/rigid transforms/coincident endpoints
+and observed-only sequence-stencil gating. Reference filling's displacement and
+orientation dependence are deliberately retained as baseline evidence.
+
+`integration/test_structure_tokenization_export.py` exercises typed nullable
+int64 shards, exact mapped positions, partial atoms, unresolved termini/internal
+positions, unique IDs, exclusions, independent grouping/sharding identity,
+metadata checks, interruption and concurrent-destination publication. It feeds
+both existing readers and collators, checks BOS/EOS/padding and sequence targets
+at missing structure labels, compares decoder outputs after serialization, and
+runs a real one-update training/evaluation smoke on generated shards. Legacy
+Parquet files remain supported; generated shards require compatible provenance.
+All-rejected runs and numerical model failures cannot publish a dataset.
+
+The [fixture report](../docs/experiments/gcp-vqvae/smoke-report.md) records both
+published models' measured quality/context limitations, all 60 attempted
+source/perturbation cases per condition, and local full-result hashes. It is
+smoke evidence with overlapping source excerpts, not a representative internal
+or family-held-out policy evaluation. The separate
+[public study](../docs/experiments/gcp-vqvae/public-report.md) freezes 40 distinct
+30% sequence clusters before inference and freezes the decision before held-out
+evaluation. Three public-contract tests cover split/identity quotas, the
+historical selection arithmetic and numerical audit counts, and the current
+fixed-1280 release profiles. Native/reference is supported for both Lite and
+Large on the recorded ROCm FP32 configuration. Variable-padding comparisons
+remain diagnostic; the report records correction of the original overstrict gate.
+Exporter checks also cover matching qualification and rejection before staging
+of changed encoder/quantizer state, configuration, backend, accelerator and
+math/SDPA settings. The packaged profile's constraints match the frozen evidence.
+
+The [full public roundtrip experiment](../docs/experiments/gcp-vqvae/public-roundtrip-report.md)
+compares both complete released STok/upstream encoder, VQ and decoder stacks on
+the same deposited residue mapping. It reports both original-input N/CA/C and CA
+RMSD, per-chain outcomes, exclusions and direct coordinate/ID agreement without
+an acceptance threshold. `test_gcp_vqvae_roundtrip.py` checks proper rigid RMSD
+alignment, masked NaN targets and exclusion of reflections. The actual experiment
+and saved-array audit cover 60 accepted model/chain results.
+The native/reference JSON under that directory is an explicitly named fixture
+pilot baseline. All-X inputs degraded reconstruction on this corpus; native
+labels must not be represented as sequence-blind.
+
+The installed-wheel check includes both packaged model configs and an actual
+CPU offline CLI export using the local Lite release archive. No reference
+checkout is on its import path. Default full published-weight tests remain
+explicit, and no large artifacts are checked into the repository. Model
+computation is verified at FP32 on CPU and the recorded Radeon ROCm backend;
+BF16, NVIDIA CUDA, other accelerators and multi-GPU dataset inference are not
+approved by these checks. Public reconstruction evidence now includes real
+26–1017-residue deposited chains; it remains distinct from upstream parity and
+does not establish unseen-family/pretrained-training independence or universal
+exact-ID stability on GPU.

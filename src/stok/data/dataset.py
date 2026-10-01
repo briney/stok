@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 from collections.abc import Sequence, Sized
 from typing import Any, cast
 
@@ -9,8 +10,32 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
 from torch.utils.data import Dataset, IterableDataset, get_worker_info
+from ..utils.pretrained import json_sha256
 
 PARQUET_EXTENSIONS = {".parquet", ".parq", ".pq"}
+
+
+def _structure_provenance(path: Path, schema: pa.Schema):
+    """Legacy files have no provenance; generated files must have consistent digests."""
+    metadata = schema.metadata or {}
+    keys = (b"stok.provenance", b"stok.tokenizer_sha256", b"stok.policy_sha256")
+    if not any(key in metadata for key in keys):
+        return None
+    try:
+        provenance = json.loads(metadata[keys[0]])
+        if (
+            provenance["schema_version"] != 1
+            or json_sha256(provenance["tokenizer"]) != metadata[keys[1]].decode()
+            or json_sha256(provenance["policy"]) != metadata[keys[2]].decode()
+        ):
+            raise ValueError("digest mismatch")
+        return (
+            metadata[keys[1]],
+            metadata[keys[2]],
+            json_sha256(provenance["execution"]),
+        )
+    except (KeyError, TypeError, ValueError, UnicodeDecodeError) as error:
+        raise ValueError(f"{path}: invalid structure-token provenance") from error
 
 
 def distributed_rank() -> tuple[int, int]:
@@ -61,6 +86,7 @@ def _parquet_columns(
     load_coords: bool,
 ) -> list[str]:
     """Validate a file's schema and select the columns consumed by the dataset."""
+    _structure_provenance(path, schema)
     required = {"sequence_id", "sequence"}
     if require_structure_tokens:
         required.add("structure_tokens")
@@ -349,8 +375,10 @@ class IterableTokenizedDataset(IterableDataset):
         self._shards: list[Path] = []
         self._rows_per_shard: list[int] = []
         self._columns: list[list[str]] = []
+        provenances = set()
         for sp in shard_paths:
             pf = pq.ParquetFile(sp)
+            provenances.add(_structure_provenance(sp, pf.schema_arrow))
             self._columns.append(
                 _parquet_columns(
                     sp,
@@ -361,6 +389,8 @@ class IterableTokenizedDataset(IterableDataset):
             )
             self._shards.append(sp)
             self._rows_per_shard.append(int(pf.metadata.num_rows))
+        if len(provenances) != 1:
+            raise ValueError("Shards have incompatible structure-token provenance")
         self._total_rows = int(sum(self._rows_per_shard))
         self.num_samples = self._total_rows
         self.has_labels = any("structure_tokens" in cols for cols in self._columns)

@@ -21,11 +21,10 @@ class ProteinFeaturiser(nn.Module):
 
     Args:
         representation (str): Target structural representation. Currently, this
-            module operates on C-alpha backbone coordinates ("ca_bb").
+            module operates on C-alpha backbone coordinates ("CA" / "ca_bb").
         scalar_node_features (list[str]): Per-node scalar features to compute.
             Supported: "amino_acid_one_hot", "alpha", "kappa",
-            "dihedrals", and "sequence_positional_encoding" (instantiated but
-            not applied here).
+            "dihedrals", and the required "sequence_positional_encoding".
         vector_node_features (list[str]): Per-node vector features to compute.
             Supported: "orientation".
         edge_types (list[str]): Edge construction strategy identifiers. This
@@ -39,8 +38,8 @@ class ProteinFeaturiser(nn.Module):
     Note:
         If "sequence_positional_encoding" is included, a
         :class:`torch_geometric.nn.encoding.PositionalEncoding` module is
-        created and exposed as ``self.positional_encoding`` but not applied in
-        this class. Downstream models can use it as needed.
+        created as ``self.positional_encoding`` and its 16 features are prepended
+        to the scalar features using the explicit dense residue positions.
     """
 
     def __init__(
@@ -59,6 +58,10 @@ class ProteinFeaturiser(nn.Module):
         vector_edge_features: list[str] = ["edge_vectors"],
     ):
         super(ProteinFeaturiser, self).__init__()
+        if "sequence_positional_encoding" not in scalar_node_features:
+            raise ValueError(
+                "The supported featurizer requires sequence positional encoding"
+            )
         self.representation = representation
         self.scalar_node_features = scalar_node_features
         self.vector_node_features = vector_node_features
@@ -110,6 +113,10 @@ class ProteinFeaturiser(nn.Module):
                 orientations(batch.coords, batch._slice_dict["coords"])
             ]
             batch.x_vector_attr = torch.cat(vector_node_features, dim=0)
+            if getattr(batch, "orientation_mask", None) is not None:
+                batch.x_vector_attr = (
+                    batch.x_vector_attr * batch.orientation_mask[..., None]
+                )
 
         # edges
         if self.edge_types:
@@ -226,6 +233,15 @@ def compute_scalar_node_features(
             continue
         else:
             raise ValueError(f"Node feature {feature} not recognised.")
+        stencil_mask = getattr(x, "sequence_stencil_mask", None)
+        if stencil_mask is not None and feature in {"alpha", "kappa", "dihedrals"}:
+            columns = {
+                "alpha": slice(0, 1),
+                "kappa": slice(1, 2),
+                "dihedrals": slice(2, 5),
+            }
+            valid = stencil_mask[:, columns[feature]].repeat_interleave(2, dim=-1)
+            feats[-1] = feats[-1] * valid
     feats = [feat.unsqueeze(1) if feat.ndim == 1 else feat for feat in feats]
 
     if feats:

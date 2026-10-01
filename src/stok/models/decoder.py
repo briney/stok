@@ -9,6 +9,12 @@ import torch.nn as nn
 from x_transformers import ContinuousTransformerWrapper, Encoder
 
 from .head import Dim6RotStructureHead
+from ..utils.pretrained import (
+    canonical_preset,
+    extract_gcp_component,
+    read_gcp_checkpoint,
+    resolve_gcp_artifact,
+)
 
 __all__ = [
     "GeometricDecoder",
@@ -74,9 +80,25 @@ class GeometricDecoder(nn.Module):
         *,
         true_lengths: torch.Tensor | None = None,
     ):
+        if structure_tokens.ndim != 3 or mask.shape != structure_tokens.shape[:2]:
+            raise ValueError(
+                "Decoder codes and mask must have matching [B,L] dimensions"
+            )
         x = self.projector_in(structure_tokens)
 
         decoder_mask_bool = mask.to(torch.bool)
+        if true_lengths is not None:
+            if (
+                true_lengths.shape != (structure_tokens.size(0),)
+                or true_lengths.dtype not in (torch.int32, torch.int64)
+                or (true_lengths < 0).any()
+                or (true_lengths > structure_tokens.size(1)).any()
+            ):
+                raise ValueError(
+                    "true_lengths must be integer [B] within the input span"
+                )
+            positions = torch.arange(structure_tokens.size(1), device=mask.device)
+            decoder_mask_bool = positions[None] < true_lengths.to(mask.device)[:, None]
         x = self.decoder_stack(x, mask=decoder_mask_bool)
 
         bb_out = self.affine_output_projection(
@@ -159,10 +181,23 @@ def _resolve_cache_dir() -> Path:
 
 
 def _ensure_downloaded(preset: str, *, progress: bool = True) -> Path:
+    if not os.environ.get(f"STOK_DECODER_{preset.upper()}_URL"):
+        ddp = dist.is_available() and dist.is_initialized()
+        if ddp:
+            if dist.get_rank() == 0:
+                resolve_gcp_artifact(
+                    preset,
+                    cache_dir=os.environ.get("STOK_DECODER_CACHE"),
+                    progress=progress,
+                )
+            dist.barrier()
+        return resolve_gcp_artifact(
+            preset, cache_dir=os.environ.get("STOK_DECODER_CACHE"), progress=progress
+        )
     cache_dir = _resolve_cache_dir()
     local_name = f"decoder-{preset}.pt"
     local_path = cache_dir / local_name
-    url = DECODER_URLS[preset]
+    url = os.environ.get(f"STOK_DECODER_{preset.upper()}_URL", DECODER_URLS[preset])
 
     # if the weights file already exists, return the existing weights file
     if local_path.exists() and local_path.is_file():
@@ -211,9 +246,9 @@ def _ensure_downloaded(preset: str, *, progress: bool = True) -> Path:
 
 
 def load_pretrained_decoder(
-    preset: Literal["base", "lite"] = "base",
+    preset: Literal["base", "large", "lite"] = "base",
     *,
-    path: str | None = None,
+    path: str | Path | None = None,
     device: torch.device | str = "cpu",
     freeze: bool = True,
     progress: bool = True,
@@ -233,8 +268,8 @@ def load_pretrained_decoder(
     Returns:
         An initialized ``GeometricDecoder`` with weights loaded.
     """
-    if preset not in _DECODER_ARCH:
-        raise ValueError(f"Unsupported preset: {preset}. Choose 'base' or 'lite'.")
+    resolved_preset = canonical_preset(preset)
+    preset = "base" if resolved_preset == "large" else "lite"
 
     if path is not None:
         ckpt_path = Path(path)
@@ -244,7 +279,9 @@ def load_pretrained_decoder(
         ckpt_path = _ensure_downloaded(preset, progress=progress)
 
     # Load state dict on CPU first
-    state_dict = torch.load(ckpt_path, map_location="cpu")
+    state = read_gcp_checkpoint(ckpt_path)
+    released_archive = any(key.startswith("vqvae.") for key in state)
+    state_dict = extract_gcp_component(state, "decoder")
 
     # Infer input dimensionality from projector weights
     proj_w = state_dict.get("projector_in.weight")
@@ -253,6 +290,11 @@ def load_pretrained_decoder(
             "Checkpoint missing 'projector_in.weight'; cannot infer d_code/d_model."
         )
     inferred_d_model, inferred_d_code = int(proj_w.shape[0]), int(proj_w.shape[1])
+    expected_code_dim = 128 if resolved_preset == "lite" else 256
+    if released_archive and inferred_d_code != expected_code_dim:
+        raise RuntimeError(
+            f"Checkpoint d_code={inferred_d_code} does not match preset '{preset}' (expected {expected_code_dim})"
+        )
 
     arch = _DECODER_ARCH[preset]
     if arch["d_model"] != inferred_d_model:

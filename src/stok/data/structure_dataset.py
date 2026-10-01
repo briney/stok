@@ -30,7 +30,7 @@ class StructureFolderDataset(Dataset):
       - sequence: amino acid sequence extracted from structure
       - coords: backbone coordinates [max_length, 3, 3] for N, CA, C atoms
       - masks: boolean mask [max_length] for valid positions
-      - nan_masks: same as masks (all backbone atoms present or NaN)
+      - nan_masks: original N/CA/C atoms have finite coordinates
 
     Note: No VQ indices are provided since these are raw structures without
     pre-computed structure tokens.
@@ -123,7 +123,7 @@ class StructureFolderDataset(Dataset):
                 - sequence (str): Amino acid sequence
                 - coords (Tensor): [max_length, 3, 3] backbone coordinates
                 - masks (Tensor): [max_length] boolean mask for valid positions
-                - nan_masks (Tensor): [max_length] same as masks
+                - nan_masks (Tensor): [max_length] finite original N/CA/C observations
 
             Note: 'structure_tokens' key is NOT included (not available for raw structures).
         """
@@ -160,7 +160,7 @@ class StructureFolderDataset(Dataset):
             "sequence": seq,
             "coords": torch.tensor(coords_padded, dtype=torch.float32),
             "masks": torch.tensor(mask, dtype=torch.bool),
-            "nan_masks": torch.tensor(mask, dtype=torch.bool),
+            "nan_masks": torch.tensor(np.isfinite(coords_padded).all(axis=(1, 2))),
         }
 
         if not self.has_coords:
