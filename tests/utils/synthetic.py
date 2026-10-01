@@ -78,3 +78,29 @@ def make_collate_fn(
         return build_batch(tokenizer, batch, codebook_size, ignore_index)
 
     return _collate
+
+
+def make_mdlm_rows() -> list[dict]:
+    """Clean paired rows whose coordinates identify each original residue."""
+    rows = []
+    for sequence_id, sequence in (
+        ("long", "LAGVSERTIPDKQNFYMHWCLAGVSERT"),
+        ("short", "AXC"),
+    ):
+        tokens = list(range(len(sequence)))
+        if sequence_id == "long":
+            tokens[14] = None
+        rows.append(
+            {
+                "dataset": "synthetic",
+                "sequence_id": sequence_id,
+                "sequence": sequence,
+                "structure_tokens": tokens,
+                "coordinates": torch.arange(len(sequence) * 9, dtype=torch.float32)
+                .reshape(len(sequence), 3, 3)
+                .tolist(),
+                "source": {"path": sequence_id + ".cif", "sha256": sequence_id},
+                "residue_map": [{"polymer_position": i} for i in range(len(sequence))],
+            }
+        )
+    return rows
