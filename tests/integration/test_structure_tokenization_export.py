@@ -312,6 +312,18 @@ def test_failed_runs_never_publish(tmp_path, export_inputs, monkeypatch, fault):
     "field,value",
     [
         ("max_length", 2048),
+        ("min_length", 0),
+        ("min_length", 3),
+        ("min_length", True),
+        ("min_length", 1281),
+        ("max_length", 24),
+        ("max_length", 1280.0),
+        ("max_missing_ratio", True),
+        ("max_missing_ratio", -0.1),
+        ("max_missing_ratio", 1.1),
+        ("max_missing_ratio", float("nan")),
+        ("max_missing_block", -1),
+        ("max_missing_block", 1.5),
         ("dtype", "bfloat16"),
         ("imputation", "mystery"),
         ("required_atoms", ["CA"]),
@@ -332,6 +344,52 @@ def test_invalid_policy_rejected_before_staging(tmp_path, export_inputs, field, 
             manifest, tmp_path / "dataset", tokenizer=model, policy=policy
         )
     assert not list(tmp_path.glob(".dataset.staging-*"))
+
+
+def test_configurable_filters_reach_preflight_and_tokenization(tmp_path, export_inputs):
+    from stok.data.structure_export import write_structure_dataset
+
+    model, manifest, policy = export_inputs
+    entries = [json.loads(line) for line in manifest.read_text().splitlines()]
+    incomplete = tmp_path / "large-gap.pdb"
+    # 20 missing slots out of 40 exceed both upstream coverage thresholds.
+    content = (FIXTURES / "inputs/complete_pdb.pdb").read_text()
+    incomplete.write_text(
+        "".join(
+            line
+            for line in content.splitlines(True)
+            if not line.startswith("ATOM") or not 6 <= int(line[22:26]) <= 25
+        )
+    )
+    entries = [dict(entries[0], path=str(incomplete)), entries[3]]
+    manifest.write_text("".join(json.dumps(entry) + "\n" for entry in entries))
+    policy = dict(policy, max_missing_ratio=None, max_missing_block=None)
+    summary = write_structure_dataset(
+        manifest, tmp_path / "unfiltered", tokenizer=model, policy=policy
+    )
+    assert summary["row_count"] == 2 and summary["null_count"] == 20
+    rows = pq.read_table(tmp_path / "unfiltered/part-000000.parquet").to_pylist()
+    assert len(rows[0]["sequence"]) == len(rows[0]["structure_tokens"]) == 40
+    assert [
+        i for i, token in enumerate(rows[0]["structure_tokens"]) if token is None
+    ] == list(range(5, 25))
+    for field, value, reason in (
+        ("max_missing_ratio", 0.49, "missing_ratio_exceeded"),
+        ("max_missing_block", 19, "missing_block_exceeded"),
+        ("max_length", 39, "chains_too_long"),
+        ("min_length", 41, "chains_too_short"),
+    ):
+        filtered = dict(policy, **{field: value})
+        if field == "min_length":
+            with pytest.raises(ValueError, match="All input structures were rejected"):
+                write_structure_dataset(
+                    manifest, tmp_path / field, tokenizer=model, policy=filtered
+                )
+            continue
+        result = write_structure_dataset(
+            manifest, tmp_path / field, tokenizer=model, policy=filtered
+        )
+        assert result["row_count"] == 1 and result["exclusions"] == {reason: 1}
 
 
 def test_corruption_and_incompatible_shards_fail_validation(tmp_path, export_inputs):

@@ -199,20 +199,68 @@ def _sequence_stencil_masks(
     return scalars, torch.stack([after, before], dim=-1)
 
 
-def _check_reference_coverage(coords: torch.Tensor, *, detail: str) -> None:
-    length = coords.size(0)
-    if length < 25 or length > 1280:
-        raise StructureExclusion(
-            "chains_too_short" if length < 25 else "chains_too_long", detail
+def validate_structure_limits(
+    *,
+    min_length: int = 25,
+    max_length: int = 1280,
+    max_missing_ratio: float | None = 0.2,
+    max_missing_block: int | None = 15,
+) -> None:
+    """Validate admission settings within the supported 1280-position tensors."""
+    if (
+        type(min_length) is not int
+        or type(max_length) is not int
+        or not 4 <= min_length <= max_length <= 1280
+    ):
+        raise ValueError(
+            "Structure policy lengths must satisfy 4 <= min_length <= max_length <= 1280"
         )
+    if max_missing_ratio is not None and (
+        type(max_missing_ratio) not in {int, float} or not 0 <= max_missing_ratio <= 1
+    ):
+        raise ValueError(
+            "Structure policy max_missing_ratio must be null or a finite number in [0, 1]"
+        )
+    if max_missing_block is not None and (
+        type(max_missing_block) is not int or max_missing_block < 0
+    ):
+        raise ValueError(
+            "Structure policy max_missing_block must be null or a nonnegative integer"
+        )
+
+
+def _check_reference_coverage(
+    coords: torch.Tensor,
+    *,
+    detail: str,
+    min_length: int = 25,
+    max_length: int = 1280,
+    max_missing_ratio: float | None = 0.2,
+    max_missing_block: int | None = 15,
+) -> None:
+    validate_structure_limits(
+        min_length=min_length,
+        max_length=max_length,
+        max_missing_ratio=max_missing_ratio,
+        max_missing_block=max_missing_block,
+    )
+    length = coords.size(0)
+    if length < min_length or length > max_length:
+        raise StructureExclusion(
+            "chains_too_short" if length < min_length else "chains_too_long", detail
+        )
+    if max_missing_ratio is None and max_missing_block is None:
+        return
     missing = ~torch.isfinite(coords[:, 1]).all(dim=-1)
-    if missing.float().mean() > 0.2:
+    if max_missing_ratio is not None and missing.float().mean() > max_missing_ratio:
         raise StructureExclusion("missing_ratio_exceeded", detail)
+    if max_missing_block is None:
+        return
     longest = current = 0
     for flag in missing.tolist():
         current = current + 1 if flag else 0
         longest = max(longest, current)
-    if longest > 15:
+    if longest > max_missing_block:
         raise StructureExclusion("missing_block_exceeded", detail)
 
 
@@ -327,8 +375,16 @@ def prepare_structure(
     *,
     sequence_mode: Literal["native", "unknown", "polymer"],
     imputation: Literal["reference", "linear", "observed_only"],
+    min_length: int = 25,
+    max_length: int = 1280,
+    max_missing_ratio: float | None = 0.2,
+    max_missing_block: int | None = 15,
 ) -> tuple[Batch, torch.Tensor, torch.Tensor]:
-    """Prepare a working copy; mask labels using original N/CA/C/O observations."""
+    """Prepare aligned observations; null limits disable optional coverage filters.
+
+    Defaults preserve the reference experiments; dataset writers supply their
+    explicit policy limits. Tensor padding remains fixed at 1280 positions.
+    """
     if sequence_mode not in {"native", "unknown", "polymer"}:
         raise ValueError("sequence_mode must be native, unknown, or polymer")
     if imputation not in {"reference", "linear", "observed_only"}:
@@ -356,8 +412,14 @@ def prepare_structure(
         raise StructureExclusion("no_usable_structure", structure.sequence_id)
     propagated = coordinates.clone()
     propagated[~available] = float("nan")
-    # Hold filtering and atom requirements fixed across the matrix.
-    _check_reference_coverage(propagated, detail=structure.sequence_id)
+    _check_reference_coverage(
+        propagated,
+        detail=structure.sequence_id,
+        min_length=min_length,
+        max_length=max_length,
+        max_missing_ratio=max_missing_ratio,
+        max_missing_block=max_missing_block,
+    )
     positions = torch.arange(len(structure.sequence))
     if imputation == "reference":
         coordinates, _ = impute_reference_coordinates(propagated)
@@ -366,6 +428,9 @@ def prepare_structure(
     else:
         positions = torch.where(available)[0]
         coordinates = coordinates[positions]
+    # Graphein's kappa feature requires at least four graph nodes.
+    if coordinates.size(0) < 4:
+        raise StructureExclusion("too_few_graph_nodes", structure.sequence_id)
     if not torch.isfinite(coordinates).all():
         raise StructureExclusion("imputation_nonfinite", structure.sequence_id)
     original = torch.tensor(structure.coordinates)[positions]
@@ -409,6 +474,10 @@ def tokenize_structures(
     *,
     sequence_mode: str,
     imputation: str,
+    min_length: int = 25,
+    max_length: int = 1280,
+    max_missing_ratio: float | None = 0.2,
+    max_missing_block: int | None = 15,
 ) -> list[torch.Tensor]:
     """Return aligned CPU IDs in order, using independent singleton chain context."""
     device = next(tokenizer.parameters()).device
@@ -420,6 +489,10 @@ def tokenize_structures(
             structure,
             sequence_mode=cast(Any, sequence_mode),
             imputation=cast(Any, imputation),
+            min_length=min_length,
+            max_length=max_length,
+            max_missing_ratio=max_missing_ratio,
+            max_missing_block=max_missing_block,
         )
         cast(Data, graph).to(device)
         with torch.autocast(device.type, enabled=False):
