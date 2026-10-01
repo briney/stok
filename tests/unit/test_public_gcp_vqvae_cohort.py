@@ -82,3 +82,48 @@ def test_public_policy_choice_respects_frozen_quality_and_ranking():
             assert result["selected_condition"] == chosen["condition"]
         else:
             assert result["selected_condition"] is None
+
+
+def test_heldout_keeps_frozen_choice_and_packages_only_qualified_policy():
+    root = Path(__file__).resolve().parents[2] / "docs/experiments/gcp-vqvae"
+    selection = json.loads((root / "public-selection-decision.json").read_text())
+    heldout = json.loads((root / "public-heldout-results.json").read_text())
+    audit = json.loads((root / "public-integrity-audit.json").read_text())
+    assert (
+        heldout["selection_decision_sha256"]
+        == hashlib.sha256(
+            (root / "public-selection-decision.json").read_bytes()
+        ).hexdigest()
+    )
+    for preset in ("lite", "large"):
+        result = heldout["presets"][preset]
+        condition = selection["presets"][preset]["selected_condition"]
+        assert result["selected_condition"] == condition
+        for split, data in (("selection", selection), ("heldout", heldout)):
+            evidence = audit[f"{split}-{preset}"]
+            assert evidence["source_mask_target_checks_passed"]
+            assert evidence["report_sha256"] == data["presets"][preset]["report_sha256"]
+            for candidate in data["presets"][preset]["candidates"]:
+                assert candidate["hard_gate_checks"]["padding_zero_changed_ids"] == (
+                    evidence["padding_changed_tokens_by_condition"][
+                        candidate["condition"]
+                    ]
+                    == 0
+                )
+        expected_qualification = condition is not None and next(
+            row["eligible"]
+            for row in result["candidates"]
+            if row["condition"] == condition
+        )
+        assert result["qualified"] == expected_qualification
+        if result["qualified"]:
+            path = Path(__file__).resolve().parents[2] / result["policy_file"]
+            policy = json.loads(path.read_text())
+            sequence, fill = condition.split("/")
+            assert policy["sequence_mode"] == sequence
+            assert policy["imputation"] == fill
+            assert policy["dtype"] == "float32"
+            assert policy["device"] == result["environment"]["device"] == "cuda:0"
+            assert not policy["allow_observed_sequence"]
+        else:
+            assert result["policy_file"] is None

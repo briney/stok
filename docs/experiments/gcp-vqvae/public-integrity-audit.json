@@ -1,0 +1,74 @@
+{
+  "selection-lite": {
+    "sources": 20,
+    "accepted_cases": 749,
+    "rejected_cases": 21,
+    "array_files": 749,
+    "hashed_output_files": 751,
+    "source_mask_target_checks_passed": true,
+    "padding_changed_tokens_by_condition": {
+      "native/linear": 0,
+      "native/observed_only": 1,
+      "native/reference": 0,
+      "polymer/reference": 0,
+      "unknown/linear": 1,
+      "unknown/observed_only": 0,
+      "unknown/reference": 0
+    },
+    "report_sha256": "f8e17a5acbe5120c90d9ff7732fa11888a461c25ee052e32f578f28fe6266cb0"
+  },
+  "selection-large": {
+    "sources": 20,
+    "accepted_cases": 749,
+    "rejected_cases": 21,
+    "array_files": 749,
+    "hashed_output_files": 751,
+    "source_mask_target_checks_passed": true,
+    "padding_changed_tokens_by_condition": {
+      "native/linear": 1,
+      "native/observed_only": 1,
+      "native/reference": 1,
+      "polymer/reference": 0,
+      "unknown/linear": 0,
+      "unknown/observed_only": 0,
+      "unknown/reference": 0
+    },
+    "report_sha256": "24782ce3d664660aab28cc9e508ba3ee0a2de78c6f2acc68a023ffdbadb03d36"
+  },
+  "heldout-lite": {
+    "sources": 20,
+    "accepted_cases": 707,
+    "rejected_cases": 63,
+    "array_files": 707,
+    "hashed_output_files": 709,
+    "source_mask_target_checks_passed": true,
+    "padding_changed_tokens_by_condition": {
+      "native/linear": 0,
+      "native/observed_only": 0,
+      "native/reference": 0,
+      "polymer/reference": 1,
+      "unknown/linear": 0,
+      "unknown/observed_only": 1,
+      "unknown/reference": 0
+    },
+    "report_sha256": "cde294ba6f31605ee4b120637b1857cea3f38f24a4b3cd042c7469654632f9ca"
+  },
+  "heldout-large": {
+    "sources": 20,
+    "accepted_cases": 707,
+    "rejected_cases": 63,
+    "array_files": 707,
+    "hashed_output_files": 709,
+    "source_mask_target_checks_passed": true,
+    "padding_changed_tokens_by_condition": {
+      "native/linear": 0,
+      "native/observed_only": 0,
+      "native/reference": 0,
+      "polymer/reference": 2,
+      "unknown/linear": 1,
+      "unknown/observed_only": 0,
+      "unknown/reference": 0
+    },
+    "report_sha256": "9529d12addd23fda9d5d44274332fcc7d5a90ac3595fd29515f9cf970f0fb107"
+  }
+}

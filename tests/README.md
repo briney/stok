@@ -709,7 +709,13 @@ The [fixture report](../docs/experiments/gcp-vqvae/smoke-report.md) records both
 published models' measured quality/context limitations, all 60 attempted
 source/perturbation cases per condition, and local full-result hashes. It is
 smoke evidence with overlapping source excerpts, not a representative internal
-or family-held-out policy evaluation. No stable production policy is packaged.
+or family-held-out policy evaluation. The separate
+[public study](../docs/experiments/gcp-vqvae/public-report.md) freezes 40 distinct
+30% sequence clusters before inference and freezes the decision before held-out
+evaluation. Three public-contract tests enforce split/identity quotas, the
+predeclared quality/ranking rule, numerical audit counts, and packaging only
+qualified choices. Lite native/reference qualifies on the recorded ROCm FP32
+configuration; Large fails the strict selection padding-stability gate.
 The native/reference JSON under that directory is an explicitly named fixture
 pilot baseline. All-X inputs degraded reconstruction on this corpus; native
 labels must not be represented as sequence-blind.
@@ -720,5 +726,7 @@ checkout is on its import path. Default full published-weight tests remain
 explicit, and no large artifacts are checked into the repository. Model
 computation is verified at FP32 on CPU and the recorded Radeon ROCm backend;
 BF16, NVIDIA CUDA, other accelerators and multi-GPU dataset inference are not
-approved by these checks. Long real-chain quality remains a separate cohort
-question from 1280-position padding parity.
+approved by these checks. Public reconstruction evidence now includes real
+26–1017-residue deposited chains; it remains distinct from upstream parity and
+does not establish unseen-family/pretrained-training independence or universal
+exact-ID stability on GPU.

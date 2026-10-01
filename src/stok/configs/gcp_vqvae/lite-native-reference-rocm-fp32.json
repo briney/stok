@@ -1,0 +1,24 @@
+{
+  "allow_observed_sequence": false,
+  "context_scope": "full_chain",
+  "cropping": "none",
+  "device": "cuda:0",
+  "dtype": "float32",
+  "graph_context": "independent_singleton",
+  "implementation_sha256": "6cc100d98fc5efd15db7afb173c1785cbc69827fb6e2209c3c8b13d76612d77c",
+  "imputation": "reference",
+  "max_length": 1280,
+  "max_missing_block": 15,
+  "max_missing_ratio": 0.2,
+  "min_length": 25,
+  "required_atoms": [
+    "N",
+    "CA",
+    "C",
+    "O"
+  ],
+  "schema_version": 1,
+  "sequence_mode": "native",
+  "sequence_source": "deposited_or_supplied",
+  "stok_revision": "0ad9509b3cf251ddbe579ed40e663c5c64615d3c"
+}

@@ -142,8 +142,12 @@ and `polymer` supplies known identities at unresolved positions. The stored
 target sequence is unchanged. The [fixture smoke report](docs/experiments/gcp-vqvae/smoke-report.md)
 shows substantial all-X quality loss, especially for Large. Native-input tokens
 are sequence-conditioned; this workflow does not establish sequence-blind
-tokenization or inverse folding. Internal cohort selection and held-out policy
-evaluation remain pending, so no production policy is selected by default.
+tokenization or inverse folding. The [public cohort report](docs/experiments/gcp-vqvae/public-report.md)
+records a frozen 40-chain selection/held-out study. Lite native/reference
+qualifies on the recorded ROCm FP32 configuration; its explicit profile is
+[src/stok/configs/gcp_vqvae/lite-native-reference-rocm-fp32.json](src/stok/configs/gcp_vqvae/lite-native-reference-rocm-fp32.json).
+Large did not clear the study's strict padding-stability gate, so no Large
+production profile is packaged. Policies remain explicitly selected by the caller.
 
 From a repository checkout, this local fixture example uses an explicitly named
 **pilot baseline**, not a selected production policy:
@@ -190,7 +194,9 @@ inventory, counts, and the reader contract.
 Generation preserves input order and full accepted chains. `--batch-size`
 groups a bounded number of chains using independent singleton forwards: upstream
 mixed-length tensor batches change terminal features and some IDs. Thus exported
-IDs stay independent of group/shard boundaries, at a throughput cost. Training
+chain context stays independent of group/shard boundaries, at a throughput cost.
+Exact-ID checks cover the recorded cases; the public study also records rare
+GPU rounding-sensitive ID changes in padding comparisons. Training
 windows cropped later still carry full-chain token context. `--rows-per-shard`
 bounds each output shard. Mapping/coverage exclusions have stable reason codes;
 unexpected numerical/model errors abort. Existing destinations are refused,

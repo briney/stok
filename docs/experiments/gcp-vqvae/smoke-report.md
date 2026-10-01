@@ -1,6 +1,6 @@
 # GCP-VQVAE fixture smoke evidence — September 30, 2026
 
-Task 8 is **incomplete**: no representative internal selection manifest, family-grouped held-out cohort, or predeclared quality criterion has been supplied. No production policy was selected or added to package configuration. The pilot file is the published native/reference baseline for fixture verification only. Writer implementation and consumer checks can proceed independently.
+This is the initial fixture smoke evidence, captured before policy selection. Task 8 subsequently used the user-authorized public cohort; its [frozen selection, held-out evaluation, and policy decision](public-report.md) qualify Lite native/reference on the recorded ROCm FP32 configuration and retain Large's failed numerical qualification. The pilot file here remains a fixture baseline, separate from the selected stable profile.
 
 ## Reproduction and provenance
 
@@ -59,9 +59,9 @@ Changing encoder padding from 1,280 to actual chain length changed zero availabl
 
 Paired comparisons save token agreement, latent RMS changes, metric differences and gap-distance diagnostics. Reports include 1,000-resample chain-level bootstrap intervals separately per perturbation. Those intervals describe this correlated fixture sample only, not internal-policy uncertainty. Missing synthetic positions remain unavailable and decode to NaN; saved held-out coordinates are diagnostic data, not scored missing-loop reconstructions. CPU RSS is a process high-water mark and device allocation includes loaded models.
 
-## Remaining policy decision
+## Historical handoff to policy evaluation
 
-Freeze the actual internal JSONL manifest plus explicit family/cluster selection/held-out assignments before inspecting results. It must cover the intended length, coverage, numbering and source populations. Predeclare intended dataset use and acceptable quality/stability criteria on the selection cohort, then freeze a policy and evaluate it once on the reserved cohort. Do not infer a favorable threshold from held-out outcomes. Record restrictions and exclusions if incomplete-structure quality fails; sequence-blind use may require the deferred training/fine-tuning work. No selection/held-out result is claimed here.
+The initial handoff required an actual cohort manifest plus explicit family/cluster selection/held-out assignments before inspecting results. The user subsequently authorized the public cohort documented in the linked report. It must cover the intended length, coverage, numbering and source populations. Predeclare intended dataset use and acceptable quality/stability criteria on the selection cohort, then freeze a policy and evaluate it once on the reserved cohort. Do not infer a favorable threshold from held-out outcomes. Record restrictions and exclusions if incomplete-structure quality fails; sequence-blind use may require the deferred training/fine-tuning work. No selection/held-out result is claimed by these fixture measurements; the public report supplies that separate evidence.
 
 ## Evidence hashes
 
@@ -82,4 +82,4 @@ Final native/reference FP32 export used the same eight-source smoke manifest. Bo
 
 These are single short-corpus measurements, not benchmark medians or a batching speedup claim. Writer time excludes checkpoint loading and initial fingerprint construction; it includes preparation, inference, shard writing/validation and final integrity checks. Process RSS is cumulative high-water, including preceding model activity; device peak includes the loaded tokenizer. The supported group path still runs singleton chain forwards. Full raw summaries and the replay script remain at `/tmp/stok-export-pilot-report.json` and `/tmp/stok-export-pilot.py`.
 
-An independently installed wheel under `/tmp/stok-installed` included both YAML configs and exported the two-row [CLI example](example.jsonl) offline with Lite on CPU: 80 positions, two null labels, no rejections. Its import path excluded the upstream checkout. No production dataset was generated or policy chosen.
+An independently installed wheel under `/tmp/stok-installed` included both YAML configs and exported the two-row [CLI example](example.jsonl) offline with Lite on CPU: 80 positions, two null labels, no rejections. Its import path excluded the upstream checkout. This fixture pilot did not choose a production policy; subsequent public qualification is documented separately.
