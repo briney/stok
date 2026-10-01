@@ -84,11 +84,26 @@ def test_public_policy_choice_respects_frozen_quality_and_ranking():
             assert result["selected_condition"] is None
 
 
-def test_heldout_keeps_frozen_choice_and_packages_only_qualified_policy():
+def test_frozen_history_and_fixed_padding_release_profiles():
     root = Path(__file__).resolve().parents[2] / "docs/experiments/gcp-vqvae"
     selection = json.loads((root / "public-selection-decision.json").read_text())
     heldout = json.loads((root / "public-heldout-results.json").read_text())
     audit = json.loads((root / "public-integrity-audit.json").read_text())
+    release = json.loads((root / "public-fixed-padding-release.json").read_text())
+    assert release["production_padding_length"] == 1280
+    assert release["variable_padding_role"] == "diagnostic"
+    assert (
+        release["selection_decision_sha256"]
+        == hashlib.sha256(
+            (root / "public-selection-decision.json").read_bytes()
+        ).hexdigest()
+    )
+    assert (
+        release["heldout_results_sha256"]
+        == hashlib.sha256(
+            (root / "public-heldout-results.json").read_bytes()
+        ).hexdigest()
+    )
     assert (
         heldout["selection_decision_sha256"]
         == hashlib.sha256(
@@ -116,24 +131,44 @@ def test_heldout_keeps_frozen_choice_and_packages_only_qualified_policy():
             if row["condition"] == condition
         )
         assert result["qualified"] == expected_qualification
-        if result["qualified"]:
-            path = Path(__file__).resolve().parents[2] / result["policy_file"]
-            policy = json.loads(path.read_text())
-            sequence, fill = condition.split("/")
-            assert policy["sequence_mode"] == sequence
-            assert policy["imputation"] == fill
-            assert policy["dtype"] == "float32"
-            assert policy["device"] == result["environment"]["device"] == "cuda:0"
-            assert not policy["allow_observed_sequence"]
-            provenance = heldout["export_verification"][preset]["writer_summary"]
-            assert (
-                policy["qualification"]["tokenizer_sha256"]
-                == provenance["tokenizer_sha256"]
-            )
-            assert policy["qualification"]["execution"] == {
-                key: value
-                for key, value in result["environment"].items()
-                if key not in {"stok_revision", "source_files", "implementation_sha256"}
-            }
-        else:
+        if not result["qualified"]:
             assert result["policy_file"] is None
+        # The corrected release uses selection evidence under the actual fixed-shape
+        # contract; the original study decision above remains historical evidence.
+        eligible = [
+            candidate
+            for candidate in selection["presets"][preset]["candidates"]
+            if all(check["passed"] for check in candidate["quality_checks"])
+            and candidate["hard_gate_checks"]["grouping_zero_changed_ids"]
+        ]
+        condition = min(eligible, key=lambda row: row["ranking_key"])["condition"]
+        current = release["presets"][preset]
+        assert current["selected_condition"] == condition == "native/reference"
+        candidate = next(
+            row for row in result["candidates"] if row["condition"] == condition
+        )
+        assert all(check["passed"] for check in candidate["quality_checks"])
+        assert candidate["hard_gate_checks"]["grouping_zero_changed_ids"]
+        path = Path(__file__).resolve().parents[2] / current["policy_file"]
+        policy = json.loads(path.read_text())
+        sequence, fill = condition.split("/")
+        assert policy["sequence_mode"] == sequence
+        assert policy["imputation"] == fill
+        assert policy["dtype"] == "float32"
+        assert policy["max_length"] == 1280
+        assert policy["device"] == result["environment"]["device"] == "cuda:0"
+        assert not policy["allow_observed_sequence"]
+        export = current["export_verification"]
+        assert policy["qualification"]["tokenizer_sha256"] == export["tokenizer_sha256"]
+        encoded = json.dumps(
+            policy, sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode()
+        assert hashlib.sha256(encoded).hexdigest() == export["policy_sha256"]
+        assert (
+            export["exact_saved_vs_exported_ids"] and export["original_targets_equal"]
+        )
+        assert policy["qualification"]["execution"] == {
+            key: value
+            for key, value in result["environment"].items()
+            if key not in {"stok_revision", "source_files", "implementation_sha256"}
+        }

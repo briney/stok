@@ -712,10 +712,11 @@ smoke evidence with overlapping source excerpts, not a representative internal
 or family-held-out policy evaluation. The separate
 [public study](../docs/experiments/gcp-vqvae/public-report.md) freezes 40 distinct
 30% sequence clusters before inference and freezes the decision before held-out
-evaluation. Three public-contract tests enforce split/identity quotas, the
-predeclared quality/ranking rule, numerical audit counts, and packaging only
-qualified choices. Lite native/reference qualifies on the recorded ROCm FP32
-configuration; Large fails the strict selection padding-stability gate.
+evaluation. Three public-contract tests cover split/identity quotas, the
+historical selection arithmetic and numerical audit counts, and the current
+fixed-1280 release profiles. Native/reference is supported for both Lite and
+Large on the recorded ROCm FP32 configuration. Variable-padding comparisons
+remain diagnostic; the report records correction of the original overstrict gate.
 Exporter checks also cover matching qualification and rejection before staging
 of changed encoder/quantizer state, configuration, backend, accelerator and
 math/SDPA settings. The packaged profile's constraints match the frozen evidence.

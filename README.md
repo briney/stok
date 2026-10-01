@@ -143,12 +143,14 @@ target sequence is unchanged. The [fixture smoke report](docs/experiments/gcp-vq
 shows substantial all-X quality loss, especially for Large. Native-input tokens
 are sequence-conditioned; this workflow does not establish sequence-blind
 tokenization or inverse folding. The [public cohort report](docs/experiments/gcp-vqvae/public-report.md)
-records a frozen 40-chain selection/held-out study. Lite native/reference
-qualifies on the recorded ROCm FP32 configuration; its explicit profile is
-[src/stok/configs/gcp_vqvae/lite-native-reference-rocm-fp32.json](src/stok/configs/gcp_vqvae/lite-native-reference-rocm-fp32.json).
-Large did not clear the study's strict padding-stability gate, so no Large
-production profile is packaged. Policies remain explicitly selected by the caller.
-The qualified profile rejects mismatched tokenizer state/configuration and
+records a frozen 40-chain selection/held-out study. Native/reference profiles
+for [Lite](src/stok/configs/gcp_vqvae/lite-native-reference-rocm-fp32.json) and
+[Large](src/stok/configs/gcp_vqvae/large-native-reference-rocm-fp32.json) support
+the recorded ROCm FP32 configuration with fixed 1280-position padding.
+Variable-padding comparisons are diagnostic and do not block this production
+path. The report preserves the original overstrict decision and its correction.
+Policies remain explicitly selected by the caller.
+The profiles reject mismatched tokenizer state/configuration and
 runtime settings before staging output. Its qualification records the exact
 tested Python/dependency versions, accelerator, backend and math flags;
 explicit experimental policies can omit qualification constraints.

@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "production_padding_length": 1280,
+  "variable_padding_role": "diagnostic",
+  "correction": "The implementer added variable-padding invariance as a release gate although production always pads independent chains to 1280. The user identified that overconstraint. Current selection uses the original quality comparisons and supported grouping under the fixed production shape; original frozen study files remain unchanged.",
+  "selection_decision_sha256": "88a6a3c9f61f2c11406c36839285f763a89591a766d3f956819d7216fae49340",
+  "heldout_results_sha256": "258c06d30e44c67cbf1ea3a75e37f84ae4cf5d405d27f3d35043e7aa67b7d039",
+  "presets": {
+    "lite": {
+      "selected_condition": "native/reference",
+      "selection_quality_eligible_conditions": [
+        "native/reference"
+      ],
+      "policy_file": "src/stok/configs/gcp_vqvae/lite-native-reference-rocm-fp32.json",
+      "export_verification": {
+        "accepted_chains": 13,
+        "labels": 4911,
+        "null_labels": 53,
+        "shards": 3,
+        "exact_saved_vs_exported_ids": true,
+        "original_targets_equal": true,
+        "decoder_close_rtol_atol": 1e-05,
+        "manifest_sha256": "dd8538c89888fa3a606906188f8fa62348215c4f87140a5de7144ad187b09f5c",
+        "tokenizer_sha256": "c48a39acaa2c69264632efb004a7f75f15ea57d5d9fac47db675df4ad8e601ba",
+        "policy_sha256": "5f8b7e9114fa2a1e0c108f6711dd1917e2e72c916fe7d5027e429efc472ea61c",
+        "residue_count": 4964,
+        "rejection_count": 7,
+        "grouping_context": "independent_singleton"
+      }
+    },
+    "large": {
+      "selected_condition": "native/reference",
+      "selection_quality_eligible_conditions": [
+        "native/reference"
+      ],
+      "policy_file": "src/stok/configs/gcp_vqvae/large-native-reference-rocm-fp32.json",
+      "export_verification": {
+        "accepted_chains": 13,
+        "labels": 4911,
+        "null_labels": 53,
+        "shards": 3,
+        "exact_saved_vs_exported_ids": true,
+        "original_targets_equal": true,
+        "decoder_close_rtol_atol": 1e-05,
+        "manifest_sha256": "d4e1dafcab670e9f89bccc0da3049c79e2549cacc269f96fb1cddb7593f9c966",
+        "tokenizer_sha256": "a9f6d9ea5ca25ca24dbda0db50fe0e805e3c4d23f78c535386207ffc896bd305",
+        "policy_sha256": "467f876beaebcb0738dce7a2ead25870665bc6459188c7cf2421abe0c2012d1b",
+        "residue_count": 4964,
+        "rejection_count": 7,
+        "grouping_context": "independent_singleton"
+      }
+    }
+  }
+}
