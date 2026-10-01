@@ -36,6 +36,8 @@ This is additional evidence, not reproduction of those benchmark means: the coho
 
 Seven chains exceed the existing 15-residue missing-block limit and three exceed the 20% missing-row limit. All ten remain listed in the CSV, rather than being dropped from the attempted count. These results describe the 30 supported chains, not reconstruction of all 40 entries or unobserved residues.
 
+A [follow-up experiment](public-coverage-bypass-report.md) bypasses only the admission filter and runs those ten chains through STok. All ten execute successfully; observed-region mean backbone RMSD is 1.266 Å for Lite and 0.985 Å for Large. Their upstream reconstruction remains unmeasured.
+
 ## Replay and saved evidence
 
 From a repository checkout with the existing reference environment and local immutable release archives:
