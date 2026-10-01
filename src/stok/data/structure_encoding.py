@@ -147,6 +147,58 @@ def impute_reference_coordinates(coords: torch.Tensor):
     return coords, ~nan_mask.any(dim=1)
 
 
+def impute_linear_coordinates(coordinates: torch.Tensor) -> torch.Tensor:
+    """Fill each missing atom along residue positions without moving observations."""
+    if coordinates.ndim != 3 or coordinates.shape[1:] != (4, 3):
+        raise ValueError("Coordinates must have shape [L,4,3]")
+    filled = coordinates.clone()
+    for atom in range(4):
+        values = filled[:, atom]
+        anchors = torch.where(torch.isfinite(values).all(-1))[0]
+        if not anchors.numel():
+            raise StructureExclusion("no_usable_anchors", f"Backbone atom {atom}")
+        first, last = int(anchors[0]), int(anchors[-1])
+        values[:first] = values[first]
+        values[last + 1 :] = values[last]
+        for left, right in zip(anchors[:-1].tolist(), anchors[1:].tolist()):
+            weights = torch.arange(
+                1, right - left, dtype=values.dtype, device=values.device
+            )[:, None] / (right - left)
+            values[left + 1 : right] = torch.lerp(values[left], values[right], weights)
+    return filled
+
+
+def _sequence_stencil_masks(
+    positions: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Require contiguous polymer positions throughout each geometric stencil."""
+    rows = torch.arange(positions.numel(), device=positions.device)
+
+    def contiguous(offsets):
+        valid = torch.ones_like(positions, dtype=torch.bool)
+        for offset in offsets:
+            neighbors = rows + offset
+            inside = (neighbors >= 0) & (neighbors < positions.numel())
+            valid &= inside & (
+                positions[neighbors.clamp(0, positions.numel() - 1)]
+                == positions + offset
+            )
+        return valid
+
+    before, after = contiguous([-1, 0]), contiguous([0, 1])
+    scalars = torch.stack(
+        [
+            contiguous([-1, 0, 1, 2]),
+            contiguous([-2, -1, 0, 1, 2]),
+            before,
+            after,
+            after,
+        ],
+        dim=-1,
+    )
+    return scalars, torch.stack([after, before], dim=-1)
+
+
 def _check_reference_coverage(coords: torch.Tensor, *, detail: str) -> None:
     length = coords.size(0)
     if length < 25 or length > 1280:
@@ -279,8 +331,8 @@ def prepare_structure(
     """Prepare a working copy; mask labels using original N/CA/C/O observations."""
     if sequence_mode not in {"native", "unknown", "polymer"}:
         raise ValueError("sequence_mode must be native, unknown, or polymer")
-    if imputation != "reference":
-        raise ValueError("Only reference imputation is currently supported")
+    if imputation not in {"reference", "linear", "observed_only"}:
+        raise ValueError("imputation must be reference, linear, or observed_only")
     required_metadata = {"path", "sha256", "sequence_source", "model_index"}
     metadata = structure.source
     if (
@@ -302,12 +354,24 @@ def prepare_structure(
     available = original_atoms.all(dim=-1)
     if not available.any():
         raise StructureExclusion("no_usable_structure", structure.sequence_id)
-    # The released policy propagates any missing backbone atom to the working row.
-    coordinates[~available] = float("nan")
-    _check_reference_coverage(coordinates, detail=structure.sequence_id)
-    coordinates, _ = impute_reference_coordinates(coordinates)
+    propagated = coordinates.clone()
+    propagated[~available] = float("nan")
+    # Hold filtering and atom requirements fixed across the matrix.
+    _check_reference_coverage(propagated, detail=structure.sequence_id)
+    positions = torch.arange(len(structure.sequence))
+    if imputation == "reference":
+        coordinates, _ = impute_reference_coordinates(propagated)
+    elif imputation == "linear":
+        coordinates = impute_linear_coordinates(coordinates)
+    else:
+        positions = torch.where(available)[0]
+        coordinates = coordinates[positions]
     if not torch.isfinite(coordinates).all():
         raise StructureExclusion("imputation_nonfinite", structure.sequence_id)
+    original = torch.tensor(structure.coordinates)[positions]
+    displacement = (
+        (coordinates - original).norm(dim=-1)[original_atoms[positions]].max()
+    )
     coordinates = coordinates - coordinates.reshape(-1, 3).mean(dim=0)
     if sequence_mode == "unknown":
         identities = "X" * len(structure.sequence)
@@ -317,7 +381,14 @@ def prepare_structure(
         identities = "".join(
             row.get("observed_one_letter") or "X" for row in structure.residue_map
         )
-    batch = batch_structure_graphs([build_structure_graph(coordinates, identities)])
+    identities = "".join(identities[position] for position in positions.tolist())
+    graph = build_structure_graph(coordinates, identities, positions=positions)
+    graph.max_observed_atom_displacement = displacement[None]
+    if imputation == "observed_only":
+        graph.sequence_stencil_mask, graph.orientation_mask = _sequence_stencil_masks(
+            positions
+        )
+    batch = batch_structure_graphs([graph])
     residues = torch.arange(1280)[None] < len(structure.sequence)
     tokens = torch.zeros_like(residues)
     tokens[0, : len(structure.sequence)] = available
@@ -325,7 +396,9 @@ def prepare_structure(
     data.atom_mask = torch.zeros((1, 1280, 4), dtype=torch.bool)
     data.atom_mask[0, : len(structure.sequence)] = original_atoms
     data.geometry_mask = data.atom_mask[:, :, :3].all(-1)
-    data.graph_node_mask = residues.clone()
+    data.graph_node_mask = (
+        tokens.clone() if imputation == "observed_only" else residues.clone()
+    )
     return batch, residues, tokens
 
 

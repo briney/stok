@@ -113,6 +113,10 @@ class ProteinFeaturiser(nn.Module):
                 orientations(batch.coords, batch._slice_dict["coords"])
             ]
             batch.x_vector_attr = torch.cat(vector_node_features, dim=0)
+            if getattr(batch, "orientation_mask", None) is not None:
+                batch.x_vector_attr = (
+                    batch.x_vector_attr * batch.orientation_mask[..., None]
+                )
 
         # edges
         if self.edge_types:
@@ -229,6 +233,15 @@ def compute_scalar_node_features(
             continue
         else:
             raise ValueError(f"Node feature {feature} not recognised.")
+        stencil_mask = getattr(x, "sequence_stencil_mask", None)
+        if stencil_mask is not None and feature in {"alpha", "kappa", "dihedrals"}:
+            columns = {
+                "alpha": slice(0, 1),
+                "kappa": slice(1, 2),
+                "dihedrals": slice(2, 5),
+            }
+            valid = stencil_mask[:, columns[feature]].repeat_interleave(2, dim=-1)
+            feats[-1] = feats[-1] * valid
     feats = [feat.unsqueeze(1) if feat.ndim == 1 else feat for feat in feats]
 
     if feats:

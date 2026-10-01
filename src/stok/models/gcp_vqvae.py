@@ -1,6 +1,7 @@
 """Independently callable GCP-VQVAE encoder and complete vector quantizer."""
 
 from collections.abc import Mapping
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, cast
 
@@ -120,7 +121,7 @@ class GCPVQEncoder(nn.Module):
 class GCPVQTokenizer(nn.Module):
     def __init__(self, config: Mapping[str, Any]):
         super().__init__()
-        self.config = dict(config)
+        self.config = deepcopy(dict(config))
         self.encoder = GCPVQEncoder(config)
         self.quantizer = VectorQuantize(**config["quantizer"])
 

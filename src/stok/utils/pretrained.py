@@ -3,10 +3,14 @@
 from collections.abc import Mapping
 import hashlib
 import importlib.resources as resources
+import importlib.metadata
+import json
 import logging
 import os
 from pathlib import Path
 import tempfile
+import platform
+import subprocess
 from typing import Literal
 import zipfile
 
@@ -164,6 +168,71 @@ def file_sha256(path: str | Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def json_sha256(value) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value, sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode()
+    ).hexdigest()
+
+
+def state_sha256(state: Mapping[str, torch.Tensor]) -> str:
+    """Hash complete tensor state, including dtype, shape, names and buffers."""
+    digest = hashlib.sha256()
+    for name, tensor in sorted(state.items()):
+        tensor = tensor.detach().cpu().contiguous()
+        digest.update(
+            json.dumps([name, str(tensor.dtype), list(tensor.shape)]).encode()
+        )
+        digest.update(tensor.reshape(-1).view(torch.uint8).numpy().tobytes())
+    return digest.hexdigest()
+
+
+def inference_metadata(device: torch.device) -> dict:
+    """Record actual execution and source bytes even for an uncommitted checkout."""
+    package = Path(__file__).parents[1]
+    source = {
+        str(path.relative_to(package)): file_sha256(path)
+        for path in sorted(package.rglob("*.py"))
+    }
+    try:
+        revision = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=package,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        revision = None
+    dependencies = {}
+    for name in (
+        "torch",
+        "numpy",
+        "biopython",
+        "graphein",
+        "torch-geometric",
+        "x-transformers",
+        "vector-quantize-pytorch",
+        "pyarrow",
+    ):
+        dependencies[name] = importlib.metadata.version(name)
+    return {
+        "python": platform.python_version(),
+        "dependencies": dependencies,
+        "device": str(device),
+        "dtype": "float32",
+        "torch_cuda": torch.version.cuda,
+        "torch_hip": torch.version.hip,
+        "accelerator": torch.cuda.get_device_name(device)
+        if device.type == "cuda"
+        else None,
+        "attention": "SDPA",
+        "stok_revision": revision,
+        "implementation_sha256": json_sha256(source),
+        "source_files": source,
+    }
 
 
 def resolve_gcp_artifact(
