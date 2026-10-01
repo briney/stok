@@ -144,6 +144,16 @@ def test_high_level_inference_preserves_length_holes_order_and_singleton_context
     assert all(
         torch.equal(value, model.state_dict()[key]) for key, value in state.items()
     )
+    short = replace(
+        sources[1],
+        sequence=sources[1].sequence[:4],
+        coordinates=sources[1].coordinates[:4],
+        atom_mask=sources[1].atom_mask[:4],
+        residue_map=sources[1].residue_map[:4],
+    )
+    assert tokenize_structures(
+        model, [short], sequence_mode="native", imputation="reference", min_length=4
+    )[0].shape == (4,)
 
 
 def test_unusable_structure_and_incomplete_metadata_are_rejected():
@@ -169,6 +179,54 @@ def test_unusable_structure_and_incomplete_metadata_are_rejected():
     for mode, imputation in (("invalid", "reference"), ("native", "invalid")):
         with pytest.raises(ValueError):
             prepare_structure(source, sequence_mode=mode, imputation=imputation)
+
+
+def test_coverage_limits_can_be_disabled_without_disabling_length_or_usable_checks():
+    from stok.data.structure_encoding import StructureExclusion, prepare_structure
+
+    source = example_polymer()
+    coordinates = source.coordinates.copy()
+    coordinates[5:25] = np.nan
+    source = replace(
+        source, coordinates=coordinates, atom_mask=np.isfinite(coordinates).all(-1)
+    )
+    disabled = dict(max_missing_ratio=None, max_missing_block=None)
+    graph, residues, tokens = prepare_structure(
+        source, sequence_mode="native", imputation="reference", **disabled
+    )
+    assert torch.isfinite(graph.prepared_coordinates).all()
+    assert residues.sum() == 40 and tokens.sum() == 20
+    assert not tokens[0, 5:25].any()
+    for limits, reason in (
+        (dict(disabled, max_missing_ratio=0.49), "missing_ratio_exceeded"),
+        (dict(disabled, max_missing_block=19), "missing_block_exceeded"),
+        (dict(disabled, min_length=41), "chains_too_short"),
+        (dict(disabled, max_length=39), "chains_too_long"),
+    ):
+        with pytest.raises(StructureExclusion, match=reason):
+            prepare_structure(
+                source, sequence_mode="native", imputation="reference", **limits
+            )
+    missing = replace(
+        source,
+        coordinates=np.full_like(coordinates, np.nan),
+        atom_mask=np.zeros_like(source.atom_mask),
+    )
+    with pytest.raises(StructureExclusion, match="no_usable_structure"):
+        prepare_structure(
+            missing, sequence_mode="native", imputation="reference", **disabled
+        )
+    sparse_coordinates = np.full_like(coordinates, np.nan)
+    sparse_coordinates[:3] = source.coordinates[:3]
+    sparse = replace(
+        source,
+        coordinates=sparse_coordinates,
+        atom_mask=np.isfinite(sparse_coordinates).all(-1),
+    )
+    with pytest.raises(StructureExclusion, match="too_few_graph_nodes"):
+        prepare_structure(
+            sparse, sequence_mode="native", imputation="observed_only", **disabled
+        )
 
 
 def test_manifest_paths_and_defaults_are_explicit(tmp_path):

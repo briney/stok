@@ -217,6 +217,64 @@ no-replace publication currently requires Linux `renameat2` or native Windows
 rename; unsupported platforms fail closed. One process and one selected device
 are used.
 
+Directories can also be converted directly through the Python API, without a
+CLI manifest preparation step:
+
+```python
+import json
+from pathlib import Path
+
+from stok.data.structure_directory import write_structure_folder_dataset
+from stok.models.gcp_vqvae import load_pretrained_tokenizer
+
+policy = json.loads(
+    Path("src/stok/configs/gcp_vqvae/training-native-reference.json").read_text()
+)
+policy["device"] = "cuda:0"
+encoder = load_pretrained_tokenizer(
+    "lite", path="/weights/best_valid.pth", device="cuda:0"
+)
+summary = write_structure_folder_dataset(
+    "structures",
+    "pilot-dataset",
+    tokenizer=encoder,
+    policy=policy,
+    recursive=True,
+    rows_per_shard=1000,
+)
+```
+
+This training policy keeps the 25–1280 residue defaults and disables coverage
+filters. Set `min_length` and `max_length` to change admission lengths within
+`4 <= min_length <= max_length <= 1280`; accepted chains still use fixed
+1280-position encoder tensors without cropping. `max_missing_ratio` accepts a
+number in `[0, 1]` or `null`, and `max_missing_block` a nonnegative integer or
+`null`. A `null` value disables that coverage filter; numeric values re-enable
+it. The same settings apply during preflight and tokenization and are recorded
+in dataset provenance. Chains without any complete N/CA/C/O observations,
+ambiguous mappings, and nonfinite preparation results remain excluded.
+Reference workflows retain their explicit original coverage settings.
+The geometric featurizer requires at least four graph nodes; `observed_only`
+preparation excludes chains with fewer than four complete observed residues.
+
+Directory discovery supports `.pdb`, `.ent`, `.cif`, and `.mmcif` (uncompressed), selects the first
+model, and exports every protein chain independently without deduplication.
+IDs include the relative filename with extension and escaped chain ID, e.g.
+`nested/sample.cif:A`. CIF selection uses label chain IDs. Nonprotein chains
+are skipped; malformed files abort discovery. Mapping and coverage exclusions
+remain in `rejections.jsonl`. Missing deposited sequence metadata is rejected
+under this training policy; coordinate-only predicted structures require an
+explicit observed-sequence fallback policy or a manifest with supplied construct
+sequences. Observed-only fallback cannot recover unresolved sequence positions.
+
+Coordinates are omitted by default for directory builds; pass
+`include_coordinates=True` to retain observations. Every new dataset includes
+a hashed `inputs.jsonl` with resolved source paths for replay using
+`write_structure_dataset`. The `source` column preserves file hashes, chain IDs
+and model identity. Keep chains from the same source structure together when
+creating training/validation splits. These tokens describe independent chains;
+future assembly-context encoding requires regenerating tokens for that context.
+
 ## training
 
 STōk supports two training objectives controlled by `train.objective`:

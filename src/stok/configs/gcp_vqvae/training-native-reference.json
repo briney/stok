@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "sequence_source": "deposited_or_supplied",
+  "allow_observed_sequence": false,
+  "sequence_mode": "native",
+  "required_atoms": ["N", "CA", "C", "O"],
+  "imputation": "reference",
+  "graph_context": "independent_singleton",
+  "context_scope": "full_chain",
+  "min_length": 25,
+  "max_length": 1280,
+  "max_missing_ratio": null,
+  "max_missing_block": null,
+  "cropping": "none",
+  "dtype": "float32",
+  "device": "cpu",
+  "stok_revision": "0a699cdd6c9f1d961c6d9dfa1ac1fb175ae0b087"
+}

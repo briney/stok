@@ -1,0 +1,35 @@
+{
+  "accepted_chains": 127,
+  "available_structure_tokens": 49127,
+  "chains_with_null_structure_tokens": 85,
+  "checks": {
+    "all_sequence_token_residue_map_lengths_equal": true,
+    "all_sequences_equal_deposited_sequences": true,
+    "all_source_hashes_match": true,
+    "all_token_availability_matches_original_atoms": true,
+    "dataset_hash_and_schema_validation": true,
+    "existing_iterable_reader_rows": 127,
+    "frozen_public_chains_with_exact_saved_tokens": 30,
+    "previously_accepted_chains_with_exact_tokens": 90,
+    "unique_sequence_ids": true
+  },
+  "dataset_path": "downloads/gcp-vqvae-public/training-pilot-directory-lite-no-coverage-limits",
+  "discovered_chains": 132,
+  "exclusions": {
+    "chains_too_short": 5
+  },
+  "inputs_sha256": "79fb821ff6545fc0dd8febd1e8026bcb71ddcab64328166e4f857307bd21e17e",
+  "manifest_sha256": "ea70cad9eb3dfb17aa4a438e2c89b93e1caa0ca06a88af142ea104e192f1be7a",
+  "null_structure_tokens": 3436,
+  "peak_device_allocated_bytes": 697152512,
+  "policy_device_override": "cuda:0",
+  "policy_file": "src/stok/configs/gcp_vqvae/training-native-reference.json",
+  "policy_sha256": "fe663dcb6bbe0ce08a941d545fdfb24d92b2768774351e888d1a6cbf35a92e17",
+  "rejected_chains": 5,
+  "residue_count": 52563,
+  "runtime_seconds": 96.10686918068677,
+  "schema_version": 1,
+  "shards": 4,
+  "structure_files": 42,
+  "tokenizer_sha256": "c48a39acaa2c69264632efb004a7f75f15ea57d5d9fac47db675df4ad8e601ba"
+}

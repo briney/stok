@@ -23,6 +23,7 @@ from .structure_encoding import (
     iter_structure_manifest,
     prepare_structure,
     tokenize_structures,
+    validate_structure_limits,
 )
 from ..models.gcp_vqvae import GCPVQTokenizer
 from ..utils.pretrained import (
@@ -49,11 +50,13 @@ _QUALIFIED_EXECUTION_FIELDS = (
     "sdp_backends_enabled",
 )
 
+_FILTER_FIELDS = ("min_length", "max_length", "max_missing_ratio", "max_missing_block")
+
 
 def validate_structure_policy(
     policy: Mapping[str, Any], *, device: torch.device
 ) -> dict[str, Any]:
-    """The initial schema supports only the fixed, tested preparation contracts."""
+    """Validate preparation contracts and configurable length/coverage admission."""
     if not isinstance(policy, Mapping):
         raise ValueError("Structure policy must be a JSON object")
     policy = deepcopy(dict(policy))
@@ -63,20 +66,20 @@ def validate_structure_policy(
         "required_atoms": ["N", "CA", "C", "O"],
         "graph_context": "independent_singleton",
         "context_scope": "full_chain",
-        "min_length": 25,
-        "max_length": 1280,
-        "max_missing_ratio": 0.2,
-        "max_missing_block": 15,
         "cropping": "none",
         "dtype": "float32",
     }
-    fields = set(fixed) | {
-        "sequence_mode",
-        "imputation",
-        "allow_observed_sequence",
-        "device",
-        "stok_revision",
-    }
+    fields = (
+        set(fixed)
+        | set(_FILTER_FIELDS)
+        | {
+            "sequence_mode",
+            "imputation",
+            "allow_observed_sequence",
+            "device",
+            "stok_revision",
+        }
+    )
     if fields - policy.keys() or policy.keys() - fields - {
         "implementation_sha256",
         "qualification",
@@ -87,6 +90,7 @@ def validate_structure_policy(
         for key, value in fixed.items()
     ):
         raise ValueError("Unsupported structure policy settings")
+    validate_structure_limits(**{key: policy[key] for key in _FILTER_FIELDS})
     if (
         type(policy["allow_observed_sequence"]) is not bool
         or not isinstance(policy["sequence_mode"], str)
@@ -298,6 +302,10 @@ def validate_structure_dataset(directory: str | Path) -> dict[str, Any]:
             raise ValueError("Dataset counts disagree")
     if file_sha256(directory / "rejections.jsonl") != summary["rejections_sha256"]:
         raise ValueError("Corrupt rejection report")
+    if "inputs_sha256" in summary and (
+        file_sha256(directory / "inputs.jsonl") != summary["inputs_sha256"]
+    ):
+        raise ValueError("Corrupt input inventory")
     return summary
 
 
@@ -319,6 +327,7 @@ def write_structure_dataset(
         raise ValueError("include_coordinates must be boolean")
     device = next(tokenizer.parameters()).device
     policy = validate_structure_policy(policy, device=device)
+    limits = {key: policy[key] for key in _FILTER_FIELDS}
     if (
         tokenizer.training
         or tokenizer.encoder.max_length != 1280
@@ -413,6 +422,7 @@ def write_structure_dataset(
             pending,
             sequence_mode=policy["sequence_mode"],
             imputation=policy["imputation"],
+            **limits,
         )
         if len(ids) != len(pending):
             raise RuntimeError("Tokenizer omitted input chains")
@@ -447,9 +457,13 @@ def write_structure_dataset(
         pending.clear()
 
     try:
-        with (staging / "rejections.jsonl").open("w") as rejected:
+        with (
+            (staging / "rejections.jsonl").open("w") as rejected,
+            (staging / "inputs.jsonl").open("w") as inputs,
+        ):
             for entry in iter_structure_manifest(manifest):
                 input_count += 1
+                inputs.write(json.dumps(entry, allow_nan=False) + "\n")
                 try:
                     before = file_sha256(entry["path"])
                     structure = replace(
@@ -469,6 +483,7 @@ def write_structure_dataset(
                         structure,
                         sequence_mode=policy["sequence_mode"],
                         imputation=policy["imputation"],
+                        **limits,
                     )
                 except (StructureMappingError, StructureExclusion) as error:
                     exclusions[error.reason] += 1
@@ -498,6 +513,7 @@ def write_structure_dataset(
             "tokenizer_sha256": json_sha256(identity),
             "policy_sha256": json_sha256(policy),
             "input_manifest_sha256": manifest_hash,
+            "inputs_sha256": file_sha256(staging / "inputs.jsonl"),
             "input_count": input_count,
             "row_order": "accepted_input_manifest_order",
             "shards": shards,

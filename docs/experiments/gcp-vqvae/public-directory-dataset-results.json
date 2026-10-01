@@ -1,0 +1,35 @@
+{
+  "accepted_chains": 90,
+  "available_structure_tokens": 30686,
+  "chains_with_null_structure_tokens": 48,
+  "checks": {
+    "all_sequence_token_residue_map_lengths_equal": true,
+    "all_sequences_equal_deposited_sequences": true,
+    "all_source_hashes_match": true,
+    "all_token_availability_matches_original_atoms": true,
+    "dataset_hash_and_schema_validation": true,
+    "existing_iterable_reader_rows": 90,
+    "frozen_public_chains_with_exact_saved_tokens": 30,
+    "unique_sequence_ids": true
+  },
+  "dataset_path": "downloads/gcp-vqvae-public/training-pilot-directory-lite",
+  "discovered_chains": 132,
+  "exclusions": {
+    "chains_too_short": 5,
+    "missing_block_exceeded": 27,
+    "missing_ratio_exceeded": 10
+  },
+  "inputs_sha256": "79fb821ff6545fc0dd8febd1e8026bcb71ddcab64328166e4f857307bd21e17e",
+  "manifest_sha256": "2f4c962bd1a8516175eaa7ee53b61524d5f0ed3428158a37e884ca17838f6d36",
+  "null_structure_tokens": 452,
+  "peak_device_allocated_bytes": 697152512,
+  "policy_file": "src/stok/configs/gcp_vqvae/lite-native-reference-rocm-fp32.json",
+  "policy_sha256": "5f8b7e9114fa2a1e0c108f6711dd1917e2e72c916fe7d5027e429efc472ea61c",
+  "rejected_chains": 42,
+  "residue_count": 31138,
+  "runtime_seconds": 68.17013372387737,
+  "schema_version": 1,
+  "shards": 3,
+  "structure_files": 42,
+  "tokenizer_sha256": "c48a39acaa2c69264632efb004a7f75f15ea57d5d9fac47db675df4ad8e601ba"
+}
