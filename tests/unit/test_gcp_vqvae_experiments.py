@@ -122,3 +122,14 @@ def test_provenance_covers_buffers_and_config_snapshot():
     assert state_sha256({"a": torch.tensor(1), "b": torch.ones(2)}) == state_sha256(
         {"b": torch.ones(2), "a": torch.tensor(1)}
     )
+
+
+def test_tokenizer_source_provenance_excludes_decoder_and_cli():
+    from stok.utils.pretrained import inference_metadata
+
+    files = inference_metadata(torch.device("cpu"))["source_files"]
+    assert "models/gcp_vqvae.py" in files
+    assert "data/structure_encoding.py" in files
+    assert "utils/structure_parser.py" in files
+    assert "models/decoder.py" not in files
+    assert "cli/train.py" not in files

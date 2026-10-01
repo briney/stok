@@ -6,6 +6,7 @@ from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
 from stok.cli.smoke_test import run_smoke_test
+from stok.cli.tokenize import tokenize_structures_cmd
 
 
 def _merge_custom_configs(
@@ -166,6 +167,8 @@ def train_cmd(
 
     run_training(cfg)
 
+
+cli.add_command(tokenize_structures_cmd)
 
 if __name__ == "__main__":
     cli()

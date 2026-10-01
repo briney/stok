@@ -368,6 +368,8 @@ def run_experiments(
     model = load_pretrained_tokenizer(preset, path=checkpoint, device=device)
     decoder = load_pretrained_decoder(preset, path=checkpoint, device=device)
     actual_device = next(model.parameters()).device
+    environment = inference_metadata(actual_device)
+    script_sha256 = file_sha256(__file__)
     identity = {
         "encoder_sha256": state_sha256(model.encoder.state_dict()),
         "quantizer_sha256": state_sha256(model.quantizer.state_dict()),
@@ -552,7 +554,6 @@ def run_experiments(
     with (output_dir / "pairs.jsonl").open("w") as handle:
         for pair in pairs:
             handle.write(json.dumps(pair, allow_nan=False) + "\n")
-    environment = inference_metadata(actual_device)
     report = {
         "schema_version": 1,
         "preset": preset,
@@ -562,7 +563,7 @@ def run_experiments(
         "identity": identity,
         "environment": environment,
         "input_manifest_sha256": file_sha256(manifest),
-        "experiment_script_sha256": file_sha256(__file__),
+        "experiment_script_sha256": script_sha256,
         "selected_policy": None,
         "grouping_context": "independent_singleton",
         "grouping_check": grouping_check,

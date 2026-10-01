@@ -125,9 +125,9 @@ class GCPVQTokenizer(nn.Module):
         self.encoder = GCPVQEncoder(config)
         self.quantizer = VectorQuantize(**config["quantizer"])
 
-    def forward(
+    def _encode_latents(
         self, graph: Batch, *, residue_mask: torch.Tensor, token_mask: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         if (
             residue_mask.ndim != 2
             or residue_mask.dtype != torch.bool
@@ -139,7 +139,14 @@ class GCPVQTokenizer(nn.Module):
             )
         if (token_mask & ~residue_mask).any():
             raise ValueError("token_mask must be a subset of residue_mask")
-        latents = self.encoder(graph, token_mask=token_mask)
+        return self.encoder(graph, token_mask=token_mask)
+
+    def forward(
+        self, graph: Batch, *, residue_mask: torch.Tensor, token_mask: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        latents = self._encode_latents(
+            graph, residue_mask=residue_mask, token_mask=token_mask
+        )
         return self.quantizer(latents, mask=token_mask)
 
     @torch.inference_mode()
@@ -150,7 +157,15 @@ class GCPVQTokenizer(nn.Module):
             raise ValueError("Inference encoding requires evaluation mode")
         if not cast(torch.Tensor, self.quantizer._codebook.initted).all():
             raise ValueError("Inference requires an initialized quantizer")
-        return self(graph, residue_mask=residue_mask, token_mask=token_mask)[1]
+        latents = self._encode_latents(
+            graph, residue_mask=residue_mask, token_mask=token_mask
+        )
+        if not torch.isfinite(latents).all():
+            raise FloatingPointError("Nonfinite encoder latents during inference")
+        codes, indices, _ = self.quantizer(latents, mask=token_mask)
+        if not torch.isfinite(codes[token_mask]).all():
+            raise FloatingPointError("Nonfinite quantizer codes during inference")
+        return indices
 
 
 def load_pretrained_tokenizer(

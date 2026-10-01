@@ -194,8 +194,16 @@ def inference_metadata(device: torch.device) -> dict:
     """Record actual execution and source bytes even for an uncommitted checkout."""
     package = Path(__file__).parents[1]
     source = {
-        str(path.relative_to(package)): file_sha256(path)
-        for path in sorted(package.rglob("*.py"))
+        name: file_sha256(package / name)
+        for name in (
+            "models/gcp_vqvae.py",
+            "models/gcpnet.py",
+            "utils/gcp.py",
+            "utils/featurizer.py",
+            "utils/structure_parser.py",
+            "utils/pretrained.py",
+            "data/structure_encoding.py",
+        )
     }
     try:
         revision = subprocess.check_output(

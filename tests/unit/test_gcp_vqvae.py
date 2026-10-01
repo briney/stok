@@ -139,6 +139,32 @@ def test_encoder_forward_keeps_gradients_available():
     assert torch.isfinite(model.encoder_head[0].weight.grad).all()
 
 
+@pytest.mark.parametrize("stage", ["encoder", "quantizer"])
+def test_inference_aborts_on_nonfinite_model_outputs(monkeypatch, stage):
+    from stok.models.gcp_vqvae import GCPVQTokenizer
+
+    model = GCPVQTokenizer(tiny_config()).eval()
+    graph, residues, tokens = small_graph()
+    if stage == "encoder":
+        monkeypatch.setattr(
+            model.encoder,
+            "forward",
+            lambda *a, **k: torch.full((2, 8, 16), float("nan")),
+        )
+    else:
+        monkeypatch.setattr(
+            model.quantizer,
+            "forward",
+            lambda *a, **k: (
+                torch.full((2, 8, 16), float("nan")),
+                torch.zeros(2, 8, dtype=torch.long),
+                torch.tensor(0.0),
+            ),
+        )
+    with pytest.raises(FloatingPointError, match="Nonfinite"):
+        model.encode(graph, residue_mask=residues, token_mask=tokens)
+
+
 def test_empty_scatter_groups_match_reference_zero():
     from stok.utils.gcp import scatter_reduce
 
