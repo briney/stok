@@ -276,7 +276,8 @@ def validate_structure_dataset(directory: str | Path) -> dict[str, Any]:
     directory = Path(directory)
     summary = json.loads((directory / "manifest.json").read_text())
     if (
-        summary.get("status") != "complete"
+        not isinstance(summary, dict)
+        or summary.get("status") != "complete"
         or summary.get("schema_version") != 1
         or not summary.get("shards")
     ):

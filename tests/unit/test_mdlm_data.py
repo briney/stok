@@ -491,3 +491,34 @@ def test_preflight_never_starts_logging_or_creates_artifacts(tmp_path, monkeypat
     assert before == {
         path: file_sha256(path) for path in tmp_path.rglob("*") if path.is_file()
     }
+
+
+@pytest.mark.parametrize("completion", [[], None, "complete"])
+def test_preflight_rejects_nonobject_completion_manifest_with_source_context(
+    tmp_path, completion
+):
+    from stok.data.mdlm import validate_mdlm_sources
+
+    train = write_dataset(tmp_path / "train", [make_mdlm_rows()[0]])
+    (train / "manifest.json").write_text(json.dumps(completion))
+    with pytest.raises(ValueError, match="train source train.*completion manifest"):
+        validate_mdlm_sources(
+            {"train": train}, {}, codebook=CODEBOOK, split_manifest=None
+        )
+
+
+@pytest.mark.parametrize("split", [["train"], {"split": "train"}])
+def test_preflight_rejects_nonstring_split_with_manifest_and_sample_context(
+    tmp_path, split
+):
+    from stok.data.mdlm import validate_mdlm_sources
+
+    train, val, manifest, assignments = paired_sources(tmp_path)
+    assignments[0]["split"] = split
+    write_jsonl(manifest, assignments)
+    with pytest.raises(
+        ValueError, match="splits.jsonl.*source train sample long.*invalid split"
+    ):
+        validate_mdlm_sources(
+            {"train": train}, {"val": val}, codebook=CODEBOOK, split_manifest=manifest
+        )

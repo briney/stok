@@ -320,7 +320,8 @@ def validate_mdlm_sources(
             context = f"{split_manifest}: source {key[0]} sample {key[1]}"
             split, cluster = row.get("split"), row.get("cluster_id")
             if (
-                split not in {"train", "validation", "test"}
+                not isinstance(split, str)
+                or split not in {"train", "validation", "test"}
                 or not isinstance(cluster, str)
                 or not cluster
             ):
