@@ -9,6 +9,27 @@ from tests.unit.test_structure_encoding import FIXTURES
 from stok.utils.structure_parser import parse_polymer_structure
 
 
+def test_duplicate_synthetic_gaps_rejected_before_output_or_loading(
+    tmp_path, monkeypatch
+):
+    from experiments import gcp_vqvae_policies as experiment
+
+    def unexpected_load(*args, **kwargs):
+        pytest.fail("Duplicate synthetic gaps reached checkpoint loading")
+
+    monkeypatch.setattr(experiment, "load_pretrained_tokenizer", unexpected_load)
+    output = tmp_path / "experiment"
+    with pytest.raises(ValueError, match="unique"):
+        experiment.run_experiments(
+            tmp_path / "inputs.jsonl",
+            preset="lite",
+            checkpoint=tmp_path / "checkpoint.pt",
+            output_dir=output,
+            synthetic_gaps=(1, 1),
+        )
+    assert not output.exists()
+
+
 def test_experiment_matrix_accounting_and_original_targets(tmp_path, monkeypatch):
     from experiments import gcp_vqvae_policies as experiment
     from stok.models.decoder import GeometricDecoder

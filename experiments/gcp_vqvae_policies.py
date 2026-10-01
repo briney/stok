@@ -356,6 +356,8 @@ def run_experiments(
     preset = canonical_preset(preset)
     if any(type(gap) is not int or gap < 1 for gap in synthetic_gaps):
         raise ValueError("Synthetic gap lengths must be positive integers")
+    if len(set(synthetic_gaps)) != len(synthetic_gaps):
+        raise ValueError("Synthetic gap lengths must be unique")
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=False)
     (output_dir / "arrays").mkdir()
