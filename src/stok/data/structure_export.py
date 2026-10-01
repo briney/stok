@@ -34,6 +34,22 @@ from ..utils.pretrained import (
 from ..utils.structure_parser import StructureMappingError, parse_polymer_structure
 
 
+_QUALIFIED_EXECUTION_FIELDS = (
+    "python",
+    "dependencies",
+    "device",
+    "dtype",
+    "torch_cuda",
+    "torch_hip",
+    "accelerator",
+    "attention",
+    "matmul_precision",
+    "cuda_matmul_allow_tf32",
+    "cudnn_allow_tf32",
+    "sdp_backends_enabled",
+)
+
+
 def validate_structure_policy(
     policy: Mapping[str, Any], *, device: torch.device
 ) -> dict[str, Any]:
@@ -61,7 +77,10 @@ def validate_structure_policy(
         "device",
         "stok_revision",
     }
-    if fields - policy.keys() or policy.keys() - fields - {"implementation_sha256"}:
+    if fields - policy.keys() or policy.keys() - fields - {
+        "implementation_sha256",
+        "qualification",
+    }:
         raise ValueError("Unsupported or incomplete structure policy fields")
     if any(
         policy[key] != value or type(policy[key]) is not type(value)
@@ -93,6 +112,20 @@ def validate_structure_policy(
         or any(c not in "0123456789abcdef" for c in digest)
     ):
         raise ValueError("Invalid policy implementation digest")
+    if "qualification" in policy:
+        qualification = policy["qualification"]
+        if (
+            not isinstance(qualification, dict)
+            or qualification.keys() != {"tokenizer_sha256", "execution"}
+            or not isinstance(qualification["tokenizer_sha256"], str)
+            or len(qualification["tokenizer_sha256"]) != 64
+            or any(
+                c not in "0123456789abcdef" for c in qualification["tokenizer_sha256"]
+            )
+            or not isinstance(qualification["execution"], dict)
+            or qualification["execution"].keys() != set(_QUALIFIED_EXECUTION_FIELDS)
+        ):
+            raise ValueError("Invalid policy qualification constraints")
     json_sha256(policy)
     return policy
 
@@ -311,6 +344,16 @@ def write_structure_dataset(
             "Policy implementation digest does not match this tokenizer pipeline"
         )
     identity = _tokenizer_identity(tokenizer)
+    if "qualification" in policy:
+        qualification = policy["qualification"]
+        if qualification["tokenizer_sha256"] != json_sha256(identity):
+            raise ValueError("Policy qualification tokenizer does not match this model")
+        if json_sha256(qualification["execution"]) != json_sha256(
+            {key: environment[key] for key in _QUALIFIED_EXECUTION_FIELDS}
+        ):
+            raise ValueError(
+                "Policy qualification execution does not match this runtime"
+            )
     provenance = {
         "schema_version": 1,
         "tokenizer": identity,

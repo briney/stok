@@ -716,6 +716,9 @@ evaluation. Three public-contract tests enforce split/identity quotas, the
 predeclared quality/ranking rule, numerical audit counts, and packaging only
 qualified choices. Lite native/reference qualifies on the recorded ROCm FP32
 configuration; Large fails the strict selection padding-stability gate.
+Exporter checks also cover matching qualification and rejection before staging
+of changed encoder/quantizer state, configuration, backend, accelerator and
+math/SDPA settings. The packaged profile's constraints match the frozen evidence.
 The native/reference JSON under that directory is an explicitly named fixture
 pilot baseline. All-X inputs degraded reconstruction on this corpus; native
 labels must not be represented as sequence-blind.

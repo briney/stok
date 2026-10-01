@@ -148,6 +148,10 @@ qualifies on the recorded ROCm FP32 configuration; its explicit profile is
 [src/stok/configs/gcp_vqvae/lite-native-reference-rocm-fp32.json](src/stok/configs/gcp_vqvae/lite-native-reference-rocm-fp32.json).
 Large did not clear the study's strict padding-stability gate, so no Large
 production profile is packaged. Policies remain explicitly selected by the caller.
+The qualified profile rejects mismatched tokenizer state/configuration and
+runtime settings before staging output. Its qualification records the exact
+tested Python/dependency versions, accelerator, backend and math flags;
+explicit experimental policies can omit qualification constraints.
 
 From a repository checkout, this local fixture example uses an explicitly named
 **pilot baseline**, not a selected production policy:

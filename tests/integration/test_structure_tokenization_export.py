@@ -193,6 +193,74 @@ def test_export_round_trip_alignment_provenance_and_grouping(tmp_path, export_in
 
 
 @pytest.mark.parametrize(
+    "change",
+    [
+        "none",
+        "encoder",
+        "quantizer",
+        "encoder_config",
+        "quantizer_config",
+        "backend",
+        "accelerator",
+        "matmul",
+        "sdpa",
+    ],
+)
+def test_qualification_binds_model_and_runtime_before_staging(
+    tmp_path, export_inputs, monkeypatch, change
+):
+    from copy import deepcopy
+    from stok.data import structure_export as export
+    from stok.utils.pretrained import inference_metadata, json_sha256
+
+    model, manifest, policy = export_inputs
+    environment = inference_metadata(torch.device("cpu"))
+    policy["qualification"] = {
+        "tokenizer_sha256": json_sha256(export._tokenizer_identity(model)),
+        "execution": {
+            key: value
+            for key, value in environment.items()
+            if key not in {"stok_revision", "source_files", "implementation_sha256"}
+        },
+    }
+    environment = deepcopy(environment)
+    # Checkout/install provenance can change without changing numerical execution.
+    environment["stok_revision"] = "another-checkout"
+    monkeypatch.setattr(export, "inference_metadata", lambda device: environment)
+    if change == "encoder":
+        with torch.no_grad():
+            next(model.encoder.parameters()).add_(1)
+    elif change == "quantizer":
+        with torch.no_grad():
+            model.quantizer.codebook.add_(1)
+    elif change == "encoder_config":
+        model.config["encoder"]["depth"] += 1
+    elif change == "quantizer_config":
+        model.config["quantizer"]["decay"] = 0.5
+    elif change == "backend":
+        environment["torch_hip"] = "another-backend"
+    elif change == "accelerator":
+        environment["accelerator"] = "another-accelerator"
+    elif change == "matmul":
+        environment["matmul_precision"] = "high"
+    elif change == "sdpa":
+        environment["sdp_backends_enabled"]["math"] = False
+    output = tmp_path / "qualified"
+    if change == "none":
+        summary = export.write_structure_dataset(
+            manifest, output, tokenizer=model, policy=policy
+        )
+        assert summary["status"] == "complete"
+    else:
+        with pytest.raises(ValueError, match="qualification.*does not match"):
+            export.write_structure_dataset(
+                manifest, output, tokenizer=model, policy=policy
+            )
+        assert not output.exists()
+        assert not list(tmp_path.glob(".qualified.staging-*"))
+
+
+@pytest.mark.parametrize(
     "fault",
     ["duplicate", "bad_id", "bad_mask", "numerical", "interruption", "all_rejected"],
 )
@@ -249,6 +317,9 @@ def test_failed_runs_never_publish(tmp_path, export_inputs, monkeypatch, fault):
         ("required_atoms", ["CA"]),
         ("allow_observed_sequence", "false"),
         ("typo", True),
+        ("qualification", None),
+        ("qualification", {}),
+        ("qualification", {"tokenizer_sha256": "0" * 64, "execution": {}}),
     ],
 )
 def test_invalid_policy_rejected_before_staging(tmp_path, export_inputs, field, value):

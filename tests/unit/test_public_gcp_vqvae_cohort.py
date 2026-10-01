@@ -125,5 +125,15 @@ def test_heldout_keeps_frozen_choice_and_packages_only_qualified_policy():
             assert policy["dtype"] == "float32"
             assert policy["device"] == result["environment"]["device"] == "cuda:0"
             assert not policy["allow_observed_sequence"]
+            provenance = heldout["export_verification"][preset]["writer_summary"]
+            assert (
+                policy["qualification"]["tokenizer_sha256"]
+                == provenance["tokenizer_sha256"]
+            )
+            assert policy["qualification"]["execution"] == {
+                key: value
+                for key, value in result["environment"].items()
+                if key not in {"stok_revision", "source_files", "implementation_sha256"}
+            }
         else:
             assert result["policy_file"] is None
