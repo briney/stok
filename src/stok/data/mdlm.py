@@ -16,6 +16,8 @@ CANONICAL_AA = "ACDEFGHIKLMNPQRSTVWY"
 
 
 class MDLMBatch(TypedDict):
+    sequence_mask_id: int
+    codebook_size: int
     sequence_tokens: torch.Tensor
     structure_tokens: torch.Tensor
     residue_mask: torch.Tensor
@@ -67,6 +69,22 @@ def prepare_mdlm_batch(
         raise ValueError("codebook_size must be a positive integer")
     if crop not in {"random", "center"}:
         raise ValueError("crop must be random or center")
+    mask_id = tokenizer.mask_token_id
+    if (
+        type(mask_id) is not int
+        or not 0 <= mask_id < len(tokenizer)
+        or mask_id not in tokenizer.all_special_ids
+        or mask_id
+        in {
+            tokenizer.pad_token_id,
+            tokenizer.bos_token_id,
+            tokenizer.eos_token_id,
+            tokenizer.unk_token_id,
+        }
+    ):
+        raise ValueError(
+            "Tokenizer must provide a distinct valid special mask token ID"
+        )
     canonical_ids = tokenizer.convert_tokens_to_ids(list(CANONICAL_AA))
     if len(set(canonical_ids)) != 20 or any(
         token is None or token in tokenizer.all_special_ids for token in canonical_ids
@@ -170,6 +188,8 @@ def prepare_mdlm_batch(
         except (KeyError, TypeError, ValueError, RuntimeError, OverflowError) as error:
             raise ValueError(f"{context}: {error}") from error
     return {
+        "sequence_mask_id": mask_id,
+        "codebook_size": codebook_size,
         "sequence_tokens": sequence_tokens,
         "structure_tokens": structure_tokens,
         "residue_mask": residue_mask,
