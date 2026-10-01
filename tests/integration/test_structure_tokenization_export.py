@@ -354,3 +354,122 @@ def test_publication_refuses_concurrent_destination(tmp_path):
     with pytest.raises(FileExistsError):
         _publish_directory(staging, destination)
     assert staging.is_dir() and destination.is_dir()
+
+
+def test_export_forces_fp32_inside_outer_autocast(tmp_path, export_inputs):
+    from stok.data.structure_export import write_structure_dataset
+
+    model, manifest, policy = export_inputs
+    observed = []
+    hook = model.encoder.register_forward_hook(
+        lambda module, inputs, output: observed.append(output.dtype)
+    )
+    try:
+        with torch.autocast("cpu", dtype=torch.bfloat16):
+            write_structure_dataset(
+                manifest, tmp_path / "dataset", tokenizer=model, policy=policy
+            )
+    finally:
+        hook.remove()
+    assert observed and set(observed) == {torch.float32}
+
+
+def test_generated_data_collation_decoder_and_training(tmp_path, export_inputs):
+    from click.testing import CliRunner
+    from stok.cli.cli import cli
+    from stok.cli.train import _tokenize_and_align
+    from stok.data.collate import mlm_collate
+    from stok.data.structure_export import write_structure_dataset
+    from stok.models.decoder import GeometricDecoder
+    from stok.utils.decoding import decode_structure_tokens
+    from stok.utils.tokenizer import Tokenizer
+
+    model, manifest, policy = export_inputs
+    output = tmp_path / "dataset"
+    summary = write_structure_dataset(
+        manifest, output, tokenizer=model, policy=policy, rows_per_shard=2
+    )
+    items = list(
+        IterableTokenizedDataset(
+            str(output), max_length=44, shuffle_shards=False, shuffle_rows=False
+        )
+    )
+    map_items = [
+        TokenizedDataset(str(output / shard["path"]), max_length=44)[i]
+        for shard in summary["shards"]
+        for i in range(shard["row_count"])
+    ]
+    tokenizer = Tokenizer()
+    input_ids, labels, coordinates = _tokenize_and_align(
+        items, tokenizer, max_len=44, ignore_index=-100, pad_id=tokenizer.pad_token_id
+    )
+    _, other_labels, other_coordinates = _tokenize_and_align(
+        map_items,
+        tokenizer,
+        max_len=44,
+        ignore_index=-100,
+        pad_id=tokenizer.pad_token_id,
+    )
+    torch.testing.assert_close(coordinates, other_coordinates, equal_nan=True)
+    assert torch.equal(labels, other_labels)
+    assert labels[1, 5].item() == labels[1, 12].item() == -100
+    assert labels[2, 1].item() == -100
+    assert labels[:, 0].eq(-100).all() and labels[:, 41:].eq(-100).all()
+    assert (
+        torch.isfinite(coordinates[1, 5]).all()
+        and torch.isnan(coordinates[1, 12]).all()
+    )
+    assert (
+        torch.isnan(coordinates[:, 0]).all() and torch.isnan(coordinates[:, 41:]).all()
+    )
+    mlm_ids, mlm_labels, mlm_coordinates = mlm_collate(
+        items, tokenizer, max_len=44, mask_prob=1, eval_seed=7
+    )
+    torch.testing.assert_close(mlm_coordinates, coordinates, equal_nan=True)
+    assert (
+        mlm_labels[1, 12] == input_ids[1, 12]
+    )  # Missing structure still has a sequence target.
+    assert mlm_ids.shape == labels.shape
+    decoder = GeometricDecoder(
+        d_model=32, n_heads=4, n_layers=1, ffn_mult=1, max_length=1280, d_code=16
+    ).eval()
+    indices = items[1]["structure_tokens"][None]
+    reloaded = map_items[1]["structure_tokens"][None]
+    with torch.inference_mode():
+        before = decode_structure_tokens(
+            decoder,
+            model.quantizer.codebook,
+            indices,
+            residue_mask=torch.ones_like(indices, dtype=torch.bool),
+        )
+        after = decode_structure_tokens(
+            decoder,
+            model.quantizer.codebook,
+            reloaded,
+            residue_mask=torch.ones_like(indices, dtype=torch.bool),
+        )
+    torch.testing.assert_close(before, after, rtol=0, atol=0, equal_nan=True)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "train",
+            f"data.train={output}",
+            f"data.eval={output}",
+            "model.encoder.d_model=32",
+            "model.encoder.n_layers=1",
+            "model.encoder.n_heads=4",
+            "model.encoder.ffn_mult=1",
+            "model.codebook.preset=lite",
+            "data.batch_size=2",
+            "data.max_len=44",
+            "data.num_workers=0",
+            "data.pin_memory=false",
+            "train.num_steps=1",
+            "train.log_steps=1",
+            "train.eval.steps=1",
+            "train.wandb.enabled=false",
+            f"train.project_path={tmp_path / 'training'}",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Training complete." in result.output

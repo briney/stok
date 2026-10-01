@@ -422,11 +422,12 @@ def tokenize_structures(
             imputation=cast(Any, imputation),
         )
         cast(Data, graph).to(device)
-        indices = tokenizer.encode(
-            graph,
-            residue_mask=residues.to(device),
-            token_mask=tokens.to(device),
-        )
+        with torch.autocast(device.type, enabled=False):
+            indices = tokenizer.encode(
+                graph,
+                residue_mask=residues.to(device),
+                token_mask=tokens.to(device),
+            )
         results.append(indices[0, : len(structure.sequence)].cpu())
     return results
 

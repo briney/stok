@@ -1,0 +1,8 @@
+{"chain_id": "A", "path": "../../../tests/test_data/gcp_vqvae/inputs/complete_pdb.pdb", "sequence": "SATVYVISGATRGIGFALTSLLAQRDNVLIFAGARDPAKA", "sequence_id": "complete_pdb"}
+{"chain_id": "A", "path": "../../../tests/test_data/gcp_vqvae/inputs/incomplete_pdb.pdb", "sequence": "SATVYVISGATRGIGFALTSLLAQRDNVLIFAGARDPAKA", "sequence_id": "incomplete_pdb"}
+{"chain_id": "A", "path": "../../../tests/test_data/gcp_vqvae/inputs/renumbered.pdb", "sequence": "SATVYVISGATRGIGFALTSLLAQRDNVLIFAGARDPAKA", "sequence_id": "renumbered"}
+{"chain_id": "A", "path": "../../../tests/test_data/gcp_vqvae/inputs/insertion_codes.pdb", "sequence": "SATVYVISGATRGIGFALTSLLAQRDNVLIFAGARDPAKA", "sequence_id": "insertion_codes"}
+{"chain_id": "A", "path": "../../../tests/test_data/gcp_vqvae/inputs/too_missing.pdb", "sequence": "SATVYVISGATRGIGFALTSLLAQRDNVLIFAGARDPAKA", "sequence_id": "too_missing"}
+{"chain_id": "A", "path": "../../../tests/test_data/gcp_vqvae/inputs/too_short.pdb", "sequence": "SATVYVISGA", "sequence_id": "too_short"}
+{"chain_id": "A", "path": "../../../tests/test_data/cameo/8JVC_A.pdb", "sequence": "MFFRLTRELRDELKRPLGELVRGPIPEPYLKVRGELEKHPVVTVGDVVTENVLKIGVKPIIALYDLKTKRKEYSPEIEDTAVFLTVTNPPGTITKALLDTVRKAFGLAERGRNVHILVSGEEDLAAIPAVLYAPLGTLVLYGQPDEGVVLIKVTPECKRRCAKILASMEVVR", "sequence_id": "8JVC_A"}
+{"chain_id": "B", "path": "../../../tests/test_data/cameo/8TYZ_B.pdb", "sequence": "GKIEIIVVVNGQPTQVEANPNQPLHVVRTKALENTQNVAQPPDNWEFKDEAGNLLDVDKKIGDFGFANTVTLFLSLKAGVAGA", "sequence_id": "8TYZ_B"}

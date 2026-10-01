@@ -683,3 +683,42 @@ chain namespaces, selected models, sequences, and paths with file/line context;
 relative paths resolve against the manifest directory. Duplicate IDs and
 unknown fields are fatal. Structure-folder evaluation masks now require finite
 original N/CA/C observations rather than merely a sequence position.
+
+### Policy experiments and aligned export
+
+The fixed native/unknown × reference/linear/observed-only matrix and separate
+polymer/reference ablation use the shared parser, preparation, model and metrics.
+`unit/test_gcp_vqvae_experiments.py` checks original targets, fixed masks,
+oxygen-only omissions, counts/rejections, unavailable decoder outputs, complete
+state fingerprints and config snapshots. `unit/test_structure_encoding.py`
+checks linear observation preservation/rigid transforms/coincident endpoints
+and observed-only sequence-stencil gating. Reference filling's displacement and
+orientation dependence are deliberately retained as baseline evidence.
+
+`integration/test_structure_tokenization_export.py` exercises typed nullable
+int64 shards, exact mapped positions, partial atoms, unresolved termini/internal
+positions, unique IDs, exclusions, independent grouping/sharding identity,
+metadata checks, interruption and concurrent-destination publication. It feeds
+both existing readers and collators, checks BOS/EOS/padding and sequence targets
+at missing structure labels, compares decoder outputs after serialization, and
+runs a real one-update training/evaluation smoke on generated shards. Legacy
+Parquet files remain supported; generated shards require compatible provenance.
+All-rejected runs and numerical model failures cannot publish a dataset.
+
+The [fixture report](../docs/experiments/gcp-vqvae/smoke-report.md) records both
+published models' measured quality/context limitations, all 60 attempted
+source/perturbation cases per condition, and local full-result hashes. It is
+smoke evidence with overlapping source excerpts, not a representative internal
+or family-held-out policy evaluation. No stable production policy is packaged.
+The native/reference JSON under that directory is an explicitly named fixture
+pilot baseline. All-X inputs degraded reconstruction on this corpus; native
+labels must not be represented as sequence-blind.
+
+The installed-wheel check includes both packaged model configs and an actual
+CPU offline CLI export using the local Lite release archive. No reference
+checkout is on its import path. Default full published-weight tests remain
+explicit, and no large artifacts are checked into the repository. Model
+computation is verified at FP32 on CPU and the recorded Radeon ROCm backend;
+BF16, NVIDIA CUDA, other accelerators and multi-GPU dataset inference are not
+approved by these checks. Long real-chain quality remains a separate cohort
+question from 1280-position padding parity.

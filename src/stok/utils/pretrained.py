@@ -237,6 +237,18 @@ def inference_metadata(device: torch.device) -> dict:
         if device.type == "cuda"
         else None,
         "attention": "SDPA",
+        "matmul_precision": torch.get_float32_matmul_precision(),
+        "cuda_matmul_allow_tf32": torch.backends.cuda.matmul.allow_tf32,
+        "cudnn_allow_tf32": torch.backends.cudnn.allow_tf32,
+        "sdp_backends_enabled": {
+            name: getter()
+            for name, getter in (
+                ("flash", torch.backends.cuda.flash_sdp_enabled),
+                ("memory_efficient", torch.backends.cuda.mem_efficient_sdp_enabled),
+                ("math", torch.backends.cuda.math_sdp_enabled),
+                ("cudnn", torch.backends.cuda.cudnn_sdp_enabled),
+            )
+        },
         "stok_revision": revision,
         "implementation_sha256": json_sha256(source),
         "source_files": source,

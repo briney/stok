@@ -91,9 +91,10 @@ def _encode(model, structure, sequence_mode, imputation, *, padded=True):
         lambda module, inputs, output: latents.append(output.detach())
     )
     try:
-        indices = model.encode(
-            graph, residue_mask=residues.to(device), token_mask=tokens.to(device)
-        )
+        with torch.autocast(device.type, enabled=False):
+            indices = model.encode(
+                graph, residue_mask=residues.to(device), token_mask=tokens.to(device)
+            )
     finally:
         hook.remove()
     length = len(structure.sequence)
@@ -431,14 +432,15 @@ def run_experiments(
                         )
                         available = ids >= 0
                         length = len(ids)
-                        predicted = decode_structure_tokens(
-                            decoder,
-                            model.quantizer.codebook,
-                            ids[None].to(actual_device),
-                            residue_mask=torch.ones(
-                                1, length, dtype=torch.bool, device=actual_device
-                            ),
-                        )[0].cpu()
+                        with torch.autocast(actual_device.type, enabled=False):
+                            predicted = decode_structure_tokens(
+                                decoder,
+                                model.quantizer.codebook,
+                                ids[None].to(actual_device),
+                                residue_mask=torch.ones(
+                                    1, length, dtype=torch.bool, device=actual_device
+                                ),
+                            )[0].cpu()
                         if not torch.isfinite(predicted[available]).all():
                             raise RuntimeError(
                                 "Nonfinite predictions at available labels"
