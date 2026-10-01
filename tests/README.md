@@ -662,3 +662,24 @@ multiple chains, namespace collisions, ambiguous alignments, inconsistent
 scheme/atom identities, and duplicate author identities have categorized
 errors. The legacy observed-residue parser keeps its original population and
 N/CA/C return contract.
+
+`prepare_structure` keeps source observations separate from the working graph.
+Its residue/token masks have `[1,1280]` shape; attached `atom_mask`,
+`geometry_mask`, and `graph_node_mask` describe original atoms, original N/CA/C
+metric targets, and graph inclusion respectively. Reference token validity
+requires all four backbone atoms. An oxygen-only omission removes the label
+while retaining the original geometry target and native observed identity.
+`native`, `unknown`, and `polymer` control encoder identities independently of
+the unchanged target sequence. Reference filling is explicit and source arrays
+never become writable model inputs.
+
+`tokenize_structures` accepts a group of chains and returns ordered, unpadded
+CPU ID tensors with `-1` at unavailable labels. It deliberately performs
+singleton chain forwards, preserving dataset IDs independently of the group or
+shard boundaries. This costs throughput compared with true tensor batching;
+mixed-length reference batching retains its documented terminal-feature
+behavior. `iter_structure_manifest` validates JSONL identifiers, fields/types,
+chain namespaces, selected models, sequences, and paths with file/line context;
+relative paths resolve against the manifest directory. Duplicate IDs and
+unknown fields are fatal. Structure-folder evaluation masks now require finite
+original N/CA/C observations rather than merely a sequence position.

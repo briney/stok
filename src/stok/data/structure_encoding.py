@@ -6,14 +6,21 @@ The reference file route intentionally retains upstream numbering heuristics.
 """
 
 import math
+import json
+from collections.abc import Iterator, Sequence
 from pathlib import Path
-from typing import cast
+from typing import Any, Literal, TYPE_CHECKING, cast
 
 from Bio.PDB import MMCIFParser, PDBParser, PPBuilder
 from Bio.PDB.Polypeptide import protein_letters_3to1
 from graphein.protein.resi_atoms import STANDARD_AMINO_ACIDS
 import torch
 from torch_geometric.data import Batch, Data
+
+from ..utils.structure_parser import PolymerStructure
+
+if TYPE_CHECKING:
+    from ..models.gcp_vqvae import GCPVQTokenizer
 
 BOND_LENGTHS = {"N-CA": 1.458, "CA-C": 1.525, "C-O": 1.231, "C-N": 1.329}
 
@@ -261,3 +268,155 @@ def prepare_reference_structure(
     tokens = torch.zeros_like(residues)
     tokens[0, : len(sequence)] = available
     return batch, residues, tokens
+
+
+def prepare_structure(
+    structure: PolymerStructure,
+    *,
+    sequence_mode: Literal["native", "unknown", "polymer"],
+    imputation: Literal["reference", "linear", "observed_only"],
+) -> tuple[Batch, torch.Tensor, torch.Tensor]:
+    """Prepare a working copy; mask labels using original N/CA/C/O observations."""
+    if sequence_mode not in {"native", "unknown", "polymer"}:
+        raise ValueError("sequence_mode must be native, unknown, or polymer")
+    if imputation != "reference":
+        raise ValueError("Only reference imputation is currently supported")
+    required_metadata = {"path", "sha256", "sequence_source", "model_index"}
+    metadata = structure.source
+    if (
+        not required_metadata <= metadata.keys()
+        or not isinstance(metadata.get("path"), str)
+        or not metadata["path"]
+        or not isinstance(metadata.get("sha256"), str)
+        or len(metadata["sha256"]) != 64
+        or any(character not in "0123456789abcdef" for character in metadata["sha256"])
+        or type(metadata.get("model_index")) is not int
+        or metadata["model_index"] < 0
+        or not isinstance(metadata.get("sequence_source"), str)
+        or metadata["sequence_source"]
+        not in {"entity_poly_seq", "poly_seq_scheme", "seqres", "supplied", "observed"}
+    ):
+        raise ValueError("Structure source metadata is incomplete")
+    coordinates = torch.tensor(structure.coordinates)
+    original_atoms = torch.tensor(structure.atom_mask)
+    available = original_atoms.all(dim=-1)
+    if not available.any():
+        raise StructureExclusion("no_usable_structure", structure.sequence_id)
+    # The released policy propagates any missing backbone atom to the working row.
+    coordinates[~available] = float("nan")
+    _check_reference_coverage(coordinates, detail=structure.sequence_id)
+    coordinates, _ = impute_reference_coordinates(coordinates)
+    if not torch.isfinite(coordinates).all():
+        raise StructureExclusion("imputation_nonfinite", structure.sequence_id)
+    coordinates = coordinates - coordinates.reshape(-1, 3).mean(dim=0)
+    if sequence_mode == "unknown":
+        identities = "X" * len(structure.sequence)
+    elif sequence_mode == "polymer":
+        identities = structure.sequence
+    else:
+        identities = "".join(
+            row.get("observed_one_letter") or "X" for row in structure.residue_map
+        )
+    batch = batch_structure_graphs([build_structure_graph(coordinates, identities)])
+    residues = torch.arange(1280)[None] < len(structure.sequence)
+    tokens = torch.zeros_like(residues)
+    tokens[0, : len(structure.sequence)] = available
+    data = cast(Data, batch)
+    data.atom_mask = torch.zeros((1, 1280, 4), dtype=torch.bool)
+    data.atom_mask[0, : len(structure.sequence)] = original_atoms
+    data.geometry_mask = data.atom_mask[:, :, :3].all(-1)
+    data.graph_node_mask = residues.clone()
+    return batch, residues, tokens
+
+
+@torch.inference_mode()
+def tokenize_structures(
+    tokenizer: "GCPVQTokenizer",
+    structures: Sequence[PolymerStructure],
+    *,
+    sequence_mode: str,
+    imputation: str,
+) -> list[torch.Tensor]:
+    """Return aligned CPU IDs in order, using independent singleton chain context."""
+    device = next(tokenizer.parameters()).device
+    results = []
+    # Mixed-length upstream batches alter terminal angles. Keep dataset identity
+    # independent of its batching/sharding until true batched context is validated.
+    for structure in structures:
+        graph, residues, tokens = prepare_structure(
+            structure,
+            sequence_mode=cast(Any, sequence_mode),
+            imputation=cast(Any, imputation),
+        )
+        cast(Data, graph).to(device)
+        indices = tokenizer.encode(
+            graph,
+            residue_mask=residues.to(device),
+            token_mask=tokens.to(device),
+        )
+        results.append(indices[0, : len(structure.sequence)].cpu())
+    return results
+
+
+def iter_structure_manifest(path: str | Path) -> Iterator[dict[str, Any]]:
+    """Validate JSONL rows; resolve paths relative to the manifest, never the cwd."""
+    path = Path(path).resolve()
+    seen = set()
+    fields = {
+        "sequence_id",
+        "path",
+        "chain_id",
+        "chain_namespace",
+        "model_index",
+        "sequence",
+    }
+    with path.open() as handle:
+        for line_number, line in enumerate(handle, start=1):
+            context = f"{path}:{line_number}"
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise ValueError(f"{context}: malformed JSON") from error
+            if not isinstance(row, dict) or row.keys() - fields:
+                raise ValueError(
+                    f"{context}: expected an object with known manifest fields"
+                )
+            for field in ("sequence_id", "path"):
+                if not isinstance(row.get(field), str) or not row[field].strip():
+                    raise ValueError(f"{context}: {field} must be a nonempty string")
+            if row["sequence_id"] in seen:
+                raise ValueError(
+                    f"{context}: duplicate sequence_id {row['sequence_id']}"
+                )
+            seen.add(row["sequence_id"])
+            row.setdefault("chain_namespace", "author")
+            row.setdefault("model_index", 0)
+            if not isinstance(row["chain_namespace"], str) or row[
+                "chain_namespace"
+            ] not in {"author", "label"}:
+                raise ValueError(f"{context}: invalid chain_namespace")
+            if type(row["model_index"]) is not int or row["model_index"] < 0:
+                raise ValueError(
+                    f"{context}: model_index must be a nonnegative integer"
+                )
+            if row.get("chain_id") is not None and (
+                not isinstance(row["chain_id"], str) or not row["chain_id"]
+            ):
+                raise ValueError(
+                    f"{context}: chain_id must be a nonempty string or null"
+                )
+            if row.get("sequence") is not None and (
+                not isinstance(row["sequence"], str)
+                or not row["sequence"]
+                or any(
+                    letter not in "ACDEFGHIKLMNPQRSTVWYX" for letter in row["sequence"]
+                )
+            ):
+                raise ValueError(
+                    f"{context}: sequence must contain uppercase amino acids or X"
+                )
+            resolved = (path.parent / row["path"]).resolve()
+            if not resolved.is_file():
+                raise ValueError(f"{context}: structure file not found: {resolved}")
+            row["path"] = str(resolved)
+            yield row

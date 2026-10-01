@@ -7,6 +7,15 @@ from pathlib import Path
 from stok.data.structure_dataset import StructureFolderDataset, STRUCTURE_EXTENSIONS
 
 
+def test_observation_mask_requires_finite_original_backbone(tmp_path):
+    from tests.unit.test_structure_parser import PDB_MISSING_CA
+
+    (tmp_path / "missing.pdb").write_text(PDB_MISSING_CA)
+    item = StructureFolderDataset(tmp_path, max_length=4)[0]
+    assert item["masks"].tolist() == [True, True, False, False]
+    assert item["nan_masks"].tolist() == [True, False, False, False]
+
+
 # Minimal valid PDB content
 MINIMAL_PDB_1 = """\
 ATOM      1  N   ALA A   1       0.000   0.000   0.000  1.00  0.00           N

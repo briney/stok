@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -58,3 +59,171 @@ def test_reference_filtering_has_categorized_exclusions(name, reason):
     with pytest.raises(StructureExclusion) as caught:
         prepare_reference_structure(FIXTURES / "inputs" / f"{name}.pdb", chain_id="A")
     assert caught.value.reason == reason
+
+
+def example_polymer(name="complete_pdb", *, missing=False):
+    from stok.utils.structure_parser import parse_polymer_structure
+
+    structure = parse_polymer_structure(
+        FIXTURES / "inputs" / f"{name}.pdb", chain_id="A", allow_observed_sequence=True
+    )
+    if missing:
+        coordinates = structure.coordinates.copy()
+        coordinates[4, 3] = np.nan
+        coordinates[12] = np.nan
+        mapping = [dict(row) for row in structure.residue_map]
+        mapping[12].update(observed_monomer_id=None, observed_one_letter=None)
+        structure = replace(
+            structure,
+            coordinates=coordinates,
+            atom_mask=np.isfinite(coordinates).all(-1),
+            residue_map=tuple(mapping),
+        )
+    return structure
+
+
+def test_polymer_preparation_retains_immutable_observations_and_distinct_masks():
+    from graphein.protein.resi_atoms import STANDARD_AMINO_ACIDS
+    from stok.data.structure_encoding import prepare_structure
+    from stok.utils.featurizer import ProteinFeaturiser
+
+    source = example_polymer(missing=True)
+    original = source.coordinates.copy()
+    native, residues, tokens = prepare_structure(
+        source, sequence_mode="native", imputation="reference"
+    )
+    unknown, other_residues, other_tokens = prepare_structure(
+        source, sequence_mode="unknown", imputation="reference"
+    )
+    length = len(source.sequence)
+    assert residues.shape == tokens.shape == (1, 1280)
+    assert residues[0, :length].all() and not residues[0, length:].any()
+    assert not tokens[0, [4, 12]].any() and tokens[0].sum() == length - 2
+    assert native.atom_mask.shape == (1, 1280, 4)
+    assert native.atom_mask[0, 4].tolist() == [True, True, True, False]
+    assert native.geometry_mask[0, 4] and not native.geometry_mask[0, 12]
+    assert native.graph_node_mask[0, :length].all()
+    assert native.residue_type[4].item() == STANDARD_AMINO_ACIDS.index(
+        source.sequence[4]
+    )
+    assert native.residue_type[12].item() == STANDARD_AMINO_ACIDS.index("X")
+    assert (unknown.residue_type == STANDARD_AMINO_ACIDS.index("X")).all()
+    assert torch.equal(native.prepared_coordinates, unknown.prepared_coordinates)
+    assert torch.equal(residues, other_residues) and torch.equal(tokens, other_tokens)
+    encoded = ProteinFeaturiser()(unknown.clone()).x[:, 16:39]
+    assert (
+        encoded[:, STANDARD_AMINO_ACIDS.index("X")].eq(1).all()
+        and encoded.sum(-1).eq(1).all()
+    )
+    assert np.array_equal(source.coordinates, original, equal_nan=True)
+    assert source.sequence[4] != "X" and source.sequence[12] != "X"
+
+
+def test_high_level_inference_preserves_length_holes_order_and_singleton_context():
+    from stok.data.structure_encoding import tokenize_structures
+    from stok.models.gcp_vqvae import GCPVQTokenizer
+    from tests.unit.test_gcp_vqvae import tiny_config
+
+    config = tiny_config()
+    config["max_length"] = 1280
+    model = GCPVQTokenizer(config).eval()
+    sources = [example_polymer(missing=True), example_polymer("shorter")]
+    state = {key: value.clone() for key, value in model.state_dict().items()}
+    batched = tokenize_structures(
+        model, sources, sequence_mode="native", imputation="reference"
+    )
+    singles = [
+        tokenize_structures(
+            model, [source], sequence_mode="native", imputation="reference"
+        )[0]
+        for source in sources
+    ]
+    assert [len(ids) for ids in batched] == [40, 32]
+    assert batched[0][4].item() == batched[0][12].item() == -1
+    assert all(torch.equal(batch, single) for batch, single in zip(batched, singles))
+    assert all(
+        torch.equal(value, model.state_dict()[key]) for key, value in state.items()
+    )
+
+
+def test_unusable_structure_and_incomplete_metadata_are_rejected():
+    from stok.data.structure_encoding import StructureExclusion, prepare_structure
+
+    source = example_polymer()
+    coordinates = np.full_like(source.coordinates, np.nan)
+    missing = replace(
+        source, coordinates=coordinates, atom_mask=np.zeros_like(source.atom_mask)
+    )
+    with pytest.raises(StructureExclusion, match="no_usable_structure"):
+        prepare_structure(missing, sequence_mode="native", imputation="reference")
+    with pytest.raises(ValueError, match="metadata"):
+        prepare_structure(
+            replace(source, source={}), sequence_mode="native", imputation="reference"
+        )
+    with pytest.raises(ValueError, match="metadata"):
+        prepare_structure(
+            replace(source, source=dict(source.source) | {"sha256": ""}),
+            sequence_mode="native",
+            imputation="reference",
+        )
+    for mode, imputation in (("invalid", "reference"), ("native", "linear")):
+        with pytest.raises(ValueError):
+            prepare_structure(source, sequence_mode=mode, imputation=imputation)
+
+
+def test_manifest_paths_and_defaults_are_explicit(tmp_path):
+    from stok.data.structure_encoding import iter_structure_manifest
+
+    source = tmp_path / "input.pdb"
+    source.write_text((FIXTURES / "inputs/complete_pdb.pdb").read_text())
+    manifest = tmp_path / "chains.jsonl"
+    manifest.write_text(
+        json.dumps({"sequence_id": "chain-1", "path": "input.pdb", "chain_id": "A"})
+        + "\n"
+    )
+    (row,) = iter_structure_manifest(manifest)
+    assert row["path"] == str(source.resolve())
+    assert row["model_index"] == 0 and row["chain_namespace"] == "author"
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "duplicate",
+        "id",
+        "path",
+        "namespace",
+        "namespace_type",
+        "model",
+        "sequence",
+        "chain",
+        "unknown",
+        "json",
+    ],
+)
+def test_manifest_invalid_rows_include_path_and_line_context(tmp_path, fault):
+    from stok.data.structure_encoding import iter_structure_manifest
+
+    row = {"sequence_id": "one", "path": str(FIXTURES / "inputs/complete_pdb.pdb")}
+    field_values = {
+        "id": ("sequence_id", 3),
+        "path": ("path", "missing.pdb"),
+        "namespace": ("chain_namespace", "other"),
+        "namespace_type": ("chain_namespace", []),
+        "model": ("model_index", True),
+        "sequence": ("sequence", 1),
+        "chain": ("chain_id", 3),
+        "unknown": ("crop_length", 30),
+    }
+    if fault in field_values:
+        field, value = field_values[fault]
+        row[field] = value
+    text = json.dumps(row) + "\n"
+    if fault == "duplicate":
+        text += text
+    elif fault == "json":
+        text = "{invalid}\n"
+    manifest = tmp_path / "bad.jsonl"
+    manifest.write_text(text)
+    with pytest.raises(ValueError, match=f"{manifest.name}:[12]"):
+        list(iter_structure_manifest(manifest))
