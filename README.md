@@ -155,6 +155,11 @@ runtime settings before staging output. Its qualification records the exact
 tested Python/dependency versions, accelerator, backend and math flags;
 explicit experimental policies can omit qualification constraints.
 
+The [public roundtrip comparison](docs/experiments/gcp-vqvae/public-roundtrip-report.md)
+also runs both complete STok and upstream encoder/decoder stacks: all 30 supported
+chains matched exactly, with original-input backbone RMSD averaging 0.855 Å for
+Lite and 0.551 Å for Large. The report includes per-chain measurements and plots.
+
 From a repository checkout, this local fixture example uses an explicitly named
 **pilot baseline**, not a selected production policy:
 

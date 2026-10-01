@@ -1,0 +1,536 @@
+{
+  "metadata": {
+    "reference": {
+      "url": "https://github.com/mahdip72/vq_encoder_decoder",
+      "commit": "68c4c284fe204de27fdf61db27fcc01136ea9f28",
+      "package_metadata_sha256": "9a18e9540bf6f7801a09196323c0ae184e04fd5849289f792243d782c5491a98"
+    },
+    "releases": {
+      "lite": {
+        "repository": "Mahdip72/gcp-vqvae-lite",
+        "revision": "d67ca3dfc1ecd6c6a1c3841f584e82f2f9803447",
+        "files": {
+          "best_valid.pth": "0a212868f83ba1cc426404ec5d09c0d83012c8e34715483a7107091ffcf16e30",
+          "config_gcpnet_encoder.yaml": "54dfa49d2113994415456efb9babb2d6abd25c0a73436ac73d5cd51a68d90dd8",
+          "config_geometric_decoder.yaml": "5913125ce9d861debbd93599282a4d2003c42684a16dc8c1bd87557a1dedbf44",
+          "config_vqvae.yaml": "c08736c872568758c0ab5bbfaa4cd384851c8d3c9c0405c4669b9fadc71e3e1f"
+        }
+      },
+      "large": {
+        "repository": "Mahdip72/gcp-vqvae-large",
+        "revision": "64bb4ff628f7d2ccba587cdc9f0eaa97c1f3f9a1",
+        "files": {
+          "best_valid.pth": "7d1d43950a29834e7f702409bf957e9ffb75eb3cb3952074ba4c545bb4130eaf",
+          "config_gcpnet_encoder.yaml": "be1662f7f37a79f8b91810eaa1e50ff2f1294b750370ad6e4d46e320c65db633",
+          "config_geometric_decoder.yaml": "d195ee74478ca6f73001c4d80beb68f7ebf45201793147564d776313baaa9992",
+          "config_vqvae.yaml": "f3d5cc99a15c550ac6af253214e94c7f7cb583b846d45e40ad3ba2dc7d18f96e"
+        }
+      }
+    },
+    "environment": {
+      "python": "3.12.14",
+      "dependencies": {
+        "torch": "2.14.0+rocm7.2",
+        "numpy": "1.26.4",
+        "biopython": "1.88",
+        "graphein": "1.7.8",
+        "torch-geometric": "2.8.0.post1",
+        "x-transformers": "2.8.0",
+        "vector-quantize-pytorch": "1.25.2",
+        "pyarrow": "25.0.0"
+      },
+      "device": "cuda:0",
+      "dtype": "float32",
+      "torch_cuda": null,
+      "torch_hip": "7.2.53211",
+      "accelerator": "Radeon 8060S Graphics",
+      "attention": "SDPA",
+      "matmul_precision": "highest",
+      "cuda_matmul_allow_tf32": false,
+      "cudnn_allow_tf32": true,
+      "sdp_backends_enabled": {
+        "flash": true,
+        "memory_efficient": true,
+        "math": true,
+        "cudnn": true
+      },
+      "stok_revision": "2c9de5902c6f449a06bd8db747c370734a5a57ca",
+      "implementation_sha256": "6cc100d98fc5efd15db7afb173c1785cbc69827fb6e2209c3c8b13d76612d77c",
+      "source_files": {
+        "models/gcp_vqvae.py": "780485284a41eaf889831351111cafedce456f1e5492693eb6372ba7dbefc44b",
+        "models/gcpnet.py": "a4c796c49905f50fee3538451f0bf242dd16fd0f8be6bed7c9f25ef013e838ab",
+        "utils/gcp.py": "7a9477818b5c9c69f893fe2669932578d5ab37141fa141d44e70a2a4da0e07d7",
+        "utils/featurizer.py": "433dd1b93020084e7c6bdb54b897320eed6e4a3877f0e0e0f0277384574e454b",
+        "utils/structure_parser.py": "adb63fcf5978e2279008ddde7a200c3be30df3c9e0de2daef0a491909e9746dd",
+        "utils/pretrained.py": "b3d5276c39041f4a1c97c47e6563b0dbf305b3653a586cf64094cc837db02322",
+        "data/structure_encoding.py": "fbdcc1ae4cbdb08333279bd2851a613588a00cd4f54a16ca30b077401e741bcf"
+      }
+    },
+    "script_sha256": "93253ed031f297291e18a3d61b23e84ab3ecd53f72d7528c303ee5e9fd4b5372",
+    "cohort_sha256": "f7003f40dd0ea304da055b3dc1b012b991cfeec0493175618fddd15848ab7a5d",
+    "manifest_sha256": {
+      "public-selection.jsonl": "ec6c9600f868a2d53547c70118f46b38652add29c27a9df1c15317635a410818",
+      "public-heldout.jsonl": "1b38f481954f077cef029c1c3b7c09ac456d93f819aadab9393f12770339bfb7"
+    },
+    "input_contract": "shared deposited correspondence; native identities; independent reference filling/graphs/models; singleton FP32; encoder and decoder1280",
+    "metric": "original observed N/CA/C; optimal proper all-backbone Kabsch alignment; per-atom RMSD in angstroms; no imputed targets",
+    "excluded_upstream_checkpoint_keys": {
+      "lite": [],
+      "large": [
+        "vqvae.decoder.pairwise_classification_head.downproject.weight",
+        "vqvae.decoder.pairwise_classification_head.linear1.weight",
+        "vqvae.decoder.pairwise_classification_head.linear2.weight",
+        "vqvae.decoder.pairwise_classification_head.norm.bias",
+        "vqvae.decoder.pairwise_classification_head.norm.weight"
+      ]
+    },
+    "results_sha256": "7ae16195f16c06a9a691e61672db0efbc3a130428596de81438f87ff2f04c555"
+  },
+  "summary": {
+    "lite": {
+      "attempted": 40,
+      "accepted": 30,
+      "exclusions": {
+        "missing_block_exceeded": 7,
+        "missing_ratio_exceeded": 3
+      },
+      "scored_residues": 11236,
+      "changed_token_ids": 0,
+      "max_atom_distance": 0.0,
+      "groups": {
+        "all": {
+          "chains": 30,
+          "metrics": {
+            "stok_backbone_rmsd": {
+              "mean": 0.8551914920034221,
+              "median": 0.8711168674446508,
+              "min": 0.4656762965114222,
+              "max": 1.394737901458569
+            },
+            "upstream_backbone_rmsd": {
+              "mean": 0.8551914920034221,
+              "median": 0.8711168674446508,
+              "min": 0.4656762965114222,
+              "max": 1.394737901458569
+            },
+            "stok_ca_rmsd": {
+              "mean": 0.8660105307026748,
+              "median": 0.8791298445384359,
+              "min": 0.4712980830903197,
+              "max": 1.4064290540482938
+            },
+            "upstream_ca_rmsd": {
+              "mean": 0.8660105307026748,
+              "median": 0.8791298445384359,
+              "min": 0.4712980830903197,
+              "max": 1.4064290540482938
+            },
+            "implementation_aligned_backbone_rmsd": {
+              "mean": 1.0892887146535922e-14,
+              "median": 7.494388777552114e-15,
+              "min": 2.7366926231448305e-15,
+              "max": 6.365147657110732e-14
+            },
+            "implementation_unaligned_backbone_rmsd": {
+              "mean": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "max": 0.0
+            }
+          }
+        },
+        "complete": {
+          "chains": 20,
+          "metrics": {
+            "stok_backbone_rmsd": {
+              "mean": 0.8292137914207498,
+              "median": 0.8614639032531006,
+              "min": 0.4656762965114222,
+              "max": 1.2390840629257673
+            },
+            "upstream_backbone_rmsd": {
+              "mean": 0.8292137914207498,
+              "median": 0.8614639032531006,
+              "min": 0.4656762965114222,
+              "max": 1.2390840629257673
+            },
+            "stok_ca_rmsd": {
+              "mean": 0.840825426678164,
+              "median": 0.873772065528043,
+              "min": 0.4712980830903197,
+              "max": 1.2576038906998503
+            },
+            "upstream_ca_rmsd": {
+              "mean": 0.840825426678164,
+              "median": 0.873772065528043,
+              "min": 0.4712980830903197,
+              "max": 1.2576038906998503
+            },
+            "implementation_aligned_backbone_rmsd": {
+              "mean": 1.2282801225424903e-14,
+              "median": 8.952289915584812e-15,
+              "min": 2.924695322769954e-15,
+              "max": 6.365147657110732e-14
+            },
+            "implementation_unaligned_backbone_rmsd": {
+              "mean": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "max": 0.0
+            }
+          }
+        },
+        "incomplete": {
+          "chains": 10,
+          "metrics": {
+            "stok_backbone_rmsd": {
+              "mean": 0.9071468931687676,
+              "median": 0.8827281161553872,
+              "min": 0.5598159891162285,
+              "max": 1.394737901458569
+            },
+            "upstream_backbone_rmsd": {
+              "mean": 0.9071468931687676,
+              "median": 0.8827281161553872,
+              "min": 0.5598159891162285,
+              "max": 1.394737901458569
+            },
+            "stok_ca_rmsd": {
+              "mean": 0.9163807387516962,
+              "median": 0.8926721860242781,
+              "min": 0.5816127390580578,
+              "max": 1.4064290540482938
+            },
+            "upstream_ca_rmsd": {
+              "mean": 0.9163807387516962,
+              "median": 0.8926721860242781,
+              "min": 0.5816127390580578,
+              "max": 1.4064290540482938
+            },
+            "implementation_aligned_backbone_rmsd": {
+              "mean": 8.113058988757954e-15,
+              "median": 7.029584259800886e-15,
+              "min": 2.7366926231448305e-15,
+              "max": 2.3386630809306255e-14
+            },
+            "implementation_unaligned_backbone_rmsd": {
+              "mean": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "max": 0.0
+            }
+          }
+        },
+        "selection": {
+          "chains": 17,
+          "metrics": {
+            "stok_backbone_rmsd": {
+              "mean": 0.8912947580280544,
+              "median": 0.8859777233504664,
+              "min": 0.5351794949233855,
+              "max": 1.394737901458569
+            },
+            "upstream_backbone_rmsd": {
+              "mean": 0.8912947580280544,
+              "median": 0.8859777233504664,
+              "min": 0.5351794949233855,
+              "max": 1.394737901458569
+            },
+            "stok_ca_rmsd": {
+              "mean": 0.9026896015422788,
+              "median": 0.9020472178393337,
+              "min": 0.5386072843248069,
+              "max": 1.4064290540482938
+            },
+            "upstream_ca_rmsd": {
+              "mean": 0.9026896015422788,
+              "median": 0.9020472178393337,
+              "min": 0.5386072843248069,
+              "max": 1.4064290540482938
+            },
+            "implementation_aligned_backbone_rmsd": {
+              "mean": 1.1698233788713444e-14,
+              "median": 6.847309582853583e-15,
+              "min": 2.7366926231448305e-15,
+              "max": 6.365147657110732e-14
+            },
+            "implementation_unaligned_backbone_rmsd": {
+              "mean": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "max": 0.0
+            }
+          }
+        },
+        "heldout": {
+          "chains": 13,
+          "metrics": {
+            "stok_backbone_rmsd": {
+              "mean": 0.8079795287404422,
+              "median": 0.8377627064333771,
+              "min": 0.4656762965114222,
+              "max": 1.151960135664165
+            },
+            "upstream_backbone_rmsd": {
+              "mean": 0.8079795287404422,
+              "median": 0.8377627064333771,
+              "min": 0.4656762965114222,
+              "max": 1.151960135664165
+            },
+            "stok_ca_rmsd": {
+              "mean": 0.818045591912423,
+              "median": 0.8510957684507197,
+              "min": 0.4712980830903197,
+              "max": 1.1641962561240407
+            },
+            "upstream_ca_rmsd": {
+              "mean": 0.818045591912423,
+              "median": 0.8510957684507197,
+              "min": 0.4712980830903197,
+              "max": 1.1641962561240407
+            },
+            "implementation_aligned_backbone_rmsd": {
+              "mean": 9.839741537534541e-15,
+              "median": 7.77691861835604e-15,
+              "min": 3.8220146969864045e-15,
+              "max": 2.6472251083899988e-14
+            },
+            "implementation_unaligned_backbone_rmsd": {
+              "mean": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "max": 0.0
+            }
+          }
+        }
+      }
+    },
+    "large": {
+      "attempted": 40,
+      "accepted": 30,
+      "exclusions": {
+        "missing_block_exceeded": 7,
+        "missing_ratio_exceeded": 3
+      },
+      "scored_residues": 11236,
+      "changed_token_ids": 0,
+      "max_atom_distance": 0.0,
+      "groups": {
+        "all": {
+          "chains": 30,
+          "metrics": {
+            "stok_backbone_rmsd": {
+              "mean": 0.5512362348532864,
+              "median": 0.5456151921418317,
+              "min": 0.2112148255697599,
+              "max": 0.9916480732265531
+            },
+            "upstream_backbone_rmsd": {
+              "mean": 0.5512362348532864,
+              "median": 0.5456151921418317,
+              "min": 0.2112148255697599,
+              "max": 0.9916480732265531
+            },
+            "stok_ca_rmsd": {
+              "mean": 0.5562728822578655,
+              "median": 0.5576752433139877,
+              "min": 0.22026857879118109,
+              "max": 0.9968540407652687
+            },
+            "upstream_ca_rmsd": {
+              "mean": 0.5562728822578655,
+              "median": 0.5576752433139877,
+              "min": 0.22026857879118109,
+              "max": 0.9968540407652687
+            },
+            "implementation_aligned_backbone_rmsd": {
+              "mean": 1.0700475886424263e-14,
+              "median": 7.721211370077705e-15,
+              "min": 2.6373359522992904e-15,
+              "max": 5.6591254946270914e-14
+            },
+            "implementation_unaligned_backbone_rmsd": {
+              "mean": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "max": 0.0
+            }
+          }
+        },
+        "complete": {
+          "chains": 20,
+          "metrics": {
+            "stok_backbone_rmsd": {
+              "mean": 0.49932487446469453,
+              "median": 0.49433476835488077,
+              "min": 0.2112148255697599,
+              "max": 0.8872949934690816
+            },
+            "upstream_backbone_rmsd": {
+              "mean": 0.49932487446469453,
+              "median": 0.49433476835488077,
+              "min": 0.2112148255697599,
+              "max": 0.8872949934690816
+            },
+            "stok_ca_rmsd": {
+              "mean": 0.5033833989640236,
+              "median": 0.49880162033468023,
+              "min": 0.22026857879118109,
+              "max": 0.8961402772057009
+            },
+            "upstream_ca_rmsd": {
+              "mean": 0.5033833989640236,
+              "median": 0.49880162033468023,
+              "min": 0.22026857879118109,
+              "max": 0.8961402772057009
+            },
+            "implementation_aligned_backbone_rmsd": {
+              "mean": 1.2030095546777772e-14,
+              "median": 7.96016740931715e-15,
+              "min": 4.212537107972953e-15,
+              "max": 5.6591254946270914e-14
+            },
+            "implementation_unaligned_backbone_rmsd": {
+              "mean": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "max": 0.0
+            }
+          }
+        },
+        "incomplete": {
+          "chains": 10,
+          "metrics": {
+            "stok_backbone_rmsd": {
+              "mean": 0.65505895563047,
+              "median": 0.5566134570332715,
+              "min": 0.3446963436575857,
+              "max": 0.9916480732265531
+            },
+            "upstream_backbone_rmsd": {
+              "mean": 0.65505895563047,
+              "median": 0.5566134570332715,
+              "min": 0.3446963436575857,
+              "max": 0.9916480732265531
+            },
+            "stok_ca_rmsd": {
+              "mean": 0.66205184884555,
+              "median": 0.5695344341503046,
+              "min": 0.3458667114693959,
+              "max": 0.9968540407652687
+            },
+            "upstream_ca_rmsd": {
+              "mean": 0.66205184884555,
+              "median": 0.5695344341503046,
+              "min": 0.3458667114693959,
+              "max": 0.9968540407652687
+            },
+            "implementation_aligned_backbone_rmsd": {
+              "mean": 8.041236565717233e-15,
+              "median": 7.570735714667712e-15,
+              "min": 2.6373359522992904e-15,
+              "max": 1.9715877711162058e-14
+            },
+            "implementation_unaligned_backbone_rmsd": {
+              "mean": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "max": 0.0
+            }
+          }
+        },
+        "selection": {
+          "chains": 17,
+          "metrics": {
+            "stok_backbone_rmsd": {
+              "mean": 0.5568203314175377,
+              "median": 0.5436597729241921,
+              "min": 0.27453389965452873,
+              "max": 0.9916480732265531
+            },
+            "upstream_backbone_rmsd": {
+              "mean": 0.5568203314175377,
+              "median": 0.5436597729241921,
+              "min": 0.27453389965452873,
+              "max": 0.9916480732265531
+            },
+            "stok_ca_rmsd": {
+              "mean": 0.5617336305681412,
+              "median": 0.5622072976006011,
+              "min": 0.2815943202224735,
+              "max": 0.9968540407652687
+            },
+            "upstream_ca_rmsd": {
+              "mean": 0.5617336305681412,
+              "median": 0.5622072976006011,
+              "min": 0.2815943202224735,
+              "max": 0.9968540407652687
+            },
+            "implementation_aligned_backbone_rmsd": {
+              "mean": 8.376107641575947e-15,
+              "median": 7.24060877845854e-15,
+              "min": 2.6373359522992904e-15,
+              "max": 1.9715877711162058e-14
+            },
+            "implementation_unaligned_backbone_rmsd": {
+              "mean": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "max": 0.0
+            }
+          }
+        },
+        "heldout": {
+          "chains": 13,
+          "metrics": {
+            "stok_backbone_rmsd": {
+              "mean": 0.5439339547308041,
+              "median": 0.5475706113594714,
+              "min": 0.2112148255697599,
+              "max": 0.9563076713131972
+            },
+            "upstream_backbone_rmsd": {
+              "mean": 0.5439339547308041,
+              "median": 0.5475706113594714,
+              "min": 0.2112148255697599,
+              "max": 0.9563076713131972
+            },
+            "stok_ca_rmsd": {
+              "mean": 0.5491319036982746,
+              "median": 0.5531431890273742,
+              "min": 0.22026857879118109,
+              "max": 0.9568659743594321
+            },
+            "upstream_ca_rmsd": {
+              "mean": 0.5491319036982746,
+              "median": 0.5531431890273742,
+              "min": 0.22026857879118109,
+              "max": 0.9568659743594321
+            },
+            "implementation_aligned_backbone_rmsd": {
+              "mean": 1.374003436045667e-14,
+              "median": 7.844949085603227e-15,
+              "min": 4.212537107972953e-15,
+              "max": 5.6591254946270914e-14
+            },
+            "implementation_unaligned_backbone_rmsd": {
+              "mean": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "max": 0.0
+            }
+          }
+        }
+      }
+    }
+  },
+  "audit": {
+    "accepted_arrays_checked": 60,
+    "source_targets_and_masks_equal": true,
+    "saved_predictions_equal": true,
+    "saved_indices_equal": true,
+    "recomputed_rmsd_equal": true
+  },
+  "raw_artifacts": "downloads/gcp-vqvae-public/roundtrip-2026-10-01",
+  "raw_summary_sha256": "bf5a5ca724c4d7090f1d7718f04e617bfaff205b86c8c331690eee412e19cbd7"
+}

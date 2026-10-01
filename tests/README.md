@@ -720,6 +720,14 @@ remain diagnostic; the report records correction of the original overstrict gate
 Exporter checks also cover matching qualification and rejection before staging
 of changed encoder/quantizer state, configuration, backend, accelerator and
 math/SDPA settings. The packaged profile's constraints match the frozen evidence.
+
+The [full public roundtrip experiment](../docs/experiments/gcp-vqvae/public-roundtrip-report.md)
+compares both complete released STok/upstream encoder, VQ and decoder stacks on
+the same deposited residue mapping. It reports both original-input N/CA/C and CA
+RMSD, per-chain outcomes, exclusions and direct coordinate/ID agreement without
+an acceptance threshold. `test_gcp_vqvae_roundtrip.py` checks proper rigid RMSD
+alignment, masked NaN targets and exclusion of reflections. The actual experiment
+and saved-array audit cover 60 accepted model/chain results.
 The native/reference JSON under that directory is an explicitly named fixture
 pilot baseline. All-X inputs degraded reconstruction on this corpus; native
 labels must not be represented as sequence-blind.
