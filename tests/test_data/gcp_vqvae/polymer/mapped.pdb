@@ -1,0 +1,8 @@
+SEQRES   1 A    5  MET ALA GLY SER LYS
+ATOM      1  N   ALA A  -5       1.000   0.000   0.000  1.00  0.00           N
+ATOM      2  CA  ALA A  -5       2.000   0.000   0.000  1.00  0.00           C
+ATOM      3  C   ALA A  -5       3.000   0.000   0.000  1.00  0.00           C
+ATOM      4  N   SER A 100A      4.000   0.000   0.000  1.00  0.00           N
+ATOM      5  CA  SER A 100A      5.000   0.000   0.000  1.00  0.00           C
+ATOM      6  C   SER A 100A      6.000   0.000   0.000  1.00  0.00           C
+END

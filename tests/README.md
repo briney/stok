@@ -640,3 +640,25 @@ shorter chains changed respectively 5/3/3 Lite IDs and 2/4/1 Large IDs compared
 with FP32. Available reconstructed coordinates were finite. The corresponding
 CPU-versus-ROCm FP32 token comparisons had zero differences. These small probes
 do not approve BF16 for production or assess reconstruction quality.
+
+### Polymer correspondence
+
+`parse_polymer_structure` reads mmCIF entity/label metadata (or the deposited
+polymer scheme), or uniquely aligns PDB coordinate residues to SEQRES with
+Biopython's `PairwiseAligner`. Author IDs and insertion codes identify source
+residues; they never determine polymer length. A supplied sequence must agree
+with deposited sequence metadata; without it, supplied sequences require a
+unique coordinate mapping. Coordinate-only fallback is explicitly enabled with
+`allow_observed_sequence=True` and recorded as `sequence_source=observed`.
+
+Deposited monomer IDs stay in the residue map. One-letter parent normalization
+uses PDB MODRES/mmCIF chem-comp parent information, STok's documented AA3TO1
+mapping, then Biopython's extended mapping; unsupported parents become X.
+Conflicting/multiple parent or monomer assignments are rejected. Alternate
+backbone conformers use shared blank atoms and the nonblank altloc with greatest
+summed backbone occupancy; ties use lexical altloc order. Source coordinates,
+atom masks, residue maps, and metadata are read-only snapshots. Unspecified
+multiple chains, namespace collisions, ambiguous alignments, inconsistent
+scheme/atom identities, and duplicate author identities have categorized
+errors. The legacy observed-residue parser keeps its original population and
+N/CA/C return contract.

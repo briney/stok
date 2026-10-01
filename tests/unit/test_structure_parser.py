@@ -2,6 +2,7 @@
 
 import numpy as np
 import pytest
+from pathlib import Path
 
 from stok.utils.structure_parser import parse_structure, StructureData, AA3TO1
 
@@ -235,3 +236,270 @@ class TestAA3TO1Mapping:
         from stok.utils.structure_parser import _get_one_letter_code
 
         assert _get_one_letter_code("ZZZ") == "X"
+
+
+POLYMER_FIXTURES = Path(__file__).parents[1] / "test_data/gcp_vqvae/polymer"
+
+
+@pytest.mark.parametrize("suffix", ["pdb", "cif"])
+def test_polymer_correspondence_retains_unresolved_positions_and_atom_observations(
+    suffix,
+):
+    from stok.utils.structure_parser import parse_polymer_structure
+
+    result = parse_polymer_structure(
+        POLYMER_FIXTURES / f"mapped.{suffix}", chain_id="A"
+    )
+    assert result.sequence == "MAGSK"
+    assert result.coordinates.shape == (5, 4, 3)
+    assert result.atom_mask.tolist() == [
+        [False] * 4,
+        [True, True, True, False],
+        [False] * 4,
+        [True, True, True, False],
+        [False] * 4,
+    ]
+    assert np.isnan(result.coordinates[[0, 2, 4]]).all()
+    assert [row["polymer_position"] for row in result.residue_map] == list(range(5))
+    assert [row["monomer_id"] for row in result.residue_map] == [
+        "MET",
+        "ALA",
+        "GLY",
+        "SER",
+        "LYS",
+    ]
+    assert [row["observed_monomer_id"] for row in result.residue_map] == [
+        None,
+        "ALA",
+        None,
+        "SER",
+        None,
+    ]
+    assert result.residue_map[1]["author_residue_id"] == -5
+    assert result.residue_map[3]["author_residue_id"] == 100
+    assert result.residue_map[3]["insertion_code"] == "A"
+    assert result.source["sequence_source"] == (
+        "seqres" if suffix == "pdb" else "entity_poly_seq"
+    )
+    assert (
+        not result.coordinates.flags.writeable and not result.atom_mask.flags.writeable
+    )
+    if suffix == "cif":
+        assert result.source["label_chain_id"] == "L"
+        assert result.residue_map[3]["label_seq_id"] == 4
+
+
+def test_polymer_metadata_required_or_explicit_observed_fallback(tmp_path):
+    from stok.utils.structure_parser import parse_polymer_structure
+
+    path = tmp_path / "observed.pdb"
+    path.write_text(MINIMAL_PDB)
+    with pytest.raises(ValueError, match="sequence_metadata_missing"):
+        parse_polymer_structure(path)
+    result = parse_polymer_structure(path, allow_observed_sequence=True)
+    assert result.sequence == "AG" and result.source["sequence_source"] == "observed"
+    supplied = parse_polymer_structure(path, sequence="MAGSK")
+    assert supplied.sequence == "MAGSK"
+    assert supplied.residue_map[0]["monomer_id"] is None
+    assert [row["observed_monomer_id"] for row in supplied.residue_map] == [
+        None,
+        "ALA",
+        "GLY",
+        None,
+        None,
+    ]
+
+
+def test_polymer_repeated_sequence_alignment_and_disagreement_are_rejected(tmp_path):
+    from stok.utils.structure_parser import parse_polymer_structure
+
+    path = tmp_path / "ambiguous.pdb"
+    path.write_text(
+        "SEQRES   1 A    3  ALA ALA ALA\n"
+        + MINIMAL_PDB.split("ATOM      4")[0]
+        + "END\n"
+    )
+    with pytest.raises(ValueError, match="mapping_ambiguous"):
+        parse_polymer_structure(path)
+    with pytest.raises(ValueError, match="sequence_conflict"):
+        parse_polymer_structure(POLYMER_FIXTURES / "mapped.pdb", sequence="MAGTK")
+
+
+def test_polymer_modified_monomer_and_multiple_models_preserve_identity(tmp_path):
+    from stok.utils.structure_parser import parse_polymer_structure
+
+    path = tmp_path / "modified.pdb"
+    atoms = PDB_NONSTANDARD.removesuffix("END\n")
+    path.write_text(
+        "SEQRES   1 A    1  MSE\nMODEL        1\n"
+        + atoms
+        + "ENDMDL\nMODEL        2\n"
+        + atoms.replace("1.458", "9.458")
+        + "ENDMDL\nEND\n"
+    )
+    first = parse_polymer_structure(path)
+    second = parse_polymer_structure(path, model_index=1)
+    assert first.sequence == second.sequence == "M"
+    assert first.residue_map[0]["monomer_id"] == "MSE"
+    assert first.coordinates[0, 1, 0] == pytest.approx(1.458)
+    assert second.coordinates[0, 1, 0] == pytest.approx(9.458)
+    with pytest.raises(ValueError, match="model_not_found"):
+        parse_polymer_structure(path, model_index=2)
+
+
+def test_polymer_requires_explicit_chain_and_namespace(tmp_path):
+    from stok.utils.structure_parser import parse_polymer_structure
+
+    path = tmp_path / "chains.pdb"
+    path.write_text(PDB_TWO_CHAINS)
+    with pytest.raises(ValueError, match="chain_ambiguous"):
+        parse_polymer_structure(path, allow_observed_sequence=True)
+    result = parse_polymer_structure(
+        POLYMER_FIXTURES / "mapped.cif", chain_id="L", chain_namespace="label"
+    )
+    assert result.source["author_chain_id"] == "A"
+    with pytest.raises(ValueError, match="chain_not_found"):
+        parse_polymer_structure(
+            POLYMER_FIXTURES / "mapped.cif", chain_id="A", chain_namespace="label"
+        )
+
+
+def test_polymer_conformer_selection_uses_one_occupancy_ranked_altloc(tmp_path):
+    from stok.utils.structure_parser import parse_polymer_structure
+
+    path = tmp_path / "altloc.pdb"
+    n, ca, c = MINIMAL_PDB.splitlines()[:3]
+    ca_a = ca[:16] + "A" + ca[17:54] + "  0.60" + ca[60:]
+    ca_b = ca[:16] + "B" + ca[17:30] + "   9.458" + ca[38:54] + "  0.40" + ca[60:]
+    c_a = c[:16] + "A" + c[17:54] + "  0.10" + c[60:]
+    c_b = c[:16] + "B" + c[17:30] + "   9.009" + c[38:54] + "  0.90" + c[60:]
+    path.write_text(
+        "SEQRES   1 A    1  ALA\n" + "\n".join([n, ca_a, ca_b, c_a, c_b, "END"]) + "\n"
+    )
+    result = parse_polymer_structure(path)
+    assert result.residue_map[0]["selected_altloc"] == "B"
+    assert result.coordinates[0, 1, 0] == pytest.approx(9.458)
+    assert result.coordinates[0, 2, 0] == pytest.approx(9.009)
+    assert result.atom_mask[0].tolist() == [True, True, True, False]
+    path.write_text(
+        path.read_text().replace("  0.10", "  0.40").replace("  0.90", "  0.60")
+    )
+    tied = parse_polymer_structure(path)
+    assert tied.residue_map[0]["selected_altloc"] == "A"
+    assert tied.coordinates[0, 2, 0] == pytest.approx(2.009)
+
+
+def test_mmcif_author_label_collisions_and_unspecified_chain_are_rejected(tmp_path):
+    from stok.utils.structure_parser import parse_polymer_structure
+
+    text = (
+        (POLYMER_FIXTURES / "mapped.cif")
+        .read_text()
+        .replace("L 1\nloop_\n_entity_poly_seq", "L 1\nA 1\nloop_\n_entity_poly_seq")
+    )
+    extra = []
+    for line in text.splitlines():
+        if line.startswith("ATOM"):
+            columns = line.split()
+            columns[1] = str(int(columns[1]) + 100)
+            columns[6] = "A"
+            columns[17] = "L"
+            columns[10] = str(float(columns[10]) + 20)
+            extra.append(" ".join(columns))
+    path = tmp_path / "collisions.cif"
+    path.write_text(text.removesuffix("#\n") + "\n".join(extra) + "\n#\n")
+    author = parse_polymer_structure(path, chain_id="A", chain_namespace="author")
+    label = parse_polymer_structure(path, chain_id="A", chain_namespace="label")
+    assert author.source["label_chain_id"] == "L"
+    assert label.source["author_chain_id"] == "L"
+    assert label.coordinates[1, 0, 0] - author.coordinates[1, 0, 0] == 20
+    with pytest.raises(ValueError, match="chain_ambiguous"):
+        parse_polymer_structure(path)
+    path.write_text(
+        path.read_text()
+        .replace(" L N 1", " A N 1")
+        .replace(" L CA 1", " A CA 1")
+        .replace(" L C 1", " A C 1")
+    )
+    with pytest.raises(ValueError, match="chain_ambiguous"):
+        parse_polymer_structure(path, chain_id="A", chain_namespace="author")
+
+
+def test_mmcif_scheme_can_supply_polymer_without_entity_sequence(tmp_path):
+    from stok.utils.structure_parser import parse_polymer_structure
+
+    text = (POLYMER_FIXTURES / "mapped.cif").read_text()
+    start = text.index("loop_\n_entity_poly_seq.")
+    end = text.index("loop_\n_pdbx_poly_seq_scheme.")
+    path = tmp_path / "scheme.cif"
+    path.write_text(text[:start] + text[end:])
+    result = parse_polymer_structure(path, chain_id="A")
+    assert result.sequence == "MAGSK"
+    assert result.source["sequence_source"] == "poly_seq_scheme"
+    assert result.atom_mask[:, 0].tolist() == [False, True, False, True, False]
+
+
+@pytest.mark.parametrize(
+    "fault", ["monomer", "scheme", "missing_label", "duplicate_author", "unknown_model"]
+)
+def test_mmcif_inconsistent_polymer_or_coordinate_identity_fails_closed(
+    tmp_path, fault
+):
+    from stok.utils.structure_parser import (
+        StructureMappingError,
+        parse_polymer_structure,
+    )
+
+    text = (POLYMER_FIXTURES / "mapped.cif").read_text()
+    if fault == "monomer":
+        text = text.replace("1 2 ALA n", "1 2 ALA n\n1 2 GLY y")
+    elif fault == "scheme":
+        text = text.replace("L 1 2 ALA -5", "L 1 2 GLY -5")
+    elif fault == "missing_label":
+        text = text.replace("ALA L 1 2 ?", "ALA L 1 ? ?")
+    elif fault == "duplicate_author":
+        text = (
+            text.replace("L 1 4 SER 100 A", "L 1 4 SER -5 .")
+            .replace("SER L 1 4 A", "SER L 1 4 ?")
+            .replace("100 SER A", "-5 SER A")
+        )
+    path = tmp_path / "invalid.cif"
+    path.write_text(text)
+    with pytest.raises(StructureMappingError):
+        parse_polymer_structure(
+            path, chain_id="A", model_index=1 if fault == "unknown_model" else 0
+        )
+
+
+def test_deposited_parent_mapping_and_antibody_insertion_ids(tmp_path):
+    from stok.utils.structure_parser import parse_polymer_structure
+
+    path = tmp_path / "parents.cif"
+    text = (POLYMER_FIXTURES / "mapped.cif").read_text().replace("LYS", "ZZZ")
+    path.write_text(
+        text.replace(
+            "data_polymer\n",
+            "data_polymer\nloop_\n_chem_comp.id\n_chem_comp.mon_nstd_parent_comp_id\nZZZ LYS\n",
+        )
+    )
+    result = parse_polymer_structure(path, chain_id="A")
+    assert result.sequence == "MAGSK" and result.residue_map[4]["monomer_id"] == "ZZZ"
+    path = tmp_path / "parents.pdb"
+    path.write_text(
+        "SEQRES   1 A    1  ZZZ\nMODRES test ZZZ A    1  LYS\n"
+        + PDB_NONSTANDARD.replace("MSE", "ZZZ")
+    )
+    modified = parse_polymer_structure(path)
+    assert modified.sequence == "K"
+    assert modified.residue_map[0]["observed_one_letter"] == "K"
+    path = tmp_path / "insertions.pdb"
+    lines = ["SEQRES   1 A    5  MET ALA GLY SER LYS"]
+    for line in MINIMAL_PDB.splitlines():
+        if line.startswith("ATOM"):
+            code = "A" if line[17:20] == "ALA" else "B"
+            lines.append(line[:22] + "   5" + code + line[27:])
+    path.write_text("\n".join([*lines, "END"]) + "\n")
+    result = parse_polymer_structure(path)
+    assert result.sequence == "MAGSK"
+    assert [result.residue_map[i]["author_residue_id"] for i in (1, 2)] == [5, 5]
+    assert [result.residue_map[i]["insertion_code"] for i in (1, 2)] == ["A", "B"]
