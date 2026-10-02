@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from contextlib import contextmanager
 import random
 from typing import TYPE_CHECKING
@@ -156,6 +157,7 @@ def sample_mdlm(
         or ((aa < 0) | (aa >= vocab)).any()
         or aa.unique().numel() != aa.numel()
         or ((aa == mask_id) | (aa == model.pad_id)).any()
+        or torch.isin(aa, sequence[~batch["residue_mask"]].to(aa.device)).any()
     ):
         raise ValueError(
             "MDLM canonical output IDs must be distinct clean vocabulary IDs"
@@ -163,7 +165,7 @@ def sample_mdlm(
     joint = generate_mask.any(1).all(-1)
     if joint.any():
         weights = getattr(model, "mdlm_regime_weights", {})
-        if not any(
+        if not isinstance(weights, Mapping) or not any(
             float(weights.get(name, 0)) > 0
             for name in ("joint_independent", "joint_tied")
         ):

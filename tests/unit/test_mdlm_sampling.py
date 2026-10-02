@@ -425,3 +425,57 @@ def test_tokenizer_mask_and_canonical_ids_are_authoritative(tmp_path):
     assert batch["sequence_mask_id"] == 0
     assert (model.calls[0][0][generate[..., 0]] == 0).all()
     assert torch.isin(result["sequence_tokens"][generate[..., 0]], aa).all()
+
+
+@pytest.mark.parametrize("reordered", [False, True])
+@pytest.mark.parametrize("boundary", ["bos_token_id", "eos_token_id"])
+def test_rejects_observable_boundary_ids_in_clean_output_support(
+    tmp_path, reordered, boundary
+):
+    if reordered:
+        path = tmp_path / "vocab.txt"
+        path.write_text("\n".join(["<mask>"] + list(reversed(DEFAULT_VOCAB[:-1]))))
+        tokenizer = Tokenizer(vocab_file=str(path))
+    else:
+        tokenizer = Tokenizer()
+    batch = prepare_mdlm_batch(
+        [
+            {
+                "dataset": "fixture",
+                "sequence_id": "one",
+                "sequence": "AC",
+                "structure_tokens": [0, 1],
+            }
+        ],
+        tokenizer,
+        max_len=5,
+        codebook_size=2,
+        crop="center",
+        seeds=[0],
+    )
+    aa = torch.tensor(tokenizer.convert_tokens_to_ids(list(CANONICAL_AA)))
+    aa[0] = getattr(tokenizer, boundary)
+    model = FixedDenoiser(tokenizer)
+    model.aa = aa
+    generate = batch["residue_mask"][..., None].expand(-1, -1, 2).clone()
+    with pytest.raises(ValueError, match="canonical"):
+        run(model, batch, aa, generate)
+    assert not model.calls
+
+
+@pytest.mark.parametrize("weights", [None, [], "joint_tied"])
+def test_malformed_regime_provenance_reports_qualification_error(weights):
+    model, batch, aa = fixture()
+    model.mdlm_regime_weights = weights
+    generate = batch["residue_mask"][..., None].expand(-1, -1, 2).clone()
+    with pytest.raises(ValueError, match="qualified.*metadata"):
+        run(model, batch, aa, generate)
+    assert not model.calls
+
+
+def test_small_clean_support_remains_usable_for_finite_state_sampling():
+    model, batch, aa = fixture()
+    aa = aa[:2]
+    generate = batch["residue_mask"][..., None].expand(-1, -1, 2).clone()
+    result = run(model, batch, aa, generate)
+    assert torch.isin(result["sequence_tokens"][generate[..., 0]], aa).all()
