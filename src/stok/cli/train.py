@@ -1236,6 +1236,7 @@ def run_training(cfg: DictConfig):
                 attn_dropout=cfg.model.encoder.attn_dropout,
                 norm_type=cfg.model.encoder.norm,
             )
+            model.mdlm_regime_weights = dict(cfg.train.mdlm.regime_weights)
             optimizer = AdamW(
                 model.parameters(),
                 lr=cfg.train.optimizer.lr,

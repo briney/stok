@@ -477,3 +477,21 @@ def test_mdlm_has_no_legacy_classifier_configuration_dependency(tmp_path):
     del cfg.model.classifier
     state = checkpoint(cfg)
     assert state["global_step"] == 1
+
+
+def test_training_attaches_saved_regime_weights_for_sampling(tmp_path, monkeypatch):
+    source, codebook = training_fixture(tmp_path)
+    cfg = mdlm_config(tmp_path / "run", source, codebook)
+    seen = []
+    original = STokMDLM.forward
+
+    def forward(self, *args, **kwargs):
+        seen.append(getattr(self, "mdlm_regime_weights", None))
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(STokMDLM, "forward", forward)
+    state = checkpoint(cfg)
+    assert seen and all(weights == {"joint_independent": 1} for weights in seen)
+    assert state["config"]["train"]["mdlm"]["regime_weights"] == {
+        "joint_independent": 1
+    }
