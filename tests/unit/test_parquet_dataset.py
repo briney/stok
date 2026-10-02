@@ -312,3 +312,49 @@ def test_numeric_coordinate_rows_still_require_backbone_shape(tmp_path, sharded)
     ds = cls(str(tmp_path if sharded else path), max_length=8)
     with pytest.raises(ValueError, match="p1: coordinates.*shape"):
         next(iter(ds)) if sharded else ds[0]
+
+
+@pytest.mark.parametrize("sharded", [False, True])
+@pytest.mark.parametrize("max_length", [None, 3, 8])
+def test_raw_coordinate_length_mode_preserves_integer_semantics(
+    tmp_path, sharded, max_length
+):
+    coords = torch.arange(45, dtype=torch.float32).reshape(5, 3, 3)
+    path = tmp_path / "data.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "sequence_id": ["observed", "missing"],
+                "sequence": ["ACDEF", "ACDEF"],
+                "structure_tokens": [[1, 2, 3, 4, 5]] * 2,
+                "coordinates": [coords.tolist(), None],
+            }
+        ),
+        path,
+    )
+    cls = IterableTokenizedDataset if sharded else TokenizedDataset
+    dataset = cls(
+        str(tmp_path if sharded else path), max_length=max_length, dataset_name="corpus"
+    )
+    rows = list(dataset) if sharded else [dataset[0], dataset[1]]
+    rows.sort(key=lambda row: row["sequence_id"])
+    missing, observed = rows
+    length = 5 if max_length is None else max_length
+    assert observed["coords"].shape == missing["coords"].shape == (length, 3, 3)
+    torch.testing.assert_close(
+        observed["coords"][: min(length, 5)], coords[: min(length, 5)]
+    )
+    assert torch.isnan(observed["coords"][5:]).all()
+    assert torch.isnan(missing["coords"]).all()
+    assert observed["dataset"] == "corpus"
+
+
+@pytest.mark.parametrize("suffix", [".parq", ".pq", ".PARQUET", ".PARQ", ".PQ"])
+def test_standalone_alias_shards_remain_readable(tmp_path, suffix):
+    from stok.data.dataset import IterableTokenizedDataset, TokenizedDataset
+    from tests.utils.synthetic import make_mdlm_rows
+
+    path = tmp_path / ("rows" + suffix)
+    pq.write_table(pa.Table.from_pylist(make_mdlm_rows()), path)
+    assert len(TokenizedDataset(str(path), max_length=None)) == 2
+    assert len(list(IterableTokenizedDataset(str(tmp_path), max_length=None))) == 2

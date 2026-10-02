@@ -1,14 +1,12 @@
 from functools import partial
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from itertools import islice
 import math
 import os
-import random
 import shutil
 import sys
-import tempfile
 from pathlib import Path
-from typing import Any, Optional, cast
+from typing import Any, Optional, Sequence, cast
 
 import numpy as np
 import torch
@@ -40,6 +38,20 @@ from stok.eval import Evaluator, MetricLogger
 from stok.eval.registry import METRIC_REGISTRY, resolve_eval_metrics
 from stok.models.decoder import load_pretrained_decoder
 from stok.models.stok import STokModel
+from stok.models.mdlm import STokMDLM
+from stok.data.mdlm import (
+    CANONICAL_AA,
+    MDLMBatch,
+    prepare_mdlm_batch,
+    validate_mdlm_sources,
+)
+from stok.utils.mdlm import (
+    MDLMCorruption,
+    corrupt_mdlm_batch,
+    mdlm_loss_terms,
+    stable_seed,
+    validate_mdlm_config,
+)
 from stok.models.head import CodebookClassifier
 from stok.utils.codebook import load_codebook
 from stok.utils.console import ConsoleLogger
@@ -48,12 +60,24 @@ from stok.utils.masking import residue_mask_from_tokens
 from stok.utils.flops import compute_flops_6n, count_parameters, format_flops_scientific
 from stok.utils.losses import fape_loss, token_ce_loss
 from stok.utils.tokenizer import Tokenizer
+from stok.utils.checkpoint import (
+    atomic_destination as _atomic_destination,
+    collect_rng_state as _collect_rng_state,
+    epoch_iterator,
+    rank_errors as _raise_rank_errors,
+    read_training_checkpoint,
+    restore_rng_state,
+    restore_training_state,
+    resume_signature,
+    validate_resume_signature,
+    ResumeWandb,
+)
 
 
-def _maybe_get_accelerator():
+def _maybe_get_accelerator(precision=None):
     from accelerate import Accelerator
 
-    accelerator = Accelerator()
+    accelerator = Accelerator(mixed_precision=precision)
     if accelerator.distributed_type.name not in {"NO", "MULTI_CPU", "MULTI_GPU"}:
         raise ValueError(
             f"Unsupported distributed backend: {accelerator.distributed_type}; use replicated DDP"
@@ -163,42 +187,6 @@ def _unwrap_model(model: nn.Module, accelerator) -> nn.Module:
     return accelerator.unwrap_model(model) if accelerator is not None else model
 
 
-def _collect_rng_state() -> dict[str, Any]:
-    # convert numpy RNG state to only primitives/lists to be loadable with weights_only=True
-    np_state: list[Any] = list(np.random.get_state())
-    try:
-        # element 1 is the key array
-        if hasattr(np_state[1], "tolist"):
-            np_state[1] = np_state[1].tolist()
-    except Exception:
-        pass
-    state: dict[str, Any] = {
-        "python": random.getstate(),
-        "numpy": np_state,
-        "torch": torch.get_rng_state(),
-    }
-    if torch.cuda.is_available():
-        try:
-            state["cuda"] = torch.cuda.get_rng_state_all()
-        except Exception:
-            # on some backends/devices this may not be available
-            pass
-    return state
-
-
-@contextmanager
-def _atomic_destination(path: Path):
-    """Replace a destination only after its complete sibling file is written."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    os.close(fd)
-    try:
-        yield temporary
-        os.replace(temporary, path)
-    finally:
-        Path(temporary).unlink(missing_ok=True)
-
-
 def _save_checkpoint(
     path: Path,
     *,
@@ -209,24 +197,72 @@ def _save_checkpoint(
     cfg: DictConfig,
     accelerator,
     micro_step: int = 0,
+    residues_seen: int = 0,
+    executed_positions: int = 0,
+    training_state: dict | None = None,
 ):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "model": _unwrap_model(model, accelerator).state_dict(),
-        "optimizer": optimizer.state_dict(),
-        "scheduler": scheduler.state_dict(),
-        "global_step": int(global_step),
-        "micro_step": int(micro_step),
-        "step_unit": "optimizer_update",
-        "config": OmegaConf.to_container(cfg, resolve=True),
-        "rng_state": _collect_rng_state(),
-    }
-    with _atomic_destination(path) as temporary:
-        torch.save(payload, temporary)
+    payload = None
+    rank_state = None
+    error = None
+    try:
+        payload = {
+            "model": _unwrap_model(model, accelerator).state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+            "global_step": int(global_step),
+            "micro_step": int(micro_step),
+            "step_unit": "optimizer_update",
+            "config": OmegaConf.to_container(cfg, resolve=True),
+            "rng_state": _collect_rng_state(
+                device=accelerator.device if accelerator else torch.device("cpu")
+            ),
+            "residues_seen": int(residues_seen),
+            "executed_positions": int(executed_positions),
+        }
+        payload["optimizer_initialized"] = [
+            key for key, state in payload["optimizer"]["state"].items() if state
+        ]
+        # Minimal helper callers may still write initialization artifacts; production
+        # always supplies complete rank state and only v2 supports full resume.
+        if training_state is not None:
+            if any(p.grad is not None for p in model.parameters()):
+                raise ValueError(
+                    "Checkpoint requires a completed accumulation boundary with no pending gradients"
+                )
+            scaler = getattr(accelerator, "scaler", None)
+            rank_state = {
+                **training_state["local"],
+                "rank": accelerator.process_index if accelerator else 0,
+                "rng": payload["rng_state"],
+                "scaler": scaler.state_dict() if scaler is not None else None,
+            }
+    except Exception as exc:
+        if accelerator is None:
+            raise
+        error = f"{type(exc).__name__}: {exc}"
+    _raise_rank_errors(error, accelerator, "Collecting checkpoint state failed")
+    assert payload is not None
+    if training_state is not None:
+        payload.update(
+            format_version=2,
+            rank_states=gather_object([rank_state]) if accelerator else [rank_state],
+            signature=training_state["signature"],
+            wandb_run_id=training_state["wandb_run_id"],
+        )
+    error = None
+    if accelerator is None or accelerator.is_main_process:
+        try:
+            with _atomic_destination(path) as temporary:
+                torch.save(payload, temporary)
+        except Exception as exc:
+            if accelerator is None:
+                raise
+            error = f"{type(exc).__name__}: {exc}"
+    _raise_rank_errors(error, accelerator, "Checkpoint failed")
 
 
 def _load_pretrained_encoder(
-    model: STokModel,
+    model: nn.Module,
     checkpoint_path: str,
     *,
     accelerator,
@@ -519,14 +555,22 @@ def _build_dataloaders(
     *,
     codebook_size: int | None,
     pad_id: int,
-    is_mlm: bool = False,
+    is_mlm: bool | None = None,
+    objective: str | None = None,
 ) -> tuple[DataLoader, dict[str, DataLoader]]:
+    if objective is not None and (
+        objective not in {"mlm", "codebook", "mdlm"}
+        or (is_mlm is not None and is_mlm != (objective == "mlm"))
+    ):
+        raise ValueError("Conflicting objective/is_mlm flags or unknown objective")
+    objective = objective or ("mlm" if is_mlm else "codebook")
+    is_mlm, is_mdlm = objective == "mlm", objective == "mdlm"
     rank, world_size = distributed_rank()
     batch_size: int = cfg.data.batch_size
     max_len: int = cfg.data.max_len
     num_workers: int = cfg.data.num_workers
     pin_memory: bool = cfg.data.pin_memory
-    ignore_index: int = cfg.model.classifier.ignore_index
+    ignore_index: int = -100 if is_mdlm else cfg.model.classifier.ignore_index
 
     # resolve dataloader buffering
     prefetch_factor: int = int(getattr(cfg.data, "prefetch_factor", 2))
@@ -536,8 +580,9 @@ def _build_dataloaders(
 
     eval_configs = _parse_eval_configs(cfg)
     train_configs = _parse_train_configs(cfg)
-    objective = "mlm" if is_mlm else "codebook"
-    fape_required = not is_mlm and bool(cfg.train.get("fape", {}).get("enabled", False))
+    fape_required = objective == "codebook" and bool(
+        cfg.train.get("fape", {}).get("enabled", False)
+    )
 
     def coordinate_setting(options, needed, required=False):
         value = options.get("load_coords", user_load_coords)
@@ -580,6 +625,7 @@ def _build_dataloaders(
         chain_id: str | None = None,
         recursive: bool = False,
         allow_structure_folders: bool = False,
+        dataset_name: str | None = None,
     ):
         p = Path(path)
 
@@ -607,7 +653,8 @@ def _build_dataloaders(
                 shuffle_rows = bool(getattr(cfg.data, "shuffle_rows", True))
                 return IterableTokenizedDataset(
                     dataset_path=str(p),
-                    max_length=max_len,
+                    max_length=None if is_mdlm else max_len,
+                    dataset_name=dataset_name,
                     shuffle_shards=shuffle_shards,
                     shuffle_rows=shuffle_rows,
                     load_coords=bool(load_coords),
@@ -633,7 +680,8 @@ def _build_dataloaders(
 
         return TokenizedDataset(
             dataset_path=str(path),
-            max_length=max_len,
+            max_length=None if is_mdlm else max_len,
+            dataset_name=dataset_name,
             load_coords=bool(load_coords),
             require_structure_tokens=require_structure_tokens,
         )
@@ -642,7 +690,9 @@ def _build_dataloaders(
         # Real dataset(s); tokenize in collate
         tokenizer = Tokenizer()
 
-        if is_mlm:
+        if is_mdlm:
+            collate_fn = list
+        elif is_mlm:
 
             def collate(batch):
                 return mlm_collate(
@@ -680,6 +730,11 @@ def _build_dataloaders(
                 str(train_configs[0]["path"]),
                 train_load,
                 require_structure_tokens=not is_mlm,
+                dataset_name=cfg.train.mdlm_identity.sample_key_namespaces[
+                    train_configs[0]["name"]
+                ]
+                if is_mdlm
+                else None,
             )
             if force_coords and not train_ds.has_coords:
                 raise ValueError(
@@ -696,6 +751,11 @@ def _build_dataloaders(
                     str(tcfg["path"]),
                     t_load_coords,
                     require_structure_tokens=not is_mlm,
+                    dataset_name=cfg.train.mdlm_identity.sample_key_namespaces[
+                        tcfg["name"]
+                    ]
+                    if is_mdlm
+                    else None,
                 )
                 if force_coords and not ds.has_coords:
                     raise ValueError(
@@ -757,6 +817,8 @@ def _build_dataloaders(
                 train_sampler = sampler
     else:
         # fallback dummy data for quick smoke test
+        if is_mdlm:
+            raise ValueError("MDLM requires real paired Parquet training sources")
         if is_mlm:
             train_ds = DummyMLMDataset(
                 num_samples=512,
@@ -848,7 +910,7 @@ def _build_dataloaders(
             "num_workers": num_workers,
             "pin_memory": pin_memory,
             "collate_fn": collate_fn,
-            "persistent_workers": (num_workers > 0),
+            "persistent_workers": False,
         }
         if num_workers > 0 and prefetch_factor is not None and prefetch_factor > 0:
             kwargs["prefetch_factor"] = prefetch_factor
@@ -897,8 +959,18 @@ def _build_dataloaders(
     for name, eval_cfg in eval_configs.items():
         eval_path = eval_cfg["path"]
         eval_batch_size = int(eval_cfg.get("batch_size", batch_size))
-        resolved = resolve_eval_metrics(cfg, name, objective=objective)
-        needs_coords = any(METRIC_REGISTRY[key].requires_coords for key in resolved)
+        resolved = (
+            {} if is_mdlm else resolve_eval_metrics(cfg, name, objective=objective)
+        )
+        needs_coords = (
+            bool(
+                OmegaConf.select(
+                    cfg, "train.eval.mdlm.generation.decode", default=False
+                )
+            )
+            if is_mdlm
+            else any(METRIC_REGISTRY[key].requires_coords for key in resolved)
+        )
         requires_coords = any(
             settings["explicit"] and METRIC_REGISTRY[key].requires_coords
             for key, settings in resolved.items()
@@ -919,7 +991,10 @@ def _build_dataloaders(
             dataset_format=eval_format,
             chain_id=eval_chain_id,
             recursive=eval_recursive,
-            allow_structure_folders=True,
+            allow_structure_folders=not is_mdlm,
+            dataset_name=cfg.train.mdlm_identity.sample_key_namespaces[name]
+            if is_mdlm
+            else None,
         )
         if force_coords and not ds.has_coords:
             raise ValueError(
@@ -949,7 +1024,9 @@ def _build_dataloaders(
             eval_sampler = range(rank, len(ds), world_size)
         eval_kwargs = _make_dl_kwargs(eval_batch_size)
         eval_seed = int(
-            cfg.train.get("eval", {}).get("seed", cfg.train.get("seed", 1337))
+            cfg.train.get("eval", {}).get(
+                "seed", 1729 if is_mdlm else cfg.train.get("seed", 1337)
+            )
         )
         eval_kwargs["generator"] = torch.Generator().manual_seed(eval_seed)
         if is_mlm:
@@ -977,44 +1054,47 @@ def _build_dataloaders(
     return train_loader, eval_loaders
 
 
-def _maybe_wandb_login(cfg: DictConfig, *, is_main_process: bool):
-    if cfg.train.get("wandb") and cfg.train.wandb.get("enabled", True):
-        if is_main_process:
-            try:
-                import wandb
-
-                wandb.login()  # trigger login prompt early; do not create a run yet
-            except Exception:
-                # proceed without W&B
-                pass
-
-
 def _maybe_init_wandb(
-    cfg: DictConfig, *, is_main_process: bool, logs_dir: Optional[Path] = None
+    cfg: DictConfig,
+    *,
+    is_main_process: bool,
+    logs_dir: Optional[Path] = None,
+    resume_payload: dict | None = None,
 ):
-    wb = None
-    if cfg.train.get("wandb") and cfg.train.wandb.get("enabled", True):
-        if is_main_process:
-            try:
-                import wandb
+    if (
+        not is_main_process
+        or not cfg.train.get("wandb")
+        or not cfg.train.wandb.get("enabled", True)
+    ):
+        return None
+    import wandb
 
-                init_kwargs: dict[str, Any] = dict(
-                    project=cfg.train.wandb.get("project", "stok"),
-                    entity=cfg.train.wandb.get("entity"),
-                    group=cfg.train.wandb.get("group"),
-                    name=cfg.train.wandb.get("name"),
-                    tags=list(cfg.train.wandb.get("tags", [])),
-                    config=OmegaConf.to_container(cfg, resolve=True),
-                )
-                if logs_dir is not None:
-                    os.environ["WANDB_DIR"] = logs_dir.as_posix()
-                    init_kwargs["dir"] = logs_dir.as_posix()
-                wandb.init(**init_kwargs)
-                wb = wandb
-            except Exception:
-                # proceed without W&B
-                wb = None
-    return wb
+    options = cfg.train.wandb
+    serialized_config = OmegaConf.to_container(cfg, resolve=True)
+    assert isinstance(serialized_config, dict)
+    run_id = resume_payload["wandb_run_id"] if resume_payload else None
+    run = wandb.init(
+        project=options.get("project", "stok"),
+        entity=options.get("entity"),
+        group=options.get("group"),
+        name=options.get("name"),
+        tags=list(options.get("tags", [])),
+        config=cast(dict[str, Any], serialized_config),
+        mode=options.get("mode") or None,
+        dir=str(logs_dir) if logs_dir is not None else None,
+        id=run_id,
+        resume="must" if run_id else None,
+    )
+    if run is None or (run_id and run.id != run_id):
+        raise RuntimeError("W&B did not resume the recorded run ID")
+    watermark = -1
+    if resume_payload:
+        watermark = max(int(run.step) - 1, int(run.summary.get("_step", -1)))
+        run.summary["resume/rollback"] = {
+            "checkpoint_step": resume_payload["global_step"],
+            "history_watermark": watermark,
+        }
+    return ResumeWandb(wandb, watermark)
 
 
 def iter_windows(loader, size: int, accelerator=None):
@@ -1042,13 +1122,26 @@ def iter_windows(loader, size: int, accelerator=None):
         yield window
 
 
-def _raise_rank_errors(error, accelerator, context: str):
-    errors = gather_object([error]) if accelerator else [error]
-    if any(errors):
-        raise RuntimeError(f"{context}: {errors}")
-
-
 def run_training(cfg: DictConfig):
+    objective = str(cfg.train.get("objective", "codebook")).lower()
+    if objective not in {"codebook", "mlm", "mdlm"}:
+        raise ValueError(f"Unknown train.objective: {objective}")
+    is_mdlm = objective == "mdlm"
+    if is_mdlm:
+        project = cfg.train.get("project_path")
+        if not isinstance(project, str) or not project.strip():
+            raise ValueError("MDLM requires a nonempty unique train.project_path")
+        destination = Path(project).resolve()
+        if (
+            not cfg.train.get("resume_from")
+            and destination.exists()
+            and (not destination.is_dir() or any(destination.iterdir()))
+        ):
+            raise ValueError(
+                "Fresh MDLM project_path is populated; choose a unique directory or resume"
+            )
+        if cfg.train.get("precision") not in {None, "no", "fp16", "bf16"}:
+            raise ValueError("Unsupported MDLM precision; use no, fp16, or bf16")
     if str(cfg.train.get("objective", "codebook")).lower() == "mlm":
         for key in (
             "train.fape.enabled",
@@ -1060,9 +1153,13 @@ def run_training(cfg: DictConfig):
                     f"{key}=true is unsupported for MLM; geometry requires the codebook objective"
                 )
     for key, supported in (
-        ("model.classifier.tie_to_codebook", True),
-        ("model.codebook.trainable", False),
-        ("model.decoder.freeze", True),
+        ()
+        if is_mdlm
+        else (
+            ("model.classifier.tie_to_codebook", True),
+            ("model.codebook.trainable", False),
+            ("model.decoder.freeze", True),
+        )
     ):
         if OmegaConf.select(cfg, key, default=supported) != supported:
             raise ValueError(f"{key} only supports {supported} in the training CLI")
@@ -1087,7 +1184,12 @@ def run_training(cfg: DictConfig):
     seed = int(cfg.train.get("seed", cfg.get("seed", 1337)))
     set_seed(seed)
 
-    accelerator = _maybe_get_accelerator()
+    precision = cfg.train.get("precision")
+    accelerator = (
+        _maybe_get_accelerator(precision)
+        if precision is not None
+        else _maybe_get_accelerator()
+    )
     is_main = accelerator.is_main_process if accelerator else True
     printer = accelerator.print if accelerator else print
 
@@ -1103,80 +1205,191 @@ def run_training(cfg: DictConfig):
     except Exception:
         pass
 
-    # Determine training objective
-    objective = str(cfg.train.get("objective", "codebook")).lower()
-    if objective not in {"codebook", "mlm"}:
-        raise ValueError(
-            f"Unknown train.objective: {objective}. Expected 'codebook' or 'mlm'."
-        )
     is_mlm = objective == "mlm"
 
     if is_main:
         printer(f"Training objective: {objective}")
 
-    # prompt for W&B login early so the API key prompt happens immediately
-    _maybe_wandb_login(cfg, is_main_process=is_main)
-
-    # warn if multiple GPUs are visible but only one process is active
-    if accelerator and is_main:
-        world_size = getattr(accelerator, "num_processes", 1)
-        if world_size == 1 and torch.cuda.device_count() > 1:
-            printer(
-                "Multiple CUDA devices detected but only one process is active. "
-                "Launch multi-GPU with: accelerate launch -m stok.train <overrides>"
-            )
-
-    # resolve project directories and save config (main only)
-    io_dirs = _resolve_project_dirs(cfg)
-    output_error = None
-    if is_main:
-        try:
-            _ensure_dirs(list(io_dirs.values()))
-        except Exception as exc:
-            output_error = f"{type(exc).__name__}: {exc}"
-    _raise_rank_errors(output_error, accelerator, "Creating project directories failed")
-
-    # Load codebook only for codebook objective
+    cfg.train.effective_precision = accelerator.mixed_precision if accelerator else "no"
     codebook = None
     codebook_size = None
-    if not is_mlm:
+    if is_mdlm:
+        from stok.eval.mdlm import (
+            evaluate_mdlm,
+            resolve_mdlm_eval_config,
+            validate_mdlm_decoder,
+        )
+
+        decoder = None
+        preflight_error = None
+        try:
+            device = accelerator.device if accelerator else torch.device("cpu")
+            effective_precision = cfg.train.effective_precision
+            requested_precision = cfg.train.get("precision")
+            if effective_precision not in {"no", "fp16", "bf16"} or (
+                requested_precision is not None
+                and requested_precision != effective_precision
+            ):
+                raise ValueError("Unsupported requested/effective MDLM precision")
+            if effective_precision == "fp16" and device.type != "cuda":
+                raise ValueError("MDLM fp16 precision requires CUDA")
+            if effective_precision == "bf16" and (
+                device.type not in {"cpu", "cuda"}
+                or (device.type == "cuda" and not torch.cuda.is_bf16_supported())
+            ):
+                raise ValueError("MDLM bf16 precision is unsupported on this device")
+            if OmegaConf.select(cfg, "train.fape.enabled", default=False):
+                raise ValueError("train.fape.enabled is unsupported for MDLM")
+            mlm = cfg.train.get("mlm") or {}
+            defaults = OmegaConf.load(
+                Path(__file__).resolve().parents[1] / "configs/train/base.yaml"
+            )
+            if mlm.get("enabled", False) or any(
+                key in mlm and mlm[key] != defaults.mlm[key]
+                for key in ("mask_prob", "mask_token_prob", "random_token_prob")
+            ):
+                raise ValueError(
+                    "MLM masking/replacement options are unsupported for MDLM"
+                )
+            gumbel = cfg.train.get("gumbel") or {}
+            if gumbel.get("enabled", False) or any(
+                key not in defaults.gumbel or value != defaults.gumbel[key]
+                for key, value in gumbel.items()
+            ):
+                raise ValueError("Gumbel loss options are unsupported for MDLM")
+            for key, expected in (
+                ("model.codebook.trainable", False),
+                ("model.decoder.freeze", True),
+            ):
+                if OmegaConf.select(cfg, key, default=expected) != expected:
+                    raise ValueError(f"{key} only supports {expected} for MDLM")
+            validate_mdlm_config(cfg.train.mdlm)
+            if str(cfg.train.scheduler.get("decay", "")).lower() not in {
+                "linear",
+                "cosine",
+            }:
+                raise ValueError("Unknown scheduler.decay")
+            if any(
+                int(cfg.train.scheduler.get(key) or 0) < 0
+                for key in ("warmup_steps", "stable_steps", "decay_steps")
+            ):
+                raise ValueError("scheduler step counts must be non-negative")
+            codebook = load_codebook(
+                preset=cfg.model.codebook.get("preset"),
+                path=cfg.model.codebook.get("path"),
+            )
+            codebook_size = codebook.shape[0]
+            train_sources = {item["name"]: item for item in _parse_train_configs(cfg)}
+            mdlm_identity = validate_mdlm_sources(
+                train_sources,
+                _parse_eval_configs(cfg),
+                codebook=codebook,
+                split_manifest=cfg.data.get("split_manifest"),
+                eval_cohort=OmegaConf.select(cfg, "train.eval.mdlm.cohort"),
+                generation_cohort=OmegaConf.select(
+                    cfg, "train.eval.mdlm.generation_cohort"
+                ),
+            )
+            cfg.train.mdlm_identity = mdlm_identity
+            mdlm_eval = resolve_mdlm_eval_config(cfg)
+            train_loader, eval_loaders = _build_dataloaders(
+                cfg,
+                codebook_size=codebook_size,
+                pad_id=cfg.model.encoder.pad_id,
+                objective="mdlm",
+            )
+            model = STokMDLM(
+                vocab_size=cfg.model.encoder.vocab_size,
+                pad_id=cfg.model.encoder.pad_id,
+                codebook=codebook,
+                d_model=cfg.model.encoder.d_model,
+                n_heads=cfg.model.encoder.n_heads,
+                n_layers=cfg.model.encoder.n_layers,
+                ffn_mult=cfg.model.encoder.ffn_mult,
+                dropout=cfg.model.encoder.dropout,
+                attn_dropout=cfg.model.encoder.attn_dropout,
+                norm_type=cfg.model.encoder.norm,
+            )
+            model.mdlm_regime_weights = dict(cfg.train.mdlm.regime_weights)
+            if mdlm_eval.generation.enabled and mdlm_eval.generation.decode:
+                from stok.utils.sampling import inference_context
+
+                with inference_context(model):
+                    decoder = load_pretrained_decoder(
+                        preset=cfg.model.decoder.get("preset")
+                        or cfg.model.codebook.get("preset")
+                        or "base",
+                        path=cfg.model.decoder.get("path"),
+                        device=accelerator.device if accelerator else "cpu",
+                        freeze=True,
+                        progress=is_main,
+                    )
+                    validate_mdlm_decoder(
+                        decoder, codebook, mdlm_identity["codebook_sha256"]
+                    )
+            optimizer = AdamW(
+                model.parameters(),
+                lr=cfg.train.optimizer.lr,
+                betas=tuple(cfg.train.optimizer.betas),
+                weight_decay=cfg.train.optimizer.weight_decay,
+            )
+        except Exception as exc:
+            preflight_error = f"{type(exc).__name__}: {exc}"
+        _raise_rank_errors(preflight_error, accelerator, "MDLM preflight failed")
+
+    if (
+        accelerator
+        and is_main
+        and accelerator.num_processes == 1
+        and torch.cuda.device_count() > 1
+    ):
+        printer(
+            "Multiple CUDA devices detected but only one process is active. "
+            "Launch multi-GPU with: accelerate launch -m stok.train <overrides>"
+        )
+
+    io_dirs = _resolve_project_dirs(cfg)
+
+    # Load codebook only for codebook objective
+    if objective == "codebook":
         codebook = load_codebook(
             preset=cfg.model.codebook.get("preset"),
             path=cfg.model.codebook.get("path"),
         )
         codebook_size = codebook.shape[0]
 
-    # Build model with appropriate head type
-    model = STokModel(
-        vocab_size=cfg.model.encoder.vocab_size,
-        pad_id=cfg.model.encoder.pad_id,
-        d_model=cfg.model.encoder.d_model,
-        n_heads=cfg.model.encoder.n_heads,
-        n_layers=cfg.model.encoder.n_layers,
-        ffn_mult=cfg.model.encoder.ffn_mult,
-        dropout=cfg.model.encoder.dropout,
-        attn_dropout=cfg.model.encoder.attn_dropout,
-        codebook=codebook,  # None for MLM
-        classifier_kwargs=(
-            dict(
-                use_cosine=cfg.model.classifier.use_cosine,
-                learnable_temperature=cfg.model.classifier.learnable_temperature,
-                bias_from_code_norm=cfg.model.classifier.bias_from_code_norm,
-                projector_dim=cfg.model.classifier.projector_dim,
-            )
-            if not is_mlm
-            else None
-        ),
-        norm_type=cfg.model.encoder.norm,
-        head_type=objective,
-        tie_word_embeddings=(
-            cfg.train.mlm.get("tie_word_embeddings", True) if is_mlm else True
-        ),
-    )
+    # Shared encoder configuration; MDLM uses paired tied heads.
+    if not is_mdlm:
+        model = STokModel(
+            vocab_size=cfg.model.encoder.vocab_size,
+            pad_id=cfg.model.encoder.pad_id,
+            d_model=cfg.model.encoder.d_model,
+            n_heads=cfg.model.encoder.n_heads,
+            n_layers=cfg.model.encoder.n_layers,
+            ffn_mult=cfg.model.encoder.ffn_mult,
+            dropout=cfg.model.encoder.dropout,
+            attn_dropout=cfg.model.encoder.attn_dropout,
+            codebook=codebook,  # None for MLM
+            classifier_kwargs=(
+                dict(
+                    use_cosine=cfg.model.classifier.use_cosine,
+                    learnable_temperature=cfg.model.classifier.learnable_temperature,
+                    bias_from_code_norm=cfg.model.classifier.bias_from_code_norm,
+                    projector_dim=cfg.model.classifier.projector_dim,
+                )
+                if not is_mlm
+                else None
+            ),
+            norm_type=cfg.model.encoder.norm,
+            head_type=objective,
+            tie_word_embeddings=(
+                cfg.train.mlm.get("tie_word_embeddings", True) if is_mlm else True
+            ),
+        )
 
     # Load pre-trained encoder if specified (typically for codebook training after MLM)
     pretrained_encoder_path = cfg.train.get("pretrained_encoder")
-    if pretrained_encoder_path is not None and is_main:
+    if pretrained_encoder_path is not None and is_main and not is_mdlm:
         _load_pretrained_encoder(
             model,
             str(pretrained_encoder_path),
@@ -1188,23 +1401,37 @@ def run_training(cfg: DictConfig):
     num_params = count_parameters(model, trainable_only=True)
     if is_main:
         printer(f"Trainable parameters: {num_params:,}")
+        if is_mdlm:
+            device = accelerator.device if accelerator else torch.device("cpu")
+            hardware = (
+                torch.cuda.get_device_name(device) if device.type == "cuda" else "CPU"
+            )
+            mdlm_startup = [
+                f"Trainable parameters: {num_params:,}",
+                f"MDLM hardware: device={device}, hardware={hardware}, requested_precision={cfg.train.get('precision')}, mixed_precision={cfg.train.effective_precision}",
+                f"MDLM data identity: {OmegaConf.to_container(cfg.train.mdlm_identity, resolve=True)}",
+            ]
+            for line in mdlm_startup[1:]:
+                printer(line)
 
     # data
-    train_loader, eval_loaders = _build_dataloaders(
-        cfg,
-        codebook_size=codebook_size,
-        pad_id=cfg.model.encoder.pad_id,
-        is_mlm=is_mlm,
-    )
+    if not is_mdlm:
+        train_loader, eval_loaders = _build_dataloaders(
+            cfg,
+            codebook_size=codebook_size,
+            pad_id=cfg.model.encoder.pad_id,
+            is_mlm=is_mlm,
+        )
 
     # load frozen geometric decoder for FAPE loss and/or eval metrics (optional)
     # Skip decoder setup for MLM objective
-    decoder = None
+    if not is_mdlm:
+        decoder = None
     want_fape = False
     want_eval_decode = False
     log_pred_nan_frac = False
 
-    if not is_mlm:
+    if objective == "codebook":
         want_fape = bool(getattr(cfg.train, "fape", {}).get("enabled", False))
         # default to False; eval-time decoding is opt-in via config/override
         want_eval_decode = any(
@@ -1261,21 +1488,14 @@ def run_training(cfg: DictConfig):
                         f"{int(E.shape[1])}"
                     )
 
-    output_error = None
-    if is_main:
-        try:
-            _save_config_snapshot(cfg, io_dirs["configs"] / "run.yaml")
-        except Exception as exc:
-            output_error = f"{type(exc).__name__}: {exc}"
-    _raise_rank_errors(output_error, accelerator, "Saving configuration failed")
-
-    # optimizer
-    optimizer = AdamW(
-        model.parameters(),
-        lr=cfg.train.optimizer.lr,
-        betas=tuple(cfg.train.optimizer.betas),
-        weight_decay=cfg.train.optimizer.weight_decay,
-    )
+    if not is_mdlm:
+        # optimizer
+        optimizer = AdamW(
+            model.parameters(),
+            lr=cfg.train.optimizer.lr,
+            betas=tuple(cfg.train.optimizer.betas),
+            weight_decay=cfg.train.optimizer.weight_decay,
+        )
 
     # determine training steps
     grad_accum_steps: int = cfg.train.get("grad_accum_steps", 1)
@@ -1336,17 +1556,90 @@ def run_training(cfg: DictConfig):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model.to(device)
 
-    # W&B
-    wb = _maybe_init_wandb(cfg, is_main_process=is_main, logs_dir=io_dirs["logs"])
+    resume_payload = None
+    progress = None
+    resume_stream = None
+    resume_error = None
+    try:
+        signature = resume_signature(
+            cfg,
+            sources=_parse_train_configs(cfg),
+            codebook=codebook,
+            accelerator=accelerator,
+            training_decoder=decoder if want_fape else None,
+        )
+        if cfg.train.get("resume_from"):
+            resume_payload = read_training_checkpoint(Path(cfg.train.resume_from))
+            validate_resume_signature(resume_payload, signature)
+            progress = restore_training_state(
+                resume_payload,
+                model=model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                accelerator=accelerator,
+            )
+            if progress["global_step"] > max_steps:
+                raise ValueError("Resume counter exceeds original update budget")
+            cursor = progress["batches_in_epoch"]
+            if cursor > len(train_loader) or (
+                cursor != len(train_loader) and cursor % grad_accum_steps
+            ):
+                raise ValueError(
+                    "Resume cursor is not a completed local accumulation boundary"
+                )
+            resume_stream, _ = epoch_iterator(
+                train_loader,
+                epoch=progress["epoch"],
+                consumed=cursor,
+                seed=seed,
+                rank=accelerator.process_index if accelerator else 0,
+                loader_state=progress["loader_generator_state"],
+            )
+    except Exception as exc:
+        resume_error = f"{type(exc).__name__}: {exc}"
+    _raise_rank_errors(resume_error, accelerator, "Resume preflight failed")
+
+    output_error = None
+    if is_main:
+        try:
+            _ensure_dirs(list(io_dirs.values()))
+        except Exception as exc:
+            output_error = f"{type(exc).__name__}: {exc}"
+    _raise_rank_errors(output_error, accelerator, "Creating project directories failed")
+    wb = None
+    logging_error = None
+    try:
+        wb = _maybe_init_wandb(
+            cfg,
+            is_main_process=is_main,
+            logs_dir=io_dirs["logs"],
+            resume_payload=resume_payload,
+        )
+    except Exception as exc:
+        logging_error = f"{type(exc).__name__}: {exc}"
+    _raise_rank_errors(logging_error, accelerator, "W&B initialization failed")
+    output_error = None
+    if is_main:
+        try:
+            _save_config_snapshot(cfg, io_dirs["configs"] / "run.yaml")
+        except Exception as exc:
+            output_error = f"{type(exc).__name__}: {exc}"
+    _raise_rank_errors(output_error, accelerator, "Saving configuration failed")
+    wandb_run_id = getattr(getattr(wb, "run", None), "id", None) or (
+        resume_payload["wandb_run_id"] if resume_payload else None
+    )
+    if accelerator:
+        wandb_run_id = gather_object([wandb_run_id])[0]
 
     # train loop
     model.train()
-    global_step = 0
-    micro_step = 0
+    global_step = progress["global_step"] if progress else 0
+    micro_step = progress["micro_step"] if progress else 0
     running_loss = 0.0
+    running_updates = 0
     log_interval = int(cfg.train.get("log_steps", 50))
     eval_interval = int(cfg.train.get("eval", {}).get("steps", 1000))
-    ignore_index = int(cfg.model.classifier.ignore_index)
+    ignore_index = -100 if is_mdlm else int(cfg.model.classifier.ignore_index)
     grad_clip = float(cfg.train.get("grad_clip_norm", 1.0))
 
     # console output (main process only
@@ -1367,6 +1660,14 @@ def run_training(cfg: DictConfig):
                 file=log_file_handle,
                 flush=True,
             )
+            if is_mdlm:
+                print("\n".join(mdlm_startup), file=log_file_handle, flush=True)
+            if resume_payload:
+                print(
+                    f"Resume/rollback: checkpoint step {global_step}; remote history watermark {getattr(wb, 'watermark', -1)}",
+                    file=log_file_handle,
+                    flush=True,
+                )
         except Exception as exc:
             output_error = f"{type(exc).__name__}: {exc}"
     _raise_rank_errors(output_error, accelerator, "Opening training log failed")
@@ -1378,11 +1679,15 @@ def run_training(cfg: DictConfig):
         file=sys.stdout,
     )
     # Initialize modular evaluation system
-    evaluator = Evaluator(
-        cfg=cfg,
-        model=model,
-        accelerator=accelerator,
-        decoder=decoder,
+    evaluator = (
+        None
+        if is_mdlm
+        else Evaluator(
+            cfg=cfg,
+            model=model,
+            accelerator=accelerator,
+            decoder=decoder,
+        )
     )
     metric_logger = MetricLogger(
         console=console,
@@ -1404,6 +1709,26 @@ def run_training(cfg: DictConfig):
     running_masked_acc_count = 0
     # FLOPs tracking (cumulative tokens for 6N approximation)
     total_tokens = 0
+    total_residues = 0
+    total_missing_structure = 0
+    total_noncanonical_sequence = 0
+    mdlm_weights = None
+    mdlm_tokenizer = None
+    canonical_ids = None
+    if is_mdlm:
+        mdlm_weights = torch.tensor(
+            [
+                cfg.train.mdlm.get("sequence_loss_weight", 1),
+                cfg.train.mdlm.get("structure_loss_weight", 1),
+            ],
+            dtype=torch.float64,
+        )
+        mdlm_weights /= mdlm_weights.max()
+        mdlm_tokenizer = Tokenizer()
+        canonical_ids = torch.tensor(
+            mdlm_tokenizer.convert_tokens_to_ids(list(CANONICAL_AA))
+        )
+    mdlm_running = torch.zeros(5, 2, dtype=torch.float64)
 
     # Gumbel temperature schedule (only for codebook objective)
     def _anneal_tau(step: int) -> float:
@@ -1418,58 +1743,221 @@ def run_training(cfg: DictConfig):
         # linear
         return t0 + (t1 - t0) * (float(step) / float(T))
 
-    epoch = 0
+    epoch = progress["epoch"] if progress else 0
+    batches_in_pass = progress["batches_in_epoch"] if progress else 0
+    loader_generator_state = (
+        progress["loader_generator_state"]
+        if progress
+        else torch.Generator().manual_seed(seed).get_state()
+    )
+    if progress:
+        total_tokens, total_residues = (
+            progress["executed_positions"],
+            progress["residues_seen"],
+        )
+        saved = progress
+        running_loss = saved["running_loss"]
+        running_updates = saved["running_updates"]
+        running_cls_loss, running_cls_count = (
+            saved["running_cls_loss"],
+            saved["running_cls_count"],
+        )
+        running_fape_loss, running_fape_count = (
+            saved["running_fape_loss"],
+            saved["running_fape_count"],
+        )
+        running_pred_nan_frac_sum, running_pred_nan_frac_count = (
+            saved["running_pred_nan_frac_sum"],
+            saved["running_pred_nan_frac_count"],
+        )
+        running_masked_acc_sum, running_masked_acc_count = (
+            saved["running_masked_acc_sum"],
+            saved["running_masked_acc_count"],
+        )
+        total_missing_structure, total_noncanonical_sequence = (
+            saved["total_missing_structure"],
+            saved["total_noncanonical_sequence"],
+        )
+        mdlm_running = saved["mdlm_running"]
+
+    def checkpoint_state():
+        return {
+            "signature": signature,
+            "wandb_run_id": wandb_run_id,
+            "local": {
+                "epoch": epoch,
+                "batches_in_epoch": batches_in_pass,
+                "loader_generator_state": loader_generator_state,
+                "logging": {
+                    "running_loss": running_loss,
+                    "running_updates": running_updates,
+                    "running_cls_loss": running_cls_loss,
+                    "running_cls_count": running_cls_count,
+                    "running_fape_loss": running_fape_loss,
+                    "running_fape_count": running_fape_count,
+                    "running_pred_nan_frac_sum": running_pred_nan_frac_sum,
+                    "running_pred_nan_frac_count": running_pred_nan_frac_count,
+                    "running_masked_acc_sum": running_masked_acc_sum,
+                    "running_masked_acc_count": running_masked_acc_count,
+                    "total_missing_structure": total_missing_structure,
+                    "total_noncanonical_sequence": total_noncanonical_sequence,
+                    "mdlm_running": mdlm_running,
+                },
+            },
+        }
+
     epoch_limit = cfg.train.get("epochs")
     device = _get_model_device(model, accelerator)
     world_size = accelerator.num_processes if accelerator else 1
     optimizer.zero_grad(set_to_none=True)
     while global_step < max_steps and (epoch_limit is None or epoch < int(epoch_limit)):
-        set_epoch = getattr(train_loader.sampler, "set_epoch", None)
-        if callable(set_epoch):
-            set_epoch(epoch)
-        epoch += 1
-        batches_in_pass = 0
+        replay_error = None
+        try:
+            if progress:
+                stream = resume_stream
+                restore_rng_state(progress["rng"])
+                progress = None
+                resume_stream = None
+            else:
+                stream, loader_generator_state = epoch_iterator(
+                    train_loader,
+                    epoch=epoch,
+                    consumed=0,
+                    seed=seed,
+                    rank=accelerator.process_index if accelerator else 0,
+                )
+        except Exception as exc:
+            replay_error = f"{type(exc).__name__}: {exc}"
+        _raise_rank_errors(replay_error, accelerator, "Replaying training data failed")
+        resumed_batches = batches_in_pass
         updates_before_pass = global_step
-        for window in iter_windows(train_loader, grad_accum_steps, accelerator):
+        eligible_windows_in_pass = 0
+        for window in iter_windows(stream, grad_accum_steps, accelerator):
             batches_in_pass += len(window)
             current_step = global_step + 1
-            current_epoch = (epoch - 1) + batches_in_pass / max(1, len(train_loader))
+            current_epoch = epoch + batches_in_pass / max(1, len(train_loader))
             active_fape = (
                 decoder is not None
                 and want_fape
                 and global_step >= int(cfg.train.fape.start_step)
             )
-            # Denominators precede forwards; only input batches are buffered.
-            n_tokens = sum(int((batch[1] != ignore_index).sum()) for batch in window)
-            n_structures = 0
-            processed_tokens = 0
-            for batch in window:
-                tokens = batch[0]
-                processed_tokens += int((tokens != int(cfg.model.encoder.pad_id)).sum())
-                if active_fape and len(batch) == 3:
-                    mask = residue_mask_from_tokens(
-                        tokens,
-                        pad_id=int(cfg.model.encoder.pad_id),
-                        bos_id=int(cfg.model.encoder.get("bos_id", 0)),
-                        eos_id=int(cfg.model.encoder.get("eos_id", 2)),
+            # Crop/corrupt in the training process, keyed to each global occurrence.
+            corruptions = []
+            prepare_error = None
+            if is_mdlm:
+                try:
+                    assert mdlm_tokenizer is not None
+                    assert codebook_size is not None
+                    prepared = []
+                    for micro_index, rows in enumerate(window):
+                        occurrences = [
+                            [
+                                seed,
+                                "train",
+                                epoch,
+                                (micro_step + micro_index)
+                                * cfg.data.batch_size
+                                * world_size
+                                + j * world_size
+                                + (accelerator.process_index if accelerator else 0),
+                                row["dataset"],
+                                row["sequence_id"],
+                            ]
+                            for j, row in enumerate(rows)
+                        ]
+                        paired_batch = prepare_mdlm_batch(
+                            rows,
+                            mdlm_tokenizer,
+                            max_len=int(cfg.data.max_len),
+                            codebook_size=codebook_size,
+                            crop="random",
+                            seeds=[stable_seed([*key, "crop"]) for key in occurrences],
+                        )
+                        corruption = corrupt_mdlm_batch(
+                            paired_batch,
+                            cfg.train.mdlm,
+                            seeds=[
+                                stable_seed([*key, "corruption"]) for key in occurrences
+                            ],
+                        )
+                        prepared.append(paired_batch)
+                        corruptions.append(corruption)
+                    window = prepared
+                except Exception as exc:
+                    prepare_error = f"{type(exc).__name__}: {exc}"
+                _raise_rank_errors(
+                    prepare_error, accelerator, "Preparing MDLM window failed"
+                )
+                assert mdlm_weights is not None
+                local_eligible = sum(
+                    (c["eligible"].sum((0, 1)) for c in corruptions),
+                    torch.zeros(2, dtype=torch.long),
+                )
+                local_residues = sum(int(b["residue_mask"].sum()) for b in window)
+                processed_tokens = sum(b["sequence_tokens"].numel() for b in window)
+                counts = torch.tensor(
+                    [
+                        *local_eligible.tolist(),
+                        local_residues,
+                        processed_tokens,
+                        sum(b["missing_structure_count"] for b in window),
+                        sum(b["noncanonical_sequence_count"] for b in window),
+                    ],
+                    device=device,
+                    dtype=torch.long,
+                )
+                if accelerator:
+                    counts = accelerator.reduce(counts, reduction="sum")
+                global_eligible = counts[:2]
+                global_tokens, global_structures = int(global_eligible.sum()), 0
+                total_residues += int(counts[2])
+                total_missing_structure += int(counts[4])
+                total_noncanonical_sequence += int(counts[5])
+                processed_tokens = int(counts[3])
+                denominator = float((global_eligible.cpu() * mdlm_weights).sum())
+            else:
+                # Denominators precede forwards; only input batches are buffered.
+                n_tokens = sum(
+                    int((batch[1] != ignore_index).sum()) for batch in window
+                )
+                n_structures = 0
+                processed_tokens = 0
+                for batch in window:
+                    tokens = batch[0]
+                    processed_tokens += int(
+                        (tokens != int(cfg.model.encoder.pad_id)).sum()
                     )
-                    n_structures += int(
-                        (mask & torch.isfinite(batch[2]).all((-2, -1))).any(1).sum()
-                    )
-            counts = torch.tensor(
-                [n_tokens, n_structures, processed_tokens],
-                device=device,
-                dtype=torch.long,
-            )
-            if accelerator:
-                counts = accelerator.reduce(counts, reduction="sum")
-            global_tokens, global_structures, processed_tokens = counts.tolist()
-            total_tokens += processed_tokens
+                    if active_fape and len(batch) == 3:
+                        mask = residue_mask_from_tokens(
+                            tokens,
+                            pad_id=int(cfg.model.encoder.pad_id),
+                            bos_id=int(cfg.model.encoder.get("bos_id", 0)),
+                            eos_id=int(cfg.model.encoder.get("eos_id", 2)),
+                        )
+                        n_structures += int(
+                            (mask & torch.isfinite(batch[2]).all((-2, -1))).any(1).sum()
+                        )
+                counts = torch.tensor(
+                    [n_tokens, n_structures, processed_tokens],
+                    device=device,
+                    dtype=torch.long,
+                )
+                if accelerator:
+                    counts = accelerator.reduce(counts, reduction="sum")
+                global_tokens, global_structures, processed_tokens = counts.tolist()
+            if not is_mdlm:
+                total_tokens += processed_tokens
             micro_step += len(window)
-            if global_tokens == 0 and (
-                global_structures == 0 or float(cfg.train.fape.weight) == 0
+            if (is_mdlm and denominator == 0) or (
+                not is_mdlm
+                and global_tokens == 0
+                and (global_structures == 0 or float(cfg.train.fape.weight) == 0)
             ):
                 continue
+            if is_mdlm:
+                eligible_windows_in_pass += 1
+                total_tokens += processed_tokens
+            window_mdlm = torch.zeros(5, 2, dtype=torch.float64, device=device)
             window_ce = 0.0
             window_fape = 0.0
             window_correct = 0
@@ -1480,53 +1968,99 @@ def run_training(cfg: DictConfig):
                     else nullcontext()
                 )
                 with sync:
-                    tokens, labels = (t.to(device) for t in batch[:2])
-                    coords = batch[2].to(device) if len(batch) == 3 else None
                     error = None
                     try:
-                        outputs = model(tokens=tokens)
-                        ce_sum = token_ce_loss(
-                            outputs["logits"], labels, ignore_index, reduction="sum"
-                        )
-                        fape_sum = ce_sum * 0.0
-                        if active_fape and coords is not None:
-                            mask = residue_mask_from_tokens(
-                                tokens,
-                                pad_id=int(cfg.model.encoder.pad_id),
-                                bos_id=int(cfg.model.encoder.get("bos_id", 0)),
-                                eos_id=int(cfg.model.encoder.get("eos_id", 2)),
+                        if is_mdlm:
+                            assert canonical_ids is not None
+                            assert mdlm_weights is not None
+                            mdlm_batch = cast(
+                                MDLMBatch,
+                                {
+                                    key: value.to(device)
+                                    if isinstance(value, torch.Tensor)
+                                    else value
+                                    for key, value in batch.items()
+                                },
                             )
-                            eligible = (
-                                mask & torch.isfinite(coords).all((-2, -1))
-                            ).any(1)
-                            if eligible.any():
-                                soft_codes = logits_to_soft_codes_gumbel(
-                                    outputs["logits"],
-                                    cast(
-                                        CodebookClassifier,
-                                        _unwrap_model(model, accelerator).classifier,
-                                    ).E,
-                                    tau=_anneal_tau(global_step),
-                                    hard=bool(cfg.train.gumbel.get("hard", False)),
+                            corruption = cast(
+                                MDLMCorruption,
+                                {
+                                    key: value.to(device)
+                                    if isinstance(value, torch.Tensor)
+                                    else value
+                                    for key, value in corruptions[micro_index].items()
+                                },
+                            )
+                            outputs = model(
+                                sequence_tokens=corruption["sequence_tokens"],
+                                structure_tokens=corruption["structure_tokens"],
+                            )
+                            terms = mdlm_loss_terms(
+                                outputs,
+                                mdlm_batch,
+                                corruption,
+                                canonical_aa_ids=canonical_ids,
+                            )
+                            loss = (
+                                terms["weighted_sum"] * mdlm_weights.to(device)
+                            ).sum() * (world_size / denominator)
+                        else:
+                            legacy_batch = cast(Sequence[torch.Tensor], batch)
+                            tokens, labels = (t.to(device) for t in legacy_batch[:2])
+                            coords = (
+                                legacy_batch[2].to(device)
+                                if len(legacy_batch) == 3
+                                else None
+                            )
+                            outputs = model(tokens=tokens)
+                            ce_sum = token_ce_loss(
+                                outputs["logits"], labels, ignore_index, reduction="sum"
+                            )
+                            fape_sum = ce_sum * 0.0
+                            if active_fape and coords is not None:
+                                mask = residue_mask_from_tokens(
+                                    tokens,
+                                    pad_id=int(cfg.model.encoder.pad_id),
+                                    bos_id=int(cfg.model.encoder.get("bos_id", 0)),
+                                    eos_id=int(cfg.model.encoder.get("eos_id", 2)),
                                 )
-                                pred_coords = decode_token_aligned_coords(
-                                    decoder, soft_codes, mask
-                                )
-                                fape_sum = (
-                                    fape_loss(pred_coords, coords, mask)
-                                    * eligible.sum()
-                                )
-                                if log_pred_nan_frac:
-                                    running_pred_nan_frac_sum += float(
-                                        torch.isnan(pred_coords[mask]).float().mean()
+                                eligible = (
+                                    mask & torch.isfinite(coords).all((-2, -1))
+                                ).any(1)
+                                if eligible.any():
+                                    soft_codes = logits_to_soft_codes_gumbel(
+                                        outputs["logits"],
+                                        cast(
+                                            CodebookClassifier,
+                                            _unwrap_model(
+                                                model, accelerator
+                                            ).classifier,
+                                        ).E,
+                                        tau=_anneal_tau(global_step),
+                                        hard=bool(cfg.train.gumbel.get("hard", False)),
                                     )
-                                    running_pred_nan_frac_count += 1
-                        loss = ce_sum * (
-                            world_size / global_tokens if global_tokens else 0.0
-                        )
-                        loss = loss + float(cfg.train.fape.weight) * fape_sum * (
-                            world_size / global_structures if global_structures else 0.0
-                        )
+                                    pred_coords = decode_token_aligned_coords(
+                                        decoder, soft_codes, mask
+                                    )
+                                    fape_sum = (
+                                        fape_loss(pred_coords, coords, mask)
+                                        * eligible.sum()
+                                    )
+                                    if log_pred_nan_frac:
+                                        running_pred_nan_frac_sum += float(
+                                            torch.isnan(pred_coords[mask])
+                                            .float()
+                                            .mean()
+                                        )
+                                        running_pred_nan_frac_count += 1
+                            loss = ce_sum * (
+                                world_size / global_tokens if global_tokens else 0.0
+                            )
+                            loss = loss + float(cfg.train.fape.weight) * fape_sum * (
+                                world_size / global_structures
+                                if global_structures
+                                else 0.0
+                            )
                         if not torch.isfinite(loss):
                             raise FloatingPointError("Nonfinite training loss")
                     except Exception as exc:
@@ -1536,13 +2070,27 @@ def run_training(cfg: DictConfig):
                         accelerator.backward(loss)
                     else:
                         loss.backward()
-                    window_ce += float(ce_sum.detach())
-                    window_fape += float(fape_sum.detach())
-                    with torch.no_grad():
-                        valid = labels != ignore_index
-                        window_correct += int(
-                            ((outputs["logits"].argmax(-1) == labels) & valid).sum()
+                    if is_mdlm:
+                        window_mdlm += torch.stack(
+                            [
+                                terms[key].detach()
+                                for key in (
+                                    "weighted_sum",
+                                    "ce_sum",
+                                    "correct",
+                                    "masked_count",
+                                    "eligible_count",
+                                )
+                            ]
                         )
+                    else:
+                        window_ce += float(ce_sum.detach())
+                        window_fape += float(fape_sum.detach())
+                        with torch.no_grad():
+                            valid = labels != ignore_index
+                            window_correct += int(
+                                ((outputs["logits"].argmax(-1) == labels) & valid).sum()
+                            )
             if grad_clip > 0:
                 if accelerator:
                     accelerator.clip_grad_norm_(model.parameters(), grad_clip)
@@ -1554,32 +2102,88 @@ def run_training(cfg: DictConfig):
             if skipped:
                 continue
             scheduler.step()
-            sums = torch.tensor(
-                [window_ce, window_fape, window_correct],
-                device=device,
-                dtype=torch.float64,
-            )
-            if accelerator:
-                sums = accelerator.reduce(sums, reduction="sum")
-            cls_mean = float(sums[0]) / max(1, global_tokens)
-            fape_mean = float(sums[1]) / max(1, global_structures)
-            running_loss += cls_mean + float(cfg.train.fape.weight) * fape_mean
-            if global_tokens:
-                running_cls_loss += float(sums[0])
-                running_cls_count += global_tokens
-                running_masked_acc_sum += float(sums[2])
-                running_masked_acc_count += global_tokens
-            if global_structures:
-                running_fape_loss += float(sums[1])
-                running_fape_count += global_structures
+            if is_mdlm:
+                assert mdlm_weights is not None
+                if accelerator:
+                    window_mdlm = accelerator.reduce(window_mdlm, reduction="sum")
+                running_loss += (
+                    float((window_mdlm[0].cpu() * mdlm_weights).sum()) / denominator
+                )
+                mdlm_running += window_mdlm.cpu()
+            else:
+                sums = torch.tensor(
+                    [window_ce, window_fape, window_correct],
+                    device=device,
+                    dtype=torch.float64,
+                )
+                if accelerator:
+                    sums = accelerator.reduce(sums, reduction="sum")
+                cls_mean = float(sums[0]) / max(1, global_tokens)
+                fape_mean = float(sums[1]) / max(1, global_structures)
+                running_loss += cls_mean + float(cfg.train.fape.weight) * fape_mean
+                if global_tokens:
+                    running_cls_loss += float(sums[0])
+                    running_cls_count += global_tokens
+                    running_masked_acc_sum += float(sums[2])
+                    running_masked_acc_count += global_tokens
+                if global_structures:
+                    running_fape_loss += float(sums[1])
+                    running_fape_count += global_structures
 
+            running_updates += 1
             # logging
-            if current_step % log_interval == 0 and is_main:
+            if is_mdlm and current_step % log_interval == 0 and is_main:
+                cumulative_flops = compute_flops_6n(num_params, total_tokens)
+                payload = {
+                    "train/diffusion_loss": running_loss / running_updates,
+                    "train/micro_step": micro_step,
+                    "train/residues_seen": total_residues,
+                    "train/executed_positions": total_tokens,
+                    "train/missing_structure_count": total_missing_structure,
+                    "train/noncanonical_sequence_count": total_noncanonical_sequence,
+                    "train/flops": cumulative_flops,
+                    "lr": scheduler.get_last_lr()[0],
+                }
+                msg = f"step {current_step}/{max_steps} | micro_step {micro_step} | diffusion_loss {payload['train/diffusion_loss']:.4f}"
+                for track, name in enumerate(("sequence", "structure")):
+                    weighted, ce, correct, masked, eligible = mdlm_running[
+                        :, track
+                    ].tolist()
+                    payload[f"train/{name}/weighted_sum"] = weighted
+                    payload[f"train/{name}/ce_sum"] = ce
+                    payload[f"train/{name}/masked_count"] = masked
+                    payload[f"train/{name}/eligible_count"] = eligible
+                    payload[f"train/{name}/mask_rate"] = (
+                        masked / eligible if eligible else 0
+                    )
+                    if masked:
+                        payload[f"train/{name}/masked_ce"] = ce / masked
+                        payload[f"train/{name}/masked_accuracy"] = correct / masked
+                    msg += (
+                        f" | {name}_ce {ce / masked:.4f}"
+                        if masked
+                        else f" | {name}_ce unavailable"
+                    )
+                    msg += f" | {name}_masked {int(masked)}/{int(eligible)}"
+                msg += f" | residues {total_residues} | positions {total_tokens} | missing_structure {total_missing_structure} | noncanonical_sequence {total_noncanonical_sequence} | flops {format_flops_scientific(cumulative_flops)}"
+                console.train(msg)
+                if log_file_handle is not None:
+                    print(
+                        msg + f" (flops_actual={cumulative_flops})",
+                        file=log_file_handle,
+                        flush=True,
+                    )
+                if wb is not None:
+                    wb.log(payload, step=current_step)
+                running_loss = 0.0
+                running_updates = 0
+                mdlm_running.zero_()
+            if not is_mdlm and current_step % log_interval == 0 and is_main:
                 acc = running_masked_acc_sum / max(1, running_masked_acc_count)
                 lr = scheduler.get_last_lr()[0]
 
                 # compute averages over the current log interval
-                avg_total_loss = running_loss / max(1, log_interval)
+                avg_total_loss = running_loss / running_updates
                 avg_cls_loss = (
                     running_cls_loss / float(max(1, running_cls_count))
                     if running_cls_count > 0
@@ -1699,6 +2303,7 @@ def run_training(cfg: DictConfig):
 
                 # reset accumulators for the next log interval
                 running_loss = 0.0
+                running_updates = 0
                 running_cls_loss = 0.0
                 running_cls_count = 0
                 running_fape_loss = 0.0
@@ -1708,8 +2313,36 @@ def run_training(cfg: DictConfig):
                 running_masked_acc_sum = 0.0
                 running_masked_acc_count = 0
 
+            if is_mdlm:
+                denoising_due = mdlm_eval.enabled and current_step % eval_interval == 0
+                generation_due = (
+                    mdlm_eval.generation.enabled
+                    and current_step % mdlm_eval.generation.steps == 0
+                )
+                if denoising_due or generation_due:
+                    all_eval_metrics = evaluate_mdlm(
+                        model,
+                        eval_loaders,
+                        cfg,
+                        accelerator=accelerator,
+                        decoder=decoder,
+                        run_denoising=denoising_due,
+                        run_generation=generation_due,
+                    )
+                    metric_logger.log_eval_all(
+                        all_eval_metrics,
+                        current_step,
+                        current_epoch,
+                        compute_flops_6n(num_params, total_tokens),
+                    )
+
             # eval across all configured eval loaders (using modular eval system)
-            if current_step % eval_interval == 0 and len(eval_loaders) > 0:
+            if (
+                not is_mdlm
+                and current_step % eval_interval == 0
+                and len(eval_loaders) > 0
+            ):
+                assert evaluator is not None
                 all_eval_metrics = evaluator.evaluate_all(eval_loaders)
 
                 # Add epoch to metrics if available
@@ -1725,6 +2358,9 @@ def run_training(cfg: DictConfig):
                     all_eval_metrics, current_step, current_epoch, eval_train_flops
                 )
 
+            _raise_rank_errors(
+                getattr(wb, "error", None), accelerator, "W&B logging failed"
+            )
             global_step += 1
             console.step(1)
             # checkpointing
@@ -1735,57 +2371,58 @@ def run_training(cfg: DictConfig):
                 and (global_step % int(ckpt_steps) == 0)
             ):
                 step_path = io_dirs["checkpoints"] / f"step_{global_step:08d}.pt"
+                _save_checkpoint(
+                    step_path,
+                    model=model,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    global_step=global_step,
+                    cfg=cfg,
+                    accelerator=accelerator,
+                    micro_step=micro_step,
+                    residues_seen=total_residues,
+                    executed_positions=total_tokens,
+                    training_state=checkpoint_state(),
+                )
                 checkpoint_error = None
                 if is_main:
                     try:
-                        _save_checkpoint(
-                            step_path,
-                            model=model,
-                            optimizer=optimizer,
-                            scheduler=scheduler,
-                            global_step=global_step,
-                            cfg=cfg,
-                            accelerator=accelerator,
-                            micro_step=micro_step,
-                        )
                         with _atomic_destination(
                             io_dirs["checkpoints"] / "latest.pt"
                         ) as temporary:
                             shutil.copyfile(step_path, temporary)
                     except Exception as exc:
                         checkpoint_error = f"{type(exc).__name__}: {exc}"
-                errors = (
-                    gather_object([checkpoint_error])
-                    if accelerator
-                    else [checkpoint_error]
-                )
-                if any(errors):
-                    raise RuntimeError(f"Checkpoint failed: {errors}")
+                _raise_rank_errors(checkpoint_error, accelerator, "Checkpoint failed")
             if global_step >= max_steps:
                 break
         if batches_in_pass == 0:
             raise RuntimeError("Training loader produced no complete batches")
-        if global_step == updates_before_pass:
+        if (
+            not resumed_batches
+            and global_step == updates_before_pass
+            and (not is_mdlm or eligible_windows_in_pass == 0)
+        ):
             raise RuntimeError("Training pass made no successful optimizer update")
+        if global_step < max_steps:
+            epoch += 1
+            batches_in_pass = 0
 
-    checkpoint_error = None
-    if is_main:
-        try:
-            _save_checkpoint(
-                io_dirs["model"] / "final.pt",
-                model=model,
-                optimizer=optimizer,
-                scheduler=scheduler,
-                global_step=global_step,
-                micro_step=micro_step,
-                cfg=cfg,
-                accelerator=accelerator,
-            )
-        except Exception as exc:
-            checkpoint_error = f"{type(exc).__name__}: {exc}"
-    errors = gather_object([checkpoint_error]) if accelerator else [checkpoint_error]
-    if any(errors):
-        raise RuntimeError(f"Final checkpoint failed: {errors}")
+    if progress:
+        restore_rng_state(progress["rng"])
+    _save_checkpoint(
+        io_dirs["model"] / "final.pt",
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        global_step=global_step,
+        micro_step=micro_step,
+        residues_seen=total_residues,
+        executed_positions=total_tokens,
+        cfg=cfg,
+        accelerator=accelerator,
+        training_state=checkpoint_state(),
+    )
     if is_main:
         console.close()
         console.print("Training complete.")

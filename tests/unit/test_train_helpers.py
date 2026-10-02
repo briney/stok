@@ -133,7 +133,7 @@ def test_accelerator_initialization_failure_is_not_hidden(monkeypatch):
     import accelerate
     from stok.cli.train import _maybe_get_accelerator
 
-    def fail():
+    def fail(**kwargs):
         raise RuntimeError("initialization failed")
 
     monkeypatch.setattr(accelerate, "Accelerator", fail)

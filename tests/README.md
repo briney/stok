@@ -558,8 +558,9 @@ They passed in FP16 and BF16 on Radeon 8060S Graphics with torch
 `2.14.0+rocm7.2`. CPU attention forward/backward parity also passed in FP32,
 BF16, and FP16. Actual overflow under distributed GPU training and multi-GPU
 collectives are still unvalidated; optimizer-skip governance is tested with
-Accelerate's overflow flag. Resume, sharded training backends, and a trainable
-CLI decoder/codebook are unsupported.
+Accelerate's overflow flag. Trainable CLI decoder/codebook are unsupported.
+Complete fixed-configuration version-2 training resume is covered by the MDLM
+qualification below.
 
 The full installed suite should be run with local IPC allowed:
 
@@ -742,3 +743,57 @@ approved by these checks. Public reconstruction evidence now includes real
 26–1017-residue deposited chains; it remains distinct from upstream parity and
 does not establish unseen-family/pretrained-training independence or universal
 exact-ID stability on GPU.
+
+### Paired MDLM qualification
+
+Unit tests cover aligned preparation, source/split/cohort identities, all four
+corruption regimes, token/span grouping, schedules, absorbing reverse sampling,
+paired model heads and per-modality normalization. Integration tests cover the
+production optimizer lifecycle, denoising/generation filtering, decoder identity,
+CLI/package composition, successful-update counting, replicated CPU DDP and
+fresh-process version-2 continuation with workers/dropout/accumulation.
+
+Run the full suite with local IPC permitted and CPU selection:
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 OMP_NUM_THREADS=1 TOKENIZERS_PARALLELISM=false \
+  ACCELERATE_USE_CPU=true python -m pytest tests/unit tests/integration -q
+python -m ruff check src tests
+python -m compileall -q src tests
+python -m build --no-isolation
+# Install the resulting wheel into a fresh environment with existing dependencies.
+python -m pip install --no-deps dist/stok-0.1.4-py3-none-any.whl
+stok --help
+stok train --help
+stok sample --help
+```
+
+The actual wheel check must import STok outside the checkout, discover packaged
+`mdlm_150m`/`mdlm_pilot` configs and verify later Hydra overrides. Extraction
+alone does not qualify installation. The local October 1 run did an actual pip
+install into `/tmp/stok-mdlm-wheel-installed`, then checked config composition,
+override precedence and CLI discovery there.
+
+The new `integration/test_mdlm_device.py` is opt-in; a default CPU skip provides
+no GPU evidence. Run it with actual completed real paired data and the matching
+full Large tokenizer archive:
+
+```bash
+STOK_MDLM_SOURCE=/path/to/completed/real-export \
+STOK_MDLM_ARCHIVE=/path/to/matching/large/best_valid.pth \
+  OMP_NUM_THREADS=1 TOKENIZERS_PARALLELISM=false ACCELERATE_USE_CPU=false \
+  python -m pytest tests/integration/test_mdlm_device.py -q -s
+```
+
+It requires a visible BF16 accelerator, checks finite gradients and both head
+updates during exactly 64 tiny dropout-zero updates, frozen codebook values,
+fixed-subset CE improvement in both available-target modalities, clamped
+conditions and valid generated IDs, plus matching frozen FP32 geometry decode.
+The [reproducible qualification report](../docs/experiments/mdlm/qualification-2026-10-01.md)
+and [bounded full-model probe](../docs/experiments/mdlm/qualify_device.py) retain
+actual Radeon evidence at context 514 and selected worker/precision continuation.
+They identify phase memory/timing, backend limits, versions and pending controls.
+The real production frozen-validation `evaluate_mdlm` boundary remains pending
+supplied validation-only cohorts; training-subset utility checks are distinct.
+Actual GPU FP16 scaler overflow and multi-GPU launch are not qualified by BF16
+or CPU tests. Longer experiments require explicit identities/hardware/budgets.

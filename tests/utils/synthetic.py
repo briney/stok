@@ -1,3 +1,9 @@
+import json
+import pyarrow as pa
+import pyarrow.parquet as pq
+from stok.data.structure_export import structure_export_schema
+from stok.utils.pretrained import file_sha256, json_sha256, state_sha256
+
 import random
 from typing import Callable, List, Tuple
 
@@ -78,3 +84,79 @@ def make_collate_fn(
         return build_batch(tokenizer, batch, codebook_size, ignore_index)
 
     return _collate
+
+
+def make_mdlm_rows() -> list[dict]:
+    """Clean paired rows whose coordinates identify each original residue."""
+    rows = []
+    for sequence_id, sequence in (
+        ("long", "LAGVSERTIPDKQNFYMHWCLAGVSERT"),
+        ("short", "AXC"),
+    ):
+        tokens = list(range(len(sequence)))
+        if sequence_id == "long":
+            tokens[14] = None
+        rows.append(
+            {
+                "dataset": "synthetic",
+                "sequence_id": sequence_id,
+                "sequence": sequence,
+                "structure_tokens": tokens,
+                "coordinates": torch.arange(len(sequence) * 9, dtype=torch.float32)
+                .reshape(len(sequence), 3, 3)
+                .tolist(),
+                "source": {"path": sequence_id + ".cif", "sha256": sequence_id},
+                "residue_map": [{"polymer_position": i} for i in range(len(sequence))],
+            }
+        )
+    return rows
+
+
+def write_dataset(path, rows, *, codebook=None, policy=None):
+    codebook = (
+        torch.arange(64, dtype=torch.float32).reshape(32, 2)
+        if codebook is None
+        else codebook
+    )
+    path.mkdir()
+    provenance = {
+        "schema_version": 1,
+        "tokenizer": {
+            "codebook_size": len(codebook),
+            "codebook_sha256": state_sha256({"codebook": codebook}),
+            "encoder_state_sha256": "local-fixture",
+        },
+        "policy": policy or {"sequence_mode": "native", "context_scope": "full_chain"},
+        "execution": {"device": "cpu", "dtype": "float32"},
+    }
+    metadata = {
+        b"stok.provenance": json.dumps(provenance, sort_keys=True).encode(),
+        b"stok.tokenizer_sha256": json_sha256(provenance["tokenizer"]).encode(),
+        b"stok.policy_sha256": json_sha256(provenance["policy"]).encode(),
+    }
+    shard = path / "part-000000.parquet"
+    pq.write_table(
+        pa.Table.from_pylist(
+            rows,
+            schema=structure_export_schema(include_coordinates=True, metadata=metadata),
+        ),
+        shard,
+    )
+    counts = {
+        "row_count": len(rows),
+        "residue_count": sum(len(row["sequence"]) for row in rows),
+        "null_count": sum(row["structure_tokens"].count(None) for row in rows),
+    }
+    (path / "rejections.jsonl").write_text("")
+    manifest = {
+        "schema_version": 1,
+        "status": "complete",
+        "provenance": provenance,
+        "tokenizer_sha256": metadata[b"stok.tokenizer_sha256"].decode(),
+        "policy_sha256": metadata[b"stok.policy_sha256"].decode(),
+        "shards": [{"path": shard.name, "sha256": file_sha256(shard), **counts}],
+        "rejections_sha256": file_sha256(path / "rejections.jsonl"),
+        **counts,
+    }
+    (path / "manifest.json").write_text(json.dumps(manifest))
+    return path

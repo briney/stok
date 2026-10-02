@@ -385,3 +385,91 @@ def test_fitted_logreg_single_and_two_rank_scores_match(tmp_path):
             json.loads((tmp_path / f"rank_{rank}.json").read_text())["metrics"]
             == expected
         )
+
+
+@pytest.mark.parametrize(
+    "coverage", ["uneven", "empty-modality", "empty-rank", "unused-head"]
+)
+def test_mdlm_two_rank_update_matches_global_reference(tmp_path, coverage):
+    import torch
+    from tests.integration.test_mdlm_training import training_fixture
+    from tests.utils.synthetic import make_mdlm_rows
+
+    rows = []
+    for i in range(8):
+        row = {
+            **make_mdlm_rows()[1],
+            "sequence_id": str(i),
+            "sequence": "ACD",
+            "structure_tokens": [0, 1, 2],
+        }
+        if i % 2 == 0:
+            row["structure_tokens"] = (
+                [0, None, None] if coverage == "uneven" else [None] * 3
+            )
+            if coverage == "empty-rank":
+                row["sequence"] = "XXX"
+        rows.append(row)
+    training_fixture(tmp_path, rows=rows)
+    command = [
+        sys.executable,
+        "-m",
+        "tests.utils.distributed_probe",
+        "--case",
+        "mdlm-" + coverage,
+        "--output",
+        str(tmp_path),
+        "--accum",
+        "2",
+    ]
+    result = subprocess.run(
+        command, env=training_env(), capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    reference = torch.load(
+        tmp_path / "run/model/final.pt", weights_only=False, map_location="cpu"
+    )
+    (tmp_path / "run").rename(tmp_path / "reference-run")
+    for result in run_distributed(command):
+        assert result.returncode == 0, result.stdout + result.stderr
+    distributed = torch.load(
+        tmp_path / "run/model/final.pt", weights_only=False, map_location="cpu"
+    )
+    assert distributed["global_step"] == 2 and distributed["micro_step"] == 4
+    assert distributed["executed_positions"] == reference["executed_positions"] == 64
+    assert distributed["residues_seen"] == reference["residues_seen"] == 24
+    for name in reference["model"]:
+        torch.testing.assert_close(
+            distributed["model"][name], reference["model"][name], atol=3e-6, rtol=3e-5
+        )
+    if coverage == "unused-head":
+        assert torch.count_nonzero(distributed["model"]["structure_bias"]) == 0
+        assert all(
+            s["step"].item() == 2 for s in distributed["optimizer"]["state"].values()
+        )
+
+
+@pytest.mark.parametrize(
+    "case,context",
+    [
+        ("mdlm-bad-prepare", "Preparing MDLM window failed"),
+        ("mdlm-bad-forward", "Training forward failed"),
+    ],
+)
+def test_mdlm_rank_local_failure_terminates_every_rank(tmp_path, case, context):
+    from tests.integration.test_mdlm_training import training_fixture
+
+    training_fixture(tmp_path)
+    command = [
+        sys.executable,
+        "-m",
+        "tests.utils.distributed_probe",
+        "--case",
+        case,
+        "--output",
+        str(tmp_path),
+    ]
+    for result in run_distributed(command, timeout=20):
+        assert result.returncode != 0
+        assert context in result.stderr, result.stdout + result.stderr
+    assert not list((tmp_path / "run/checkpoints").glob("step_*.pt"))

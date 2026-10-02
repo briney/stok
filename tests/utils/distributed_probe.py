@@ -47,6 +47,12 @@ def main():
             "eval-budget",
             "eval-logreg",
             "logreg-fit",
+            "mdlm-uneven",
+            "mdlm-empty-modality",
+            "mdlm-empty-rank",
+            "mdlm-unused-head",
+            "mdlm-bad-prepare",
+            "mdlm-bad-forward",
         ],
         required=True,
     )
@@ -77,6 +83,46 @@ def main():
                 "data.shuffle_rows=false",
             ],
         )
+    if args.case.startswith("mdlm-"):
+        from tests.integration.test_mdlm_training import mdlm_config
+        from stok.cli import train as training
+
+        cfg = mdlm_config(
+            root / "run",
+            root / "data",
+            root / "codebook.pt",
+            **{
+                "data.batch_size": 1 if accelerator.num_processes > 1 else 2,
+                "train.grad_accum_steps": args.accum,
+            },
+        )
+        if args.case == "mdlm-unused-head":
+            cfg.train.mdlm.regime_weights = {"sequence_only": 1}
+        if args.case == "mdlm-bad-prepare":
+            original = training.prepare_mdlm_batch
+
+            def bad_row(rows, *arguments, **kwargs):
+                if accelerator.process_index == 0:
+                    rows[0]["structure_tokens"][-1] = 99999
+                return original(rows, *arguments, **kwargs)
+
+            training.prepare_mdlm_batch = bad_row
+        if args.case == "mdlm-bad-forward":
+            original = training.STokMDLM.forward
+
+            def bad_prediction(self, *arguments, **kwargs):
+                outputs = original(self, *arguments, **kwargs)
+                if accelerator.process_index == 0:
+                    outputs["sequence_logits"] = outputs["sequence_logits"] * float(
+                        "nan"
+                    )
+                return outputs
+
+            training.STokMDLM.forward = bad_prediction
+        run_training(cfg)
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
+        return
     train_path = str(
         root / ("shards" if args.source == "iterable" else "train.parquet")
     )

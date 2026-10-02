@@ -946,3 +946,145 @@ Python, NumPy, and torch RNG state. Top-p decoding repeats for a fixed evaluatio
 configuration; invariance to changed batch sizes is not promised. Scores from
 older runs affected by alignment, missing data, aggregation, or contact-candidate
 errors are not directly comparable to corrected scores.
+
+## Paired MDLM pilot
+
+`model=mdlm_150m train=mdlm_pilot` composes the existing Hydra groups and sets
+144,797,472 trainable parameters with a 4096-entry structure codebook. The
+preset starts at 10,000 successful optimizer updates, length 514 including
+BOS/EOS, batch 2, accumulation 1, and bf16. These values require hardware
+qualification; choose precision/batch/accumulation before freezing a comparison
+series. CPU correctness checks use `train.precision=no`. Startup reports the
+exact parameter count, actual device/hardware/mixed precision, and data hashes.
+
+Supply **completed exported dataset directories**, including their export
+summary/provenance and Parquet shards; bare Parquet and unfinished exports are
+rejected. Choose a new nonempty `train.project_path` for every fresh MDLM run.
+The following paths are placeholders to replace with actual local artifacts:
+
+```bash
+stok train model=mdlm_150m train=mdlm_pilot \
+  +data.train.pilot.path=/data/stok-mdlm/completed/train \
+  +data.eval.validation.path=/data/stok-mdlm/completed/validation \
+  data.split_manifest=/data/stok-mdlm/splits-v1.jsonl \
+  train.eval.mdlm.cohort=/data/stok-mdlm/denoising-v1.jsonl \
+  train.eval.mdlm.generation_cohort=/data/stok-mdlm/generation-v1.jsonl \
+  train.project_path=/runs/stok-mdlm/baseline-001
+```
+
+Split JSONL rows use `dataset`, `sequence_id`, `split` (`train`, `validation`,
+`test`), and `cluster_id`. Dataset names must match the Hydra source names
+(`pilot`/`validation` above); keep source chains and homologous clusters in one
+split. Cohort JSONL rows use `dataset` and `sequence_id`; members must be unique
+and present in the **validation** split. The generation cohort is frozen at at
+most 16 members. Exported tokenizer/policy/codebook identities must agree across
+sources. The `base`/`large` codebook aliases have the same semantics; `lite` is a
+different tokenizer/codebook and must match the actual export. For a custom
+export use `model.codebook.path=/data/stok-mdlm/tokenizer-full.pt` (or a matching
+codebook archive), independently of the selected encoder size.
+
+The preset evaluates 32 fixed named denoising cases every 250 updates: four
+regimes × probabilities `[0.15,0.5,0.85,1.0]` × token/span placement, span mean 8,
+evaluation seed 1729. Generation runs every 1000 updates with 64 reverse steps,
+linear schedule, and no coordinate decoding by default. `train.eval.mdlm.cases`
+is an explicit named map that replaces the default matrix; for example:
+
+```bash
+# Add to a launch command with its required dataset/cohort/project arguments.
+'+train.eval.mdlm.cases={probe:{regime:joint_tied,probability:0.5,placement:span,span_mean:8}}'
+```
+
+For a bounded one-source overfit diagnostic, supply an actual completed export,
+a new run directory, a small budget, and disable both benchmark controls:
+
+```bash
+stok train model=mdlm_150m train=mdlm_pilot \
+  +data.train.diagnostic.path=/data/stok-mdlm/completed/diagnostic \
+  train.project_path=/runs/stok-mdlm/diagnostic-001 \
+  train.num_steps=20 train.scheduler.warmup_steps=0 \
+  train.eval.mdlm.enabled=false train.eval.mdlm.generation.enabled=false \
+  train.wandb.enabled=false
+```
+
+`train.eval.mdlm.generation.steps=null` also disables generation and removes its
+cohort requirement. `stok smoke-test model=mdlm_150m train=mdlm_pilot` is an
+explicit synthetic paired forward check; training has no dummy-data fallback.
+
+Use Hydra overrides for each isolated experiment; they retain normal override
+precedence. For spans and a power schedule append:
+
+```bash
+train.mdlm.placement=span train.mdlm.span_mean=8 \
+train.mdlm.noise.name=power train.mdlm.noise.power=2
+```
+
+To select any one regime, set all four weights explicitly, e.g. tied joint:
+
+```bash
+train.mdlm.regime_weights.joint_independent=0 \
+train.mdlm.regime_weights.structure_only=0 \
+train.mdlm.regime_weights.sequence_only=0 \
+train.mdlm.regime_weights.joint_tied=1
+```
+
+Resume with the original launch arguments and original update budget, adding
+`train.resume_from=/runs/stok-mdlm/baseline-001/checkpoints/step_00000500.pt`.
+The checkpoint records the deterministic stream, optimizer/scheduler/rank state,
+identities, precision/topology, and regime provenance. Keep model, training
+objective/masking, dataset contents/order, seed, workers, batch/accumulation,
+execution, learning rate, and original budget unchanged. Output/log/evaluation/
+checkpoint cadence changes are allowed. Populated MDLM run directories require
+an explicit complete version-2 resume checkpoint.
+
+CPU execution records a null cuDNN version without querying CUDA. Earlier internal
+CPU checkpoints with a non-null cuDNN version fail the strict resume signature
+check and require a fresh run; GPU execution signatures are unchanged.
+
+Generate biological tokens using a complete version-2 MDLM checkpoint:
+
+```bash
+stok sample --checkpoint /runs/stok-mdlm/baseline-001/model/final.pt \
+  --input /data/stok-mdlm/folding-input.jsonl \
+  --output /runs/stok-mdlm/folding-001.jsonl \
+  --mode folding --steps 64 --seed 1729
+```
+
+Input JSONL rows require unique `sequence_id` values. Folding requires
+`sequence`; inverse folding requires `structure_tokens`; joint generation
+requires positive `length`. Supply `length` explicitly or let a conditional mode
+infer it from its condition. Arrays/strings contain exactly one slot per
+biological residue, without BOS/EOS/PAD/MASK. `null` structure entries represent
+permanently unavailable conditioning cells. Structure-supplied rows must include
+`tokenizer_sha256` and `codebook_sha256` matching the saved
+`config.train.mdlm_identity`. For example:
+
+```json
+{"sequence_id":"fold-1","sequence":"ACDE","length":4}
+{"sequence_id":"inverse-1","structure_tokens":[2,null,7,4],"length":4,"tokenizer_sha256":"<saved tokenizer digest>","codebook_sha256":"<saved codebook digest>"}
+{"sequence_id":"joint-1","length":4}
+```
+
+Use each example with its corresponding mode in its own manifest. Joint
+sampling requires saved positive joint training-regime provenance. Conditions
+stay clamped, including unavailable cells; every requested output is masked
+before the first forward. Output JSONL contains aligned sequence/structure
+tokens and checkpoint/tokenizer/codebook/policy, training-noise, sampling-noise,
+seed/step provenance. Sampling needs no original training dataset or codebook
+file. `--schedule cosine` or `--schedule power --power 2` and `--steps` change
+sampling independently of training. CPU is the default; use `--device cuda` for
+an available CUDA device. Existing output files are always refused.
+
+Optional `--decode --decoder-preset lite --decoder-path /data/tokenizer-full.pt`
+exports aligned N/CA/C coordinates using the matching frozen decoder. The full
+decoder archive must verify the same semantic codebook digest; a decoder-only
+archive or same-size mismatched codebook is rejected. No observed-target scoring
+is performed by the sampling command.
+
+The [October 1 qualification report](docs/experiments/mdlm/qualification-2026-10-01.md)
+records bounded real-data BF16 Radeon diagnostics: the full architecture at
+`[2,514]`, finite gradients and both modality updates, checkpoint continuation,
+denoising/generation and matching frozen FP32 geometry decode. A separate tiny
+dropout-zero model improved both available-target losses on its training subset.
+These are implementation diagnostics. Operational launch remains pending actual
+frozen pilot splits/cohorts, intended hardware/topology and explicit run budgets;
+the preset's 10,000 updates are not a measured or authorized scientific run.

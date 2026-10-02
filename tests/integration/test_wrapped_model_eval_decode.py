@@ -7,6 +7,7 @@ pytest.importorskip("x_transformers")
 
 
 def test_eval_decode_with_wrapped_model(monkeypatch, tmp_path):
+    from accelerate.utils import DistributedType
     from hydra import compose, initialize_config_dir
     from stok.cli.train import run_training
     from stok.utils.codebook import load_codebook
@@ -71,6 +72,9 @@ def test_eval_decode_with_wrapped_model(monkeypatch, tmp_path):
         device = torch.device("cpu")
         is_main_process = True
         num_processes = 1
+        process_index = 0
+        mixed_precision = "no"
+        distributed_type = DistributedType.NO
         optimizer_step_was_skipped = False
         print = print
 

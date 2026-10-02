@@ -4,6 +4,8 @@ num_workers: 4
 pin_memory: true
 
 
+split_manifest: null   # MDLM frozen JSONL train/validation/test assignments
+
 load_coords: null      # auto from FAPE/selected metrics; false conflicts with required work
 # Explicit true requires a coordinate-capable source; has_coords is a deprecated eval alias.
 prefetch_factor: 4     # per-worker prefetch depth (only used when num_workers > 0)

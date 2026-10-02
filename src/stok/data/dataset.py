@@ -15,6 +15,15 @@ from ..utils.pretrained import json_sha256
 PARQUET_EXTENSIONS = {".parquet", ".parq", ".pq"}
 
 
+def parquet_shards(directory: Path) -> list[Path]:
+    """Files consumed by the directory reader and completed-export audit."""
+    return sorted(
+        path
+        for path in directory.iterdir()
+        if path.is_file() and path.suffix.lower() in PARQUET_EXTENSIONS
+    )
+
+
 def _structure_provenance(path: Path, schema: pa.Schema):
     """Legacy files have no provenance; generated files must have consistent digests."""
     metadata = schema.metadata or {}
@@ -63,7 +72,8 @@ def _partition_length(dataset) -> int:
 
 def _partition_stream(dataset):
     """Assign positions once, outside any nested mixture streams."""
-    dataset._epoch += 1
+    if not getattr(dataset, "_explicit_epoch", False):
+        dataset._epoch += 1
     worker = get_worker_info()
     worker_id, workers = (worker.id, worker.num_workers) if worker else (0, 1)
     usable = _usable_samples(dataset)
@@ -76,6 +86,17 @@ def _partition_stream(dataset):
             and (position // dataset.world_size) % workers == worker_id
         ):
             yield item
+
+
+def set_dataset_epoch(dataset, epoch: int):
+    """Opt in to explicit epochs recursively, preserving standalone implicit iteration."""
+    setter = getattr(dataset, "set_epoch", None)
+    if callable(setter):
+        setter(epoch)
+    for child in getattr(dataset, "datasets", ()):
+        set_dataset_epoch(child, epoch)
+    if hasattr(dataset, "dataset"):
+        set_dataset_epoch(dataset.dataset, epoch)
 
 
 def _parquet_columns(
@@ -126,23 +147,27 @@ def _parquet_columns(
                 f"{path}: coordinates must be three nested lists of integers or floats, got {dtype}"
             )
         columns.append("coordinates")
+    columns.extend(name for name in ("source", "residue_map") if name in schema.names)
     return columns
 
 
 def _build_output_from_row(
     row: dict[str, Any],
     *,
-    max_length: int,
+    max_length: int | None,
     has_coords: bool,
-) -> dict[str, torch.Tensor | str]:
+) -> dict[str, Any]:
     """Decode a typed Parquet row; null tokens retain their residue positions."""
     sequence_id, sequence = row["sequence_id"], row["sequence"]
     if sequence_id is None or sequence is None:
         raise ValueError("sequence_id and sequence must not be null")
-    out: dict[str, torch.Tensor | str] = {
+    out: dict[str, Any] = {
         "sequence_id": sequence_id,
         "sequence": sequence,
     }
+    for name in ("source", "residue_map"):
+        if name in row:
+            out[name] = row[name]
     if "structure_tokens" in row:
         tokens = row["structure_tokens"]
         if tokens is None:
@@ -166,14 +191,15 @@ def _build_output_from_row(
 
     if has_coords:
         coords = row.get("coordinates")
-        padded = np.full((max_length, 3, 3), np.nan, dtype=np.float32)
+        coordinate_length = len(sequence) if max_length is None else max_length
+        padded = np.full((coordinate_length, 3, 3), np.nan, dtype=np.float32)
         if coords is not None:
             coords = np.asarray(coords, dtype=np.float32)
             if coords.shape != (len(sequence), 3, 3):
                 raise ValueError(
                     f"{sequence_id}: coordinates must have shape [sequence_length, 3, 3]"
                 )
-            copy_len = min(len(sequence), max_length)
+            copy_len = min(len(sequence), coordinate_length)
             padded[:copy_len] = coords[:copy_len]
         out["coords"] = torch.from_numpy(padded)
     return out
@@ -185,15 +211,18 @@ class TokenizedDataset(Dataset):
     Required columns: sequence_id (string), sequence (string), and, for
     codebook training, structure_tokens (list of integers). Null token
     elements mark unlabeled residues. Optional coordinates are [L, 3, 3].
+    max_length=None keeps full coordinates for downstream aligned cropping.
+    dataset_name optionally attaches a stable sample namespace.
     """
 
     def __init__(
         self,
         dataset_path: str,
-        max_length: int,
+        max_length: int | None,
         *,
         load_coords: bool = True,
         require_structure_tokens: bool = True,
+        dataset_name: str | None = None,
     ):
         path = Path(dataset_path)
         if path.suffix.lower() not in PARQUET_EXTENSIONS:
@@ -207,19 +236,21 @@ class TokenizedDataset(Dataset):
         )
         self.data = parquet.read(columns=columns)
         self.max_length = max_length
+        self.dataset_name = dataset_name
         self.has_coords = "coordinates" in columns
         self.has_labels = "structure_tokens" in columns
 
     def __len__(self):
         return self.data.num_rows
 
-    def __getitem__(self, index: int) -> dict[str, torch.Tensor | str]:
+    def __getitem__(self, index: int) -> dict[str, Any]:
         row = self.data.slice(index, 1).to_pylist()[0]
-        return _build_output_from_row(
-            row,
-            max_length=self.max_length,
-            has_coords=self.has_coords,
+        out = _build_output_from_row(
+            row, max_length=self.max_length, has_coords=self.has_coords
         )
+        if self.dataset_name is not None:
+            out["dataset"] = self.dataset_name
+        return out
 
 
 class DummySequenceDataset(Dataset):
@@ -327,7 +358,7 @@ class IterableTokenizedDataset(IterableDataset):
 
     Args:
         dataset_path: Path to a directory containing Parquet shard files.
-        max_length: Maximum coordinate length for padding/truncation.
+        max_length: Coordinate padding/truncation length; None retains all residues.
         shuffle_shards: Whether to shuffle shard order per epoch.
         shuffle_rows: Whether to shuffle selected row indices per shard per epoch.
         seed: Optional base seed for deterministic epoch shuffles.
@@ -341,20 +372,22 @@ class IterableTokenizedDataset(IterableDataset):
     def __init__(
         self,
         dataset_path: str,
-        max_length: int,
+        max_length: int | None,
         *,
         shuffle_shards: bool = True,
         shuffle_rows: bool = True,
         seed: int = 0,
         load_coords: bool = True,
         require_structure_tokens: bool = True,
+        dataset_name: str | None = None,
     ):
         self.dataset_path = Path(dataset_path)
         if not self.dataset_path.is_dir():
             raise RuntimeError(
                 "IterableTokenizedDataset expects a directory of Parquet files."
             )
-        self.max_length = int(max_length)
+        self.max_length = None if max_length is None else int(max_length)
+        self.dataset_name = dataset_name
         self.shuffle_shards = bool(shuffle_shards)
         self.shuffle_rows = bool(shuffle_rows)
         self.seed = int(seed)
@@ -362,13 +395,7 @@ class IterableTokenizedDataset(IterableDataset):
         self.rank, self.world_size = distributed_rank()
 
         # enumerate shard files and stats
-        shard_paths = sorted(
-            [
-                p
-                for p in self.dataset_path.iterdir()
-                if p.is_file() and p.suffix.lower() in PARQUET_EXTENSIONS
-            ]
-        )
+        shard_paths = parquet_shards(self.dataset_path)
         if len(shard_paths) == 0:
             raise RuntimeError("No Parquet shards found in directory.")
 
@@ -399,6 +426,10 @@ class IterableTokenizedDataset(IterableDataset):
     def __len__(self) -> int:
         return _partition_length(self)
 
+    def set_epoch(self, epoch: int):
+        self._epoch = int(epoch)
+        self._explicit_epoch = True
+
     def __iter__(self):
         return _partition_stream(self)
 
@@ -417,11 +448,14 @@ class IterableTokenizedDataset(IterableDataset):
                 )
             for i in rows:
                 try:
-                    yield _build_output_from_row(
+                    out = _build_output_from_row(
                         table.slice(i, 1).to_pylist()[0],
                         max_length=self.max_length,
                         has_coords=self.has_coords,
                     )
+                    if self.dataset_name is not None:
+                        out["dataset"] = self.dataset_name
+                    yield out
                 except ValueError as exc:
                     raise ValueError(f"Shard {path}: {exc}") from exc
 
@@ -459,6 +493,10 @@ class MapAsIterableDataset(IterableDataset):
 
     def __len__(self) -> int:
         return _partition_length(self)
+
+    def set_epoch(self, epoch: int):
+        self._epoch = int(epoch)
+        self._explicit_epoch = True
 
     def __iter__(self):
         return _partition_stream(self)
@@ -535,6 +573,10 @@ class InterleavedIterableDataset(IterableDataset):
 
     def __len__(self) -> int:
         return _partition_length(self)
+
+    def set_epoch(self, epoch: int):
+        self._epoch = int(epoch)
+        self._explicit_epoch = True
 
     def __iter__(self):
         return _partition_stream(self)

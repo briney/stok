@@ -5,6 +5,7 @@ from hydra import compose, initialize
 from omegaconf import DictConfig, OmegaConf
 
 from stok.models.stok import STokModel
+from stok.models.mdlm import STokMDLM
 from stok.utils.codebook import load_codebook
 
 
@@ -34,6 +35,52 @@ def run_smoke_test(cfg: DictConfig):
 
     # Infer codebook size from the loaded tensor
     codebook_size = codebook.shape[0]
+
+    if cfg.train.get("objective") == "mdlm":
+        enc = cfg.model.encoder
+        model = STokMDLM(
+            vocab_size=enc.vocab_size,
+            pad_id=enc.pad_id,
+            codebook=codebook,
+            d_model=enc.d_model,
+            n_heads=enc.n_heads,
+            n_layers=enc.n_layers,
+            ffn_mult=enc.ffn_mult,
+            dropout=enc.dropout,
+            attn_dropout=enc.attn_dropout,
+            norm_type=enc.norm,
+        )
+        # Explicit synthetic forward fixture; training still requires completed real sources.
+        from stok.data.mdlm import prepare_mdlm_batch
+        from stok.utils.tokenizer import Tokenizer
+
+        batch = prepare_mdlm_batch(
+            [
+                {
+                    "dataset": "synthetic-smoke",
+                    "sequence_id": "0",
+                    "sequence": "ACDE",
+                    "structure_tokens": [0, 1, None, 0],
+                }
+            ],
+            Tokenizer(),
+            max_len=6,
+            codebook_size=codebook_size,
+            crop="center",
+            seeds=[0],
+        )
+        out = model(batch["sequence_tokens"], batch["structure_tokens"])
+        print(
+            f"Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}"
+        )
+        print(
+            "sequence_logits:",
+            out["sequence_logits"].shape,
+            "structure_logits:",
+            out["structure_logits"].shape,
+        )
+        print("OK")
+        return
 
     model = STokModel(
         vocab_size=cfg.model.encoder.vocab_size,

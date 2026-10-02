@@ -1,0 +1,48 @@
+# @package _global_
+defaults: [base@train, _self_]
+
+train:
+  objective: mdlm
+  precision: bf16
+  num_steps: 10000
+  scheduler:
+    warmup_steps: 500
+  log_steps: 25
+  checkpoint_steps: 500
+  grad_accum_steps: 1
+  mlm: null
+  mdlm:
+    placement: token
+    span_mean: 8.0
+    regime_weights:
+      joint_independent: 1.0
+      structure_only: 0.0
+      sequence_only: 0.0
+      joint_tied: 0.0
+    noise:
+      name: linear
+      power: 2.0
+      min_mask_probability: 0.0001
+    sequence_loss_weight: 1.0
+    structure_loss_weight: 1.0
+  eval:
+    seed: 1729
+    steps: 250
+    mdlm:
+      enabled: true
+      cohort: null
+      generation_cohort: null
+      # Omitted cases resolve the fixed 32-case denoising matrix.
+      generation:
+        enabled: true
+        steps: 1000
+        sampling_steps: 64
+        max_samples: 16
+        decode: false
+        schedule: {name: linear, power: 2.0}
+
+data:
+  max_len: 514
+  batch_size: 2
+  num_workers: 2
+  prefetch_factor: 2
