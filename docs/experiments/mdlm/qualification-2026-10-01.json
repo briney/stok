@@ -1,0 +1,356 @@
+{
+  "updates": [
+    {
+      "seconds": 0.9949784246273339,
+      "residues": 426,
+      "positions": 1028,
+      "shape": [
+        2,
+        514
+      ]
+    },
+    {
+      "seconds": 0.17966618202626705,
+      "residues": 640,
+      "positions": 1028,
+      "shape": [
+        2,
+        514
+      ]
+    },
+    {
+      "seconds": 0.17120308196172118,
+      "residues": 488,
+      "positions": 1028,
+      "shape": [
+        2,
+        514
+      ]
+    },
+    {
+      "seconds": 0.16980880731716752,
+      "residues": 155,
+      "positions": 1028,
+      "shape": [
+        2,
+        514
+      ]
+    }
+  ],
+  "checkpoints": [
+    {
+      "step": 1,
+      "seconds": 0.5199474007822573
+    },
+    {
+      "step": 2,
+      "seconds": 0.5024402420967817
+    },
+    {
+      "step": 3,
+      "seconds": 0.507563509978354
+    },
+    {
+      "step": 4,
+      "seconds": 0.4999105487950146
+    },
+    {
+      "step": 4,
+      "seconds": 0.5051931450143456
+    }
+  ],
+  "current_residues": 155,
+  "current_positions": 1028,
+  "shape": [
+    2,
+    514
+  ],
+  "peak_allocated_bytes": 3133499904,
+  "peak_reserved_bytes": 3468689408,
+  "device": "Radeon 8060S Graphics",
+  "torch": "2.14.0+rocm7.2",
+  "hip": "7.2.53211",
+  "steady_residues_per_second": 2464.0945542107675,
+  "steady_positions_per_second": 5923.045678243186,
+  "continuation_max_absolute_error": 0.0,
+  "continuation_trace_exact": true,
+  "continuation_rng_exact": true,
+  "full_architecture_updates_total": 8,
+  "counters": {
+    "global_step": 4,
+    "micro_step": 4,
+    "residues_seen": 1709,
+    "executed_positions": 4112
+  },
+  "precision": "bf16",
+  "signature": {
+    "config": {
+      "model": {
+        "encoder": {
+          "d_model": 768,
+          "n_heads": 12,
+          "n_layers": 20,
+          "ffn_mult": 2.6666666666666665,
+          "vocab_size": 32,
+          "pad_id": 1,
+          "bos_id": 0,
+          "eos_id": 2,
+          "dropout": 0.1,
+          "attn_dropout": 0.0,
+          "norm": "layernorm"
+        },
+        "classifier": {
+          "tie_to_codebook": true,
+          "learnable_temperature": true,
+          "use_cosine": false,
+          "bias_from_code_norm": true,
+          "projector_dim": null,
+          "ignore_index": -100
+        },
+        "codebook": {
+          "preset": "base",
+          "path": "/tmp/stok-reference-weights/large/best_valid.pth",
+          "trainable": false
+        }
+      },
+      "data": {
+        "batch_size": 2,
+        "max_len": 514,
+        "num_workers": 2,
+        "pin_memory": true,
+        "split_manifest": null,
+        "load_coords": false,
+        "prefetch_factor": 2,
+        "train": {
+          "public_diagnostic": {
+            "path": "/home/bryanbriney/git/stok/downloads/gcp-vqvae-public/export-large-fixed-padding-groups3"
+          }
+        },
+        "shuffle_shards": true,
+        "shuffle_rows": true
+      },
+      "train": {
+        "optimizer": {
+          "name": "adamw",
+          "lr": 0.0003,
+          "betas": [
+            0.9,
+            0.95
+          ],
+          "weight_decay": 0.01
+        },
+        "scheduler": {
+          "decay": "linear",
+          "warmup_steps": 0,
+          "stable_steps": 0,
+          "decay_steps": null
+        },
+        "seed": 1337,
+        "num_steps": 4,
+        "epochs": null,
+        "precision": "bf16",
+        "grad_accum_steps": 1,
+        "grad_clip_norm": 1.0,
+        "objective": "mdlm",
+        "mlm": null,
+        "pretrained_encoder": null,
+        "fape": {
+          "enabled": false,
+          "start_step": 0,
+          "weight": 0.1,
+          "log_pred_nan_frac": true
+        },
+        "gumbel": {
+          "tau_start": 1.0,
+          "tau_end": 0.5,
+          "anneal_steps": 20000,
+          "hard": false
+        },
+        "mdlm": {
+          "placement": "token",
+          "span_mean": 8.0,
+          "regime_weights": {
+            "joint_independent": 1.0,
+            "structure_only": 0.0,
+            "sequence_only": 0.0,
+            "joint_tied": 0.0
+          },
+          "noise": {
+            "name": "linear",
+            "power": 2.0,
+            "min_mask_probability": 0.0001
+          },
+          "sequence_loss_weight": 1.0,
+          "structure_loss_weight": 1.0
+        }
+      }
+    },
+    "sources": [
+      [
+        [
+          "manifest.json",
+          "d4e1dafcab670e9f89bccc0da3049c79e2549cacc269f96fb1cddb7593f9c966"
+        ],
+        [
+          "part-000000.parquet",
+          "28cc31e538587efb86b129b3ae53fa4fd61fb1b9b595161d6e0bba1cfbe5c644"
+        ],
+        [
+          "part-000001.parquet",
+          "a4bc7042606d2490113a44909adde39460c7198d4e7198e39198e886299e93cc"
+        ],
+        [
+          "part-000002.parquet",
+          "55cb20a139634923075745985f29179ea22db00b83355c6f57694a1547975cfe"
+        ],
+        [
+          "rejections.jsonl",
+          "95fe1f9059ea792fcf01b4c67afb11b3e011d01b19bbfe5d910e533235885fdd"
+        ]
+      ]
+    ],
+    "source_order": [
+      {
+        "name": "public_diagnostic",
+        "path": "/home/bryanbriney/git/stok/downloads/gcp-vqvae-public/export-large-fixed-padding-groups3",
+        "fraction": 1.0
+      }
+    ],
+    "training_decoder": null,
+    "mdlm_identity": "ad0c1cb29f7318025cdc9da1241e5ca5976d610cf39719a08a0e7f6e4128dec7",
+    "codebook": "29d21936c951fc1421ce9bc0bcb4ebb3d6dc2391ede165d03db0be05cb958141",
+    "software": {
+      "python": "3.12.14",
+      "torch": "2.14.0+rocm7.2",
+      "accelerate": "1.14.0",
+      "numpy": "1.26.4",
+      "pyarrow": "25.0.0"
+    },
+    "execution": {
+      "world_size": 1,
+      "precision": "bf16",
+      "device": "cuda",
+      "distributed": "NO",
+      "threads": 1,
+      "cuda": null,
+      "cudnn": 3005001,
+      "deterministic": false,
+      "tf32": false
+    }
+  },
+  "trainable_parameters": 144797472,
+  "denoising": {
+    "seconds": 0.40658314106985927,
+    "masked_ce": [
+      81.76063537597656,
+      84.39389038085938
+    ],
+    "masked_count": [
+      74,
+      75
+    ],
+    "shape": [
+      2,
+      514
+    ],
+    "population": "training_subset",
+    "peak_allocated_bytes": 943763456,
+    "peak_reserved_bytes": 1017118720
+  },
+  "generation": {
+    "seconds": 0.16585052432492375,
+    "steps": 4,
+    "condition_preserved": true,
+    "shape": [
+      2,
+      514
+    ],
+    "peak_allocated_bytes": 964626944,
+    "peak_reserved_bytes": 1061158912
+  },
+  "decode": {
+    "seconds": 0.43685902981087565,
+    "shape": [
+      2,
+      514,
+      3,
+      3
+    ],
+    "finite_residues": 155,
+    "precision": "float32",
+    "frozen": true,
+    "peak_allocated_bytes": 1815763456,
+    "peak_reserved_bytes": 1879048192
+  },
+  "evaluation_peak_allocated_bytes": 1815763456,
+  "evaluation_peak_reserved_bytes": 1879048192,
+  "restore": {
+    "seconds": 0.08426397806033492,
+    "peak_allocated_bytes": 1747532288,
+    "peak_reserved_bytes": 1897922560
+  },
+  "checkpoint_read_seconds": 0.22736597899347544,
+  "tiny_overfit": {
+    "initial_ce": [
+      14.765485763549805,
+      30.12400245666504
+    ],
+    "final_ce": [
+      0.0008649695082567632,
+      0.0015029581263661385
+    ],
+    "updates": 64,
+    "sample_keys": [
+      "[\"a07d5b59331051704c37493a9e67d64720c2c3f19b15eaf9d7bd6f07906889ee\",\"3ZYF.A\"]",
+      "[\"a07d5b59331051704c37493a9e67d64720c2c3f19b15eaf9d7bd6f07906889ee\",\"7B51.A\"]"
+    ],
+    "crop_offsets": [
+      29,
+      59
+    ],
+    "context": 66,
+    "precision": "bf16",
+    "dropout": 0,
+    "frozen_codebook": true,
+    "conditional_samples": [
+      "inverse_folding",
+      "folding"
+    ],
+    "decoder_precision": "float32"
+  },
+  "status": "implementation diagnostics passed; operational launch freeze pending",
+  "scientific_held_out_result": false,
+  "production_frozen_validation_evaluator_qualified": false,
+  "restore_only_probe": {
+    "updates": [],
+    "checkpoints": [
+      {
+        "step": 4,
+        "seconds": 4.6424269918352365,
+        "peak_allocated_bytes": 1747532288,
+        "peak_reserved_bytes": 1897922560
+      }
+    ],
+    "checkpoint_read_seconds": 0.22736597899347544,
+    "restore": {
+      "seconds": 0.08426397806033492,
+      "peak_allocated_bytes": 1747532288,
+      "peak_reserved_bytes": 1897922560
+    },
+    "peak_allocated_bytes": 1747532288,
+    "peak_reserved_bytes": 1897922560,
+    "device": "Radeon 8060S Graphics",
+    "torch": "2.14.0+rocm7.2",
+    "hip": "7.2.53211"
+  },
+  "full_model_finite_gradients_and_both_head_updates": true,
+  "maximum_observed_biological_crop_residues": 512,
+  "hardware": {
+    "name": "Radeon 8060S Graphics",
+    "total_memory_bytes": 118111600640,
+    "gcn_arch": "gfx1151",
+    "bf16_supported": true,
+    "torch": "2.14.0+rocm7.2",
+    "hip": "7.2.53211"
+  }
+}

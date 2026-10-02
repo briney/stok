@@ -429,6 +429,7 @@ def test_mdlm_two_rank_update_matches_global_reference(tmp_path, coverage):
     reference = torch.load(
         tmp_path / "run/model/final.pt", weights_only=False, map_location="cpu"
     )
+    (tmp_path / "run").rename(tmp_path / "reference-run")
     for result in run_distributed(command):
         assert result.returncode == 0, result.stdout + result.stderr
     distributed = torch.load(

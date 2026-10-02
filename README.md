@@ -1075,3 +1075,12 @@ exports aligned N/CA/C coordinates using the matching frozen decoder. The full
 decoder archive must verify the same semantic codebook digest; a decoder-only
 archive or same-size mismatched codebook is rejected. No observed-target scoring
 is performed by the sampling command.
+
+The [October 1 qualification report](docs/experiments/mdlm/qualification-2026-10-01.md)
+records bounded real-data BF16 Radeon diagnostics: the full architecture at
+`[2,514]`, finite gradients and both modality updates, checkpoint continuation,
+denoising/generation and matching frozen FP32 geometry decode. A separate tiny
+dropout-zero model improved both available-target losses on its training subset.
+These are implementation diagnostics. Operational launch remains pending actual
+frozen pilot splits/cohorts, intended hardware/topology and explicit run budgets;
+the preset's 10,000 updates are not a measured or authorized scientific run.
