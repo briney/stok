@@ -2,7 +2,6 @@
 
 from collections import Counter
 from collections.abc import Mapping
-from copy import deepcopy
 import ctypes
 from dataclasses import replace
 import json
@@ -23,7 +22,6 @@ from .structure_encoding import (
     iter_structure_manifest,
     prepare_structure,
     tokenize_structures,
-    validate_structure_limits,
 )
 from ..models.gcp_vqvae import GCPVQTokenizer
 from ..utils.pretrained import (
@@ -33,105 +31,6 @@ from ..utils.pretrained import (
     state_sha256,
 )
 from ..utils.structure_parser import StructureMappingError, parse_polymer_structure
-
-
-_QUALIFIED_EXECUTION_FIELDS = (
-    "python",
-    "dependencies",
-    "device",
-    "dtype",
-    "torch_cuda",
-    "torch_hip",
-    "accelerator",
-    "attention",
-    "matmul_precision",
-    "cuda_matmul_allow_tf32",
-    "cudnn_allow_tf32",
-    "sdp_backends_enabled",
-)
-
-_FILTER_FIELDS = ("min_length", "max_length", "max_missing_ratio", "max_missing_block")
-
-
-def validate_structure_policy(
-    policy: Mapping[str, Any], *, device: torch.device
-) -> dict[str, Any]:
-    """Validate preparation contracts and configurable length/coverage admission."""
-    if not isinstance(policy, Mapping):
-        raise ValueError("Structure policy must be a JSON object")
-    policy = deepcopy(dict(policy))
-    fixed = {
-        "schema_version": 1,
-        "sequence_source": "deposited_or_supplied",
-        "required_atoms": ["N", "CA", "C", "O"],
-        "graph_context": "independent_singleton",
-        "context_scope": "full_chain",
-        "cropping": "none",
-        "dtype": "float32",
-    }
-    fields = (
-        set(fixed)
-        | set(_FILTER_FIELDS)
-        | {
-            "sequence_mode",
-            "imputation",
-            "allow_observed_sequence",
-            "device",
-            "stok_revision",
-        }
-    )
-    if fields - policy.keys() or policy.keys() - fields - {
-        "implementation_sha256",
-        "qualification",
-    }:
-        raise ValueError("Unsupported or incomplete structure policy fields")
-    if any(
-        policy[key] != value or type(policy[key]) is not type(value)
-        for key, value in fixed.items()
-    ):
-        raise ValueError("Unsupported structure policy settings")
-    validate_structure_limits(**{key: policy[key] for key in _FILTER_FIELDS})
-    if (
-        type(policy["allow_observed_sequence"]) is not bool
-        or not isinstance(policy["sequence_mode"], str)
-        or policy["sequence_mode"] not in {"native", "unknown", "polymer"}
-        or not isinstance(policy["imputation"], str)
-        or policy["imputation"] not in {"reference", "linear", "observed_only"}
-        or not isinstance(policy["stok_revision"], str)
-        or not policy["stok_revision"]
-    ):
-        raise ValueError("Invalid structure policy settings")
-    try:
-        if not isinstance(policy["device"], str):
-            raise ValueError("Policy device must be a string")
-        requested = torch.device(policy["device"])
-    except (TypeError, RuntimeError) as error:
-        raise ValueError("Invalid policy device") from error
-    if requested.type != device.type or requested.index not in {None, device.index}:
-        raise ValueError("Policy device does not match tokenizer device")
-    digest = policy.get("implementation_sha256")
-    if digest is not None and (
-        not isinstance(digest, str)
-        or len(digest) != 64
-        or any(c not in "0123456789abcdef" for c in digest)
-    ):
-        raise ValueError("Invalid policy implementation digest")
-    if "qualification" in policy:
-        qualification = policy["qualification"]
-        if (
-            not isinstance(qualification, dict)
-            or qualification.keys() != {"tokenizer_sha256", "execution"}
-            or not isinstance(qualification["tokenizer_sha256"], str)
-            or len(qualification["tokenizer_sha256"]) != 64
-            or any(
-                c not in "0123456789abcdef" for c in qualification["tokenizer_sha256"]
-            )
-            or not isinstance(qualification["execution"], dict)
-            or qualification["execution"].keys() != set(_QUALIFIED_EXECUTION_FIELDS)
-        ):
-            raise ValueError("Invalid policy qualification constraints")
-    json_sha256(policy)
-    return policy
 
 
 def structure_export_schema(
@@ -316,19 +215,34 @@ def write_structure_dataset(
     output_dir: str | Path,
     *,
     tokenizer: GCPVQTokenizer,
-    policy: Mapping[str, Any],
     batch_size: int = 1,
     rows_per_shard: int = 1000,
-    include_coordinates: bool = True,
+    include_coordinates: bool = False,
 ) -> dict[str, Any]:
+    """Export full chains with the fixed training-native-reference policy."""
     for name, value in (("batch_size", batch_size), ("rows_per_shard", rows_per_shard)):
         if type(value) is not int or value < 1:
             raise ValueError(f"{name} must be a positive integer")
     if type(include_coordinates) is not bool:
         raise ValueError("include_coordinates must be boolean")
     device = next(tokenizer.parameters()).device
-    policy = validate_structure_policy(policy, device=device)
-    limits = {key: policy[key] for key in _FILTER_FIELDS}
+    policy: dict[str, Any] = {
+        "schema_version": 1,
+        "name": "training-native-reference",
+        "sequence_source": "deposited_or_supplied",
+        "allow_observed_sequence": False,
+        "sequence_mode": "native",
+        "required_atoms": ["N", "CA", "C", "O"],
+        "imputation": "reference",
+        "graph_context": "independent_singleton",
+        "context_scope": "full_chain",
+        "cropping": "none",
+        "dtype": "float32",
+        "min_length": 25,
+        "max_length": 1280,
+        "max_missing_ratio": None,
+        "max_missing_block": None,
+    }
     if (
         tokenizer.training
         or tokenizer.encoder.max_length != 1280
@@ -346,24 +260,7 @@ def write_structure_dataset(
     manifest = Path(manifest).resolve()
     manifest_hash = file_sha256(manifest)
     environment = inference_metadata(device)
-    if (
-        policy.get("implementation_sha256", environment["implementation_sha256"])
-        != environment["implementation_sha256"]
-    ):
-        raise ValueError(
-            "Policy implementation digest does not match this tokenizer pipeline"
-        )
     identity = _tokenizer_identity(tokenizer)
-    if "qualification" in policy:
-        qualification = policy["qualification"]
-        if qualification["tokenizer_sha256"] != json_sha256(identity):
-            raise ValueError("Policy qualification tokenizer does not match this model")
-        if json_sha256(qualification["execution"]) != json_sha256(
-            {key: environment[key] for key in _QUALIFIED_EXECUTION_FIELDS}
-        ):
-            raise ValueError(
-                "Policy qualification execution does not match this runtime"
-            )
     provenance = {
         "schema_version": 1,
         "tokenizer": identity,
@@ -423,7 +320,10 @@ def write_structure_dataset(
             pending,
             sequence_mode=policy["sequence_mode"],
             imputation=policy["imputation"],
-            **limits,
+            min_length=25,
+            max_length=1280,
+            max_missing_ratio=None,
+            max_missing_block=None,
         )
         if len(ids) != len(pending):
             raise RuntimeError("Tokenizer omitted input chains")
@@ -484,7 +384,10 @@ def write_structure_dataset(
                         structure,
                         sequence_mode=policy["sequence_mode"],
                         imputation=policy["imputation"],
-                        **limits,
+                        min_length=25,
+                        max_length=1280,
+                        max_missing_ratio=None,
+                        max_missing_block=None,
                     )
                 except (StructureMappingError, StructureExclusion) as error:
                     exclusions[error.reason] += 1

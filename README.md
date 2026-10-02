@@ -131,149 +131,110 @@ only `-1` to zero. Low-level decoder `true_lengths` overrides attention with a
 prefix and includes internal gaps; high-level decoding instead keeps explicit
 availability holes. Missing-loop completion is not supported.
 
-Preparation is explicit: `reference` reproduces upstream filling/correction;
-`linear` fills atoms without moving observations; `observed_only` omits unusable
-nodes and masks sequential feature stencils across gaps. All share the same
-25–1280 length and original-observation admission rules (at most 20% missing
-required-atom rows and at most 15 consecutive missing rows). Source observations
-are immutable, and filling never becomes exported ground truth. `native`
-retains observed identities, `unknown` replaces every identity input with X,
-and `polymer` supplies known identities at unresolved positions. The stored
-target sequence is unchanged. The [fixture smoke report](docs/experiments/gcp-vqvae/smoke-report.md)
-shows substantial all-X quality loss, especially for Large. Native-input tokens
-are sequence-conditioned; this workflow does not establish sequence-blind
-tokenization or inverse folding. The [public cohort report](docs/experiments/gcp-vqvae/public-report.md)
-records a frozen 40-chain selection/held-out study. Native/reference profiles
-for [Lite](src/stok/configs/gcp_vqvae/lite-native-reference-rocm-fp32.json) and
-[Large](src/stok/configs/gcp_vqvae/large-native-reference-rocm-fp32.json) support
-the recorded ROCm FP32 configuration with fixed 1280-position padding.
-Variable-padding comparisons are diagnostic and do not block this production
-path. The report preserves the original overstrict decision and its correction.
-Policies remain explicitly selected by the caller.
-The profiles reject mismatched tokenizer state/configuration and
-runtime settings before staging output. Its qualification records the exact
-tested Python/dependency versions, accelerator, backend and math flags;
-explicit experimental policies can omit qualification constraints.
+STok exports use one fixed **training-native-reference** policy: native amino-acid
+identities, reference coordinate preparation, independent full-chain encoding,
+fixed 1280-position tensors, and FP32 inference. Chains must be 25–1280 residues;
+missing-fraction and missing-block coverage filters are disabled. Missing label
+positions remain null and filled coordinates never become exported ground truth.
+Chains without complete N/CA/C/O observations, ambiguous mappings, and nonfinite
+preparation results remain excluded. No policy selection or custom policy files
+are supported. Tokenizer model selection (`lite` or `large`) is independent of
+this shared preparation policy.
 
 The [public roundtrip comparison](docs/experiments/gcp-vqvae/public-roundtrip-report.md)
-also runs both complete STok and upstream encoder/decoder stacks: all 30 supported
-chains matched exactly, with original-input backbone RMSD averaging 0.855 Å for
-Lite and 0.551 Å for Large. The report includes per-chain measurements and plots.
+checks the complete STok and upstream encoder/decoder stacks on supported chains.
+Earlier policy comparisons and machine-specific profiles remain historical
+experiment evidence; their snapshots live under
+[historical-policies](docs/experiments/gcp-vqvae/historical-policies/).
+Native inputs make these structure tokens sequence-conditioned.
 
-From a repository checkout, this local fixture example uses an explicitly named
-**pilot baseline**, not a selected production policy:
+Convert a local directory on the machine holding your structures:
 
 ```bash
-stok tokenize-structures \
-  docs/experiments/gcp-vqvae/example.jsonl ./fixture-dataset \
-  --preset lite --checkpoint /weights/best_valid.pth \
-  --policy docs/experiments/gcp-vqvae/pilot-native-reference.json \
-  --rows-per-shard 1
+stok tokenize-structures /data/pdbs /data/stok-mdlm/train \
+  --preset large --device cuda:0 --recursive --rows-per-shard 2000
 ```
 
-Input is JSONL, one selected chain per unique caller-supplied `sequence_id`:
+The command works from an installed package without cloning the repository.
+Default loading downloads the pinned tokenizer archive once into the local
+cache. Add `--checkpoint /weights/best_valid.pth` for offline use. Directory
+input supports uncompressed `.pdb`, `.ent`, `.cif`, and `.mmcif` files, selects the
+first model, and exports every protein chain independently without deduplication.
+Use `--recursive` for nested directories. Sequence IDs include relative filenames
+and escaped chain IDs, e.g. `nested/sample.cif:A`; CIF selection uses label IDs.
+Nonprotein chains are skipped; malformed files abort discovery.
+
+PDBs require SEQRES sequence metadata; mmCIFs use their deposited polymer sequence.
+Coordinate-only predicted structures need a manifest with supplied construct
+sequences. STok does not silently infer the full sequence from observed atoms.
+Keep chains from the same source structure and homologous clusters together when
+creating training/validation splits. Encoding does not infer biological
+assemblies or supply assembly-context tokens.
+
+JSONL is an optional convenience for selecting chains, supplying construct
+sequences, or recording bounded export jobs. One line selects one chain with a
+unique caller-supplied ID:
 
 ```json
-{"sequence_id":"sample-A","path":"structures/sample.cif","chain_id":"A","chain_namespace":"label","model_index":0}
+{"sequence_id":"sample-A","path":"structures/sample.pdb","chain_id":"A","model_index":0}
 ```
 
-Paths resolve against the manifest directory. `chain_namespace` defaults to
-`author`, `model_index` to 0; optional `sequence` supplies a construct sequence.
-Unknown fields, duplicate IDs, malformed rows, and missing files are fatal.
-`--policy` requires the complete explicit JSON schema demonstrated by the pilot
-file: sequence source/fallback, conditioning, required atoms, preparation,
-full-chain context, length/coverage rules, no cropping, FP32 device, and policy
-revision. `implementation_sha256`, when supplied, must match the current
-tokenization pipeline. Execution provenance always records the actual source
-hashes/revision, dependency versions, matmul/TF32 settings and enabled SDPA
-backends. Application tokenization disables ambient autocast. For another device, change the policy
-device explicitly and pass the matching `--device`. BF16 is not approved.
+Pass this file instead of the input directory. Paths resolve relative to the
+manifest directory; `chain_namespace` defaults to `author`, `model_index` to 0.
+An optional `sequence` supplies the full construct sequence. Unknown fields,
+duplicate IDs, malformed rows, and missing files are fatal.
 
-The output contains numbered Parquet shards, `rejections.jsonl`, and a completed
-`manifest.json`. Required columns remain `sequence_id`, `sequence`, and nullable
-`list<int64>` `structure_tokens`. Additional `residue_map` and `source` structs
-retain correspondence, source hashes, chain/entity/model and sequence-source
-metadata. Optional `coordinates` are original-frame `[L,3,3]` observations with
-NaNs, never imputed targets. `--no-include-coordinates` omits them. Every shard
-records matching encoder/quantizer state and config digests, codebook digest,
-policy, and execution provenance; dataset token identity does not require a
-decoder. Existing readers validate generated provenance and ignore additional
-columns. Inspect a completed dataset with
-`stok.data.structure_export.validate_structure_dataset(path)` to verify hashes,
-inventory, counts, and the reader contract.
+Outputs contain numbered Zstd-compressed Parquet shards, `inputs.jsonl`,
+`rejections.jsonl`, and a completed `manifest.json`. Required columns are
+`sequence_id`, `sequence`, and nullable `list<int64>` `structure_tokens`.
+Additional `residue_map` and `source` structs retain residue correspondence,
+source hashes, chain/entity/model and sequence-source metadata. Coordinates are
+omitted by default; `--include-coordinates` retains original-frame `[L,3,3]`
+N/CA/C observations with NaNs, never imputed targets.
 
-Generation preserves input order and full accepted chains. `--batch-size`
-groups a bounded number of chains using independent singleton forwards: upstream
-mixed-length tensor batches change terminal features and some IDs. Thus exported
-chain context stays independent of group/shard boundaries, at a throughput cost.
-Exact-ID checks cover the recorded cases; the public study also records rare
-GPU rounding-sensitive ID changes in padding comparisons. Training
-windows cropped later still carry full-chain token context. `--rows-per-shard`
-bounds each output shard. Mapping/coverage exclusions have stable reason codes;
-unexpected numerical/model errors abort. Existing destinations are refused,
-including concurrent publication. Failed runs leave a clearly marked hidden
-sibling staging directory without advertising a completed dataset. Atomic
-no-replace publication currently requires Linux `renameat2` or native Windows
-rename; unsupported platforms fail closed. One process and one selected device
-are used.
+Every shard records tokenizer and codebook identities, the fixed semantic policy,
+and actual execution provenance. Device, dependency versions and source revision
+are recorded as execution details, not selectable policies. MDLM requires the
+whole completed export directory; copying bare shards does not preserve its
+completion inventory. Older exports remain readable, but their recorded policy
+identities can differ; do not mix them with new exports in one MDLM run.
 
-Directories can also be converted directly through the Python API, without a
-CLI manifest preparation step:
+The directory Python API shares the same policy:
 
 ```python
-import json
-from pathlib import Path
-
 from stok.data.structure_directory import write_structure_folder_dataset
 from stok.models.gcp_vqvae import load_pretrained_tokenizer
 
-policy = json.loads(
-    Path("src/stok/configs/gcp_vqvae/training-native-reference.json").read_text()
-)
-policy["device"] = "cuda:0"
-encoder = load_pretrained_tokenizer(
-    "lite", path="/weights/best_valid.pth", device="cuda:0"
-)
+tokenizer = load_pretrained_tokenizer("large", device="cuda:0")
 summary = write_structure_folder_dataset(
-    "structures",
-    "pilot-dataset",
-    tokenizer=encoder,
-    policy=policy,
+    "/data/pdbs",
+    "/data/stok-mdlm/train",
+    tokenizer=tokenizer,
     recursive=True,
-    rows_per_shard=1000,
+    rows_per_shard=2000,
 )
 ```
 
-This training policy keeps the 25–1280 residue defaults and disables coverage
-filters. Set `min_length` and `max_length` to change admission lengths within
-`4 <= min_length <= max_length <= 1280`; accepted chains still use fixed
-1280-position encoder tensors without cropping. `max_missing_ratio` accepts a
-number in `[0, 1]` or `null`, and `max_missing_block` a nonnegative integer or
-`null`. A `null` value disables that coverage filter; numeric values re-enable
-it. The same settings apply during preflight and tokenization and are recorded
-in dataset provenance. Chains without any complete N/CA/C/O observations,
-ambiguous mappings, and nonfinite preparation results remain excluded.
-Reference workflows retain their explicit original coverage settings.
-The geometric featurizer requires at least four graph nodes; `observed_only`
-preparation excludes chains with fewer than four complete observed residues.
+`stok.data.structure_export.write_structure_dataset()` accepts a JSONL manifest
+for the same export path; neither API accepts a policy argument. Inspect a
+completed dataset with `validate_structure_dataset(path)` from that module to
+verify hashes, inventory, counts, and the reader contract. Export also validates
+these properties before publication.
 
-Directory discovery supports `.pdb`, `.ent`, `.cif`, and `.mmcif` (uncompressed), selects the first
-model, and exports every protein chain independently without deduplication.
-IDs include the relative filename with extension and escaped chain ID, e.g.
-`nested/sample.cif:A`. CIF selection uses label chain IDs. Nonprotein chains
-are skipped; malformed files abort discovery. Mapping and coverage exclusions
-remain in `rejections.jsonl`. Missing deposited sequence metadata is rejected
-under this training policy; coordinate-only predicted structures require an
-explicit observed-sequence fallback policy or a manifest with supplied construct
-sequences. Observed-only fallback cannot recover unresolved sequence positions.
+`--rows-per-shard` bounds each output shard; the default is 1000 chain rows.
+`--batch-size` groups chains using independent singleton forwards, preserving
+full-chain context across group/shard boundaries; it does not perform mixed-chain
+GPU batching. One process and one selected device are used. Directory discovery
+sorts paths in memory. For large collections, use bounded manifests or input
+directories and separate completed exports. There is no automatic export resume.
+Training crops paired windows later without changing the stored full-chain tokens.
 
-Coordinates are omitted by default for directory builds; pass
-`include_coordinates=True` to retain observations. Every new dataset includes
-a hashed `inputs.jsonl` with resolved source paths for replay using
-`write_structure_dataset`. The `source` column preserves file hashes, chain IDs
-and model identity. Keep chains from the same source structure together when
-creating training/validation splits. These tokens describe independent chains;
-future assembly-context encoding requires regenerating tokens for that context.
+Mapping and admission exclusions have stable reasons in `rejections.jsonl`;
+unexpected numerical/model errors abort. Existing destinations are refused,
+including concurrent publication. Failed runs leave a marked hidden sibling
+staging directory without advertising a completed dataset. Atomic no-replace
+publication requires Linux `renameat2` or native Windows rename; unsupported
+platforms fail closed.
 
 ## training
 

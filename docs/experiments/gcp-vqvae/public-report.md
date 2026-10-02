@@ -1,5 +1,10 @@
 # Public GCP-VQVAE policy evaluation — September 30, 2026
 
+This is a historical experiment record. STok now exports with one fixed
+training-native-reference policy; earlier policy files and CLI commands below
+record the experiment interface. Policy snapshots are retained under
+[historical-policies](historical-policies/), outside the installed package.
+
 Intended use: sequence-conditioned structure-token training labels from independently processed deposited protein chains. The public-cohort substitution was explicitly authorized by the user. This study qualifies preprocessing for a bounded experimental corpus; it does not establish sequence-blind tokenization, inverse folding, missing-loop completion, or generalization to an unseen private corpus.
 
 ## Production scope correction — October 1, 2026
@@ -101,7 +106,7 @@ Supported grouping changed zero IDs in all four experiment checks. A separate qu
 
 Independent checks verified every report output hash, all 40 frozen source hashes and manifest hashes, unique source/variant/condition identities, original coordinate/atom/geometry/token/scoring masks, residue slot order, finite available predictions, -1/NaN missing slots, and unchanged model states. Synthetic observations were reconstructed independently from each frozen source to verify that filled coordinates never became targets. All 2,912 saved accepted-case arrays passed. The audit's padding counters are retained separately from source/mask/target integrity so numerical failures cannot disappear from policy qualification.
 
-The fixed-1280 production profiles are [Lite native/reference ROCm FP32](../../../src/stok/configs/gcp_vqvae/lite-native-reference-rocm-fp32.json) and [Large native/reference ROCm FP32](../../../src/stok/configs/gcp_vqvae/large-native-reference-rocm-fp32.json). Source revision and implementation fingerprints are explicit; no library behavior changes automatically. Both bind Radeon 8060S/gfx1151, PyTorch 2.14.0+rocm7.2, HIP 7.2, SDPA, float32 matmul precision highest, and the recorded TF32/backend flags. Other execution configurations remain outside this evidence.
+The fixed-1280 production profiles are [Lite native/reference ROCm FP32](historical-policies/lite-native-reference-rocm-fp32.json) and [Large native/reference ROCm FP32](historical-policies/large-native-reference-rocm-fp32.json). Source revision and implementation fingerprints are explicit; no library behavior changes automatically. Both bind Radeon 8060S/gfx1151, PyTorch 2.14.0+rocm7.2, HIP 7.2, SDPA, float32 matmul precision highest, and the recorded TF32/backend flags. Other execution configurations remain outside this evidence.
 
 The original Lite public export contains 13 chains, 4,964 source positions, 4,911 labels, 53 null labels, three shards, and seven categorized source rejections. Exported/reloaded IDs exactly match the saved experiments; original-frame coordinates and target sequence hashes match frozen sources. Reloaded decoder coordinates agree at rtol=atol=1e-5, retaining NaN holes. The writer's inventory/count/hash validator passed.
 

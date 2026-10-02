@@ -1,5 +1,10 @@
 # GCP-VQVAE fixture smoke evidence — September 30, 2026
 
+This is a historical experiment record. STok now exports with one fixed
+training-native-reference policy; earlier policy files and CLI commands below
+record the experiment interface. Policy snapshots are retained under
+[historical-policies](historical-policies/), outside the installed package.
+
 This is the initial fixture smoke evidence, captured before policy selection. Task 8 subsequently used the user-authorized public cohort; its [frozen selection, held-out evaluation, and policy decision](public-report.md) qualify Lite native/reference on the recorded ROCm FP32 configuration and retain Large's failed numerical qualification. The pilot file here remains a fixture baseline, separate from the selected stable profile.
 
 ## Reproduction and provenance
