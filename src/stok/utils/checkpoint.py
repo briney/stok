@@ -1,9 +1,9 @@
 """Versioned training state and deterministic epoch replay for replicated training."""
 
 from contextlib import contextmanager
-from dataclasses import dataclass
 from importlib.metadata import version
 from pathlib import Path
+from typing import TypedDict
 import os
 import math
 import platform
@@ -61,7 +61,7 @@ def rank_errors(error, accelerator, context):
         raise RuntimeError(f"{context}: {errors}")
 
 
-def resume_signature(cfg, *, sources, codebook, accelerator):
+def resume_signature(cfg, *, sources, codebook, accelerator, training_decoder=None):
     config = OmegaConf.to_container(cfg, resolve=True)
     train, data = config["train"], config["data"]
     for key in (
@@ -79,7 +79,10 @@ def resume_signature(cfg, *, sources, codebook, accelerator):
         train.pop(key, None)
     data.pop("eval", None)
     # Decoder settings affect training only when geometry supervision is active.
-    if not train.get("fape", {}).get("enabled"):
+    uses_decoder = bool(train.get("fape", {}).get("enabled"))
+    if uses_decoder and training_decoder is None:
+        raise ValueError("FAPE resume identity requires the loaded training decoder")
+    if not uses_decoder:
         config["model"].pop("decoder", None)
     config.pop("print_model_summary", None)
     identities = []
@@ -100,6 +103,9 @@ def resume_signature(cfg, *, sources, codebook, accelerator):
         "config": config,
         "sources": identities,
         "source_order": sources,
+        "training_decoder": state_sha256(training_decoder.state_dict())
+        if uses_decoder
+        else None,
         "mdlm_identity": OmegaConf.select(
             cfg, "train.mdlm_identity.training_signature"
         ),
@@ -138,6 +144,7 @@ def read_training_checkpoint(path: Path) -> dict:
     required = {
         "model",
         "optimizer",
+        "optimizer_initialized",
         "scheduler",
         "signature",
         "rank_states",
@@ -226,18 +233,47 @@ def validate_resume_signature(payload: dict, expected: dict) -> None:
         raise ValueError("Resume scheduler and successful-update counters disagree")
 
 
-@dataclass
-class TrainingProgress:
+class TrainingProgress(TypedDict):
+    """Completed-boundary cursor, cumulative counts, and unflushed log state."""
+
+    epoch: int
+    batches_in_epoch: int
     global_step: int
     micro_step: int
     residues_seen: int
     executed_positions: int
-    rank_state: dict
+    total_missing_structure: int
+    total_noncanonical_sequence: int
+    running_loss: float
+    running_updates: int
+    running_cls_loss: float
+    running_cls_count: int
+    running_fape_loss: float
+    running_fape_count: int
+    running_pred_nan_frac_sum: float
+    running_pred_nan_frac_count: int
+    running_masked_acc_sum: float
+    running_masked_acc_count: int
+    mdlm_running: torch.Tensor
+    rng: dict
+    loader_generator_state: torch.Tensor
 
 
 def restore_training_state(
     payload: dict, *, model, optimizer, scheduler, accelerator
 ) -> TrainingProgress:
+    # AdamW initializes state lazily: frozen/unused parameters may legitimately lack it.
+    # Separate saved coverage detects a deleted/emptied initialized entry without
+    # assuming every optimizer parameter has participated in an update.
+    initialized = payload["optimizer_initialized"]
+    states = payload["optimizer"]["state"]
+    actual = {key for key, state in states.items() if state}
+    if (
+        not isinstance(initialized, list)
+        or len(initialized) != len(set(initialized))
+        or set(initialized) != actual
+    ):
+        raise ValueError("Missing or unexpected initialized AdamW parameter state")
     plain = accelerator.unwrap_model(model) if accelerator else model
     plain.load_state_dict(payload["model"], strict=True)
     if payload["config"]["train"].get("objective") == "mdlm":
@@ -274,13 +310,17 @@ def restore_training_state(
         torch.Generator().set_state(rank["loader_generator_state"])
     finally:
         restore_rng_state(rng)
-    return TrainingProgress(
-        payload["global_step"],
-        payload["micro_step"],
-        payload["residues_seen"],
-        payload["executed_positions"],
-        rank,
-    )
+    return {
+        **rank["logging"],
+        "epoch": rank["epoch"],
+        "batches_in_epoch": rank["batches_in_epoch"],
+        "global_step": payload["global_step"],
+        "micro_step": payload["micro_step"],
+        "residues_seen": payload["residues_seen"],
+        "executed_positions": payload["executed_positions"],
+        "rng": rank["rng"],
+        "loader_generator_state": rank["loader_generator_state"],
+    }
 
 
 def epoch_iterator(loader, *, epoch, consumed, seed, rank, loader_state=None):

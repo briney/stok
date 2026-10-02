@@ -67,6 +67,28 @@ if os.environ.get('RESUME_SKIP'):
         torch.rand(rank + 1)  # ensure distinct per-rank RNG streams really restore
         return mdlm_forward(self, *args, **kwargs)
     STokMDLM.forward = rank_forward
+if os.environ.get('CHECK_PROGRESS_CONTRACT'):
+    from typing import is_typeddict
+    from stok.utils.checkpoint import TrainingProgress
+    original_restore = train.restore_training_state
+    def restore(*args, **kwargs):
+        result = original_restore(*args, **kwargs)
+        assert is_typeddict(TrainingProgress), 'TrainingProgress must be TypedDict'
+        assert type(result) is dict, 'TrainingProgress must be an ordinary dict'
+        assert {'epoch', 'batches_in_epoch', 'global_step', 'micro_step', 'residues_seen', 'executed_positions', 'running_loss', 'running_updates', 'mdlm_running'} <= result.keys()
+        assert result['epoch'] == 0 and result['global_step'] == 1
+        return result
+    train.restore_training_state = restore
+if os.environ.get('RESUME_TINY_DECODER'):
+    from stok.models.decoder import _DECODER_ARCH
+    _DECODER_ARCH['lite'] = dict(d_model=16, n_heads=2, n_layers=1, ffn_mult=1, max_length=32, num_memory_tokens=0, attn_kv_heads=1)
+    original_decoder = train.load_pretrained_decoder
+    decoder_calls = []
+    def load_decoder(**kwargs):
+        decoder_calls.append(1)
+        assert len(decoder_calls) == 1, 'Decoder constructed more than once'
+        return original_decoder(**kwargs)
+    train.load_pretrained_decoder = load_decoder
 try:
     train.run_training(cfg)
 finally:
@@ -365,7 +387,17 @@ def test_legacy_invalid_resume_does_not_touch_artifacts(tmp_path, objective):
 
 
 @pytest.mark.parametrize(
-    "damage", ["logging", "logging_value", "optimizer", "rng", "scaler", "cursor"]
+    "damage",
+    [
+        "logging",
+        "logging_value",
+        "optimizer",
+        "optimizer_partial",
+        "optimizer_empty_entry",
+        "rng",
+        "scaler",
+        "cursor",
+    ],
 )
 def test_incomplete_rank_state_rejected_before_output(tmp_path, damage):
     cfg = config_for(tmp_path)
@@ -380,6 +412,10 @@ def test_incomplete_rank_state_rejected_before_output(tmp_path, damage):
         rank["logging"]["running_loss"] = "broken"
     elif damage == "optimizer":
         payload["optimizer"]["state"].clear()
+    elif damage == "optimizer_partial":
+        payload["optimizer"]["state"].pop(next(iter(payload["optimizer"]["state"])))
+    elif damage == "optimizer_empty_entry":
+        payload["optimizer"]["state"][next(iter(payload["optimizer"]["state"]))] = {}
     elif damage == "rng":
         del rank["rng"]["torch"]
     elif damage == "scaler":
@@ -621,3 +657,166 @@ def test_resume_allows_output_logging_evaluation_and_checkpoint_overrides(tmp_pa
     ):
         equal(full[key], final[key])
     equal(full["rank_states"][0]["rng"], final["rank_states"][0]["rng"])
+
+
+def test_training_progress_is_flat_typed_dict(tmp_path):
+    cfg = config_for(tmp_path)
+    execute(cfg, tmp_path / "original.yaml", stop=1, ok=False)
+    cfg.train.resume_from = str(
+        Path(cfg.train.project_path) / "checkpoints/step_00000001.pt"
+    )
+    execute(cfg, tmp_path / "resumed.yaml", extra_env={"CHECK_PROGRESS_CONTRACT": "1"})
+
+
+def fape_config(tmp_path):
+    from stok.models.decoder import GeometricDecoder
+
+    cfg = config_for(tmp_path, "codebook", "map")
+    decoder = GeometricDecoder(
+        d_code=2,
+        d_model=16,
+        n_heads=2,
+        n_layers=1,
+        ffn_mult=1,
+        max_length=32,
+        num_memory_tokens=0,
+        attn_kv_heads=1,
+    )
+    cfg.model.decoder.path = str(tmp_path / "decoder.pt")
+    cfg.model.decoder.preset = "lite"
+    torch.save(decoder.state_dict(), cfg.model.decoder.path)
+    cfg.data.load_coords = True
+    cfg.train.fape.enabled = True
+    cfg.train.fape.start_step = 0
+    cfg.train.fape.weight = 1
+    cfg.train.num_steps = 3
+    cfg.train.log_steps = 1
+    return cfg
+
+
+def test_changed_training_decoder_rejected_before_artifacts(tmp_path):
+    cfg = fape_config(tmp_path)
+    env = {"RESUME_TINY_DECODER": "1"}
+    execute(cfg, tmp_path / "original.yaml", stop=1, ok=False, extra_env=env)
+    project = Path(cfg.train.project_path)
+    cfg.train.resume_from = str(project / "checkpoints/step_00000001.pt")
+    before = snapshot(project)
+    decoder = torch.load(cfg.model.decoder.path, weights_only=True)
+    decoder["projector_in.weight"].add_(0.25)
+    torch.save(decoder, cfg.model.decoder.path)
+    results = execute(cfg, tmp_path / "rejected.yaml", extra_env=env, ok=False)
+    assert "signature mismatch" in results[0].stderr
+    assert snapshot(project) == before
+
+
+def test_fape_resume_with_same_decoder_matches_uninterrupted(tmp_path):
+    cfg = fape_config(tmp_path)
+    env = {"RESUME_TINY_DECODER": "1"}
+    execute(cfg, tmp_path / "full.yaml", extra_env=env)
+    cfg.train.project_path = str(tmp_path / "interrupted")
+    execute(cfg, tmp_path / "interrupted.yaml", stop=1, ok=False, extra_env=env)
+    cfg.train.resume_from = str(tmp_path / "interrupted/checkpoints/step_00000001.pt")
+    execute(cfg, tmp_path / "resumed.yaml", extra_env=env)
+    full = torch.load(tmp_path / "full/model/final.pt", weights_only=True)
+    resumed = torch.load(tmp_path / "interrupted/model/final.pt", weights_only=True)
+    for key in (
+        "model",
+        "optimizer",
+        "scheduler",
+        "global_step",
+        "micro_step",
+        "rank_states",
+    ):
+        equal(full[key], resumed[key])
+    assert " | fape " in (tmp_path / "full/logs/train.log").read_text()
+
+
+def test_optimizer_coverage_preserves_unused_and_frozen_parameters(tmp_path):
+    from stok.cli.train import _save_checkpoint
+    from stok.utils.checkpoint import read_training_checkpoint, restore_training_state
+
+    model = torch.nn.Module()
+    model.unused = torch.nn.Parameter(torch.ones(1))
+    model.frozen = torch.nn.Parameter(torch.ones(1), requires_grad=False)
+    model.used = torch.nn.Linear(2, 1)
+    optimizer = torch.optim.AdamW(model.parameters())
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _: 1)
+    model.used(torch.ones(1, 2)).sum().backward()
+    optimizer.step()
+    scheduler.step()
+    optimizer.zero_grad(set_to_none=True)
+    logging = dict.fromkeys(
+        [
+            "running_loss",
+            "running_updates",
+            "running_cls_loss",
+            "running_cls_count",
+            "running_fape_loss",
+            "running_fape_count",
+            "running_pred_nan_frac_sum",
+            "running_pred_nan_frac_count",
+            "running_masked_acc_sum",
+            "running_masked_acc_count",
+            "total_missing_structure",
+            "total_noncanonical_sequence",
+        ],
+        0,
+    )
+    logging["mdlm_running"] = torch.zeros(5, 2, dtype=torch.float64)
+    path = tmp_path / "checkpoint.pt"
+    _save_checkpoint(
+        path,
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        global_step=1,
+        micro_step=1,
+        cfg=OmegaConf.create({"train": {"objective": "codebook"}}),
+        accelerator=None,
+        training_state={
+            "signature": {},
+            "wandb_run_id": None,
+            "local": {
+                "epoch": 0,
+                "batches_in_epoch": 1,
+                "logging": logging,
+                "loader_generator_state": torch.Generator().get_state(),
+            },
+        },
+    )
+    payload = read_training_checkpoint(path)
+    assert len(payload["optimizer_initialized"]) == 2
+    assert len(payload["optimizer"]["param_groups"][0]["params"]) == 4
+    restored_optimizer = torch.optim.AdamW(model.parameters())
+    restored_scheduler = torch.optim.lr_scheduler.LambdaLR(
+        restored_optimizer, lambda _: 1
+    )
+    progress = restore_training_state(
+        payload,
+        model=model,
+        optimizer=restored_optimizer,
+        scheduler=restored_scheduler,
+        accelerator=None,
+    )
+    assert type(progress) is dict and progress["batches_in_epoch"] == 1
+    assert model.unused not in restored_optimizer.state
+    assert model.frozen not in restored_optimizer.state
+    assert len(restored_optimizer.state) == 2
+    equal(optimizer.state_dict(), restored_optimizer.state_dict())
+
+
+def test_eval_only_decoder_does_not_constrain_resume_signature(tmp_path):
+    from stok.utils.checkpoint import resume_signature
+
+    cfg = config_for(tmp_path, "codebook", "map")
+    cfg.train.fape.enabled = False
+    decoder = torch.nn.Linear(2, 3)
+    first = resume_signature(
+        cfg, sources=[], codebook=None, accelerator=None, training_decoder=decoder
+    )
+    with torch.no_grad():
+        decoder.weight.add_(1)
+    second = resume_signature(
+        cfg, sources=[], codebook=None, accelerator=None, training_decoder=decoder
+    )
+    assert first == second

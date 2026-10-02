@@ -211,6 +211,9 @@ def _save_checkpoint(
             "residues_seen": int(residues_seen),
             "executed_positions": int(executed_positions),
         }
+        payload["optimizer_initialized"] = [
+            key for key, state in payload["optimizer"]["state"].items() if state
+        ]
         # Minimal helper callers may still write initialization artifacts; production
         # always supplies complete rank state and only v2 supports full resume.
         if training_state is not None:
@@ -1506,6 +1509,7 @@ def run_training(cfg: DictConfig):
             sources=_parse_train_configs(cfg),
             codebook=codebook,
             accelerator=accelerator,
+            training_decoder=decoder if want_fape else None,
         )
         if cfg.train.get("resume_from"):
             resume_payload = read_training_checkpoint(Path(cfg.train.resume_from))
@@ -1517,9 +1521,9 @@ def run_training(cfg: DictConfig):
                 scheduler=scheduler,
                 accelerator=accelerator,
             )
-            if progress.global_step > max_steps:
+            if progress["global_step"] > max_steps:
                 raise ValueError("Resume counter exceeds original update budget")
-            cursor = progress.rank_state["batches_in_epoch"]
+            cursor = progress["batches_in_epoch"]
             if cursor > len(train_loader) or (
                 cursor != len(train_loader) and cursor % grad_accum_steps
             ):
@@ -1528,11 +1532,11 @@ def run_training(cfg: DictConfig):
                 )
             resume_stream, _ = epoch_iterator(
                 train_loader,
-                epoch=progress.rank_state["epoch"],
+                epoch=progress["epoch"],
                 consumed=cursor,
                 seed=seed,
                 rank=accelerator.process_index if accelerator else 0,
-                loader_state=progress.rank_state["loader_generator_state"],
+                loader_state=progress["loader_generator_state"],
             )
     except Exception as exc:
         resume_error = f"{type(exc).__name__}: {exc}"
@@ -1572,8 +1576,8 @@ def run_training(cfg: DictConfig):
 
     # train loop
     model.train()
-    global_step = progress.global_step if progress else 0
-    micro_step = progress.micro_step if progress else 0
+    global_step = progress["global_step"] if progress else 0
+    micro_step = progress["micro_step"] if progress else 0
     running_loss = 0.0
     running_updates = 0
     log_interval = int(cfg.train.get("log_steps", 50))
@@ -1683,19 +1687,19 @@ def run_training(cfg: DictConfig):
         # linear
         return t0 + (t1 - t0) * (float(step) / float(T))
 
-    epoch = progress.rank_state["epoch"] if progress else 0
-    batches_in_pass = progress.rank_state["batches_in_epoch"] if progress else 0
+    epoch = progress["epoch"] if progress else 0
+    batches_in_pass = progress["batches_in_epoch"] if progress else 0
     loader_generator_state = (
-        progress.rank_state["loader_generator_state"]
+        progress["loader_generator_state"]
         if progress
         else torch.Generator().manual_seed(seed).get_state()
     )
     if progress:
         total_tokens, total_residues = (
-            progress.executed_positions,
-            progress.residues_seen,
+            progress["executed_positions"],
+            progress["residues_seen"],
         )
-        saved = progress.rank_state["logging"]
+        saved = progress
         running_loss = saved["running_loss"]
         running_updates = saved["running_updates"]
         running_cls_loss, running_cls_count = (
@@ -1755,7 +1759,7 @@ def run_training(cfg: DictConfig):
         try:
             if progress:
                 stream = resume_stream
-                restore_rng_state(progress.rank_state["rng"])
+                restore_rng_state(progress["rng"])
                 progress = None
                 resume_stream = None
             else:
@@ -2331,7 +2335,7 @@ def run_training(cfg: DictConfig):
             batches_in_pass = 0
 
     if progress:
-        restore_rng_state(progress.rank_state["rng"])
+        restore_rng_state(progress["rng"])
     _save_checkpoint(
         io_dirs["model"] / "final.pt",
         model=model,
