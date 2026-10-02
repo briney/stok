@@ -14,6 +14,7 @@ from ..utils.pretrained import (
     extract_gcp_component,
     read_gcp_checkpoint,
     resolve_gcp_artifact,
+    state_sha256,
 )
 
 __all__ = [
@@ -316,6 +317,20 @@ def load_pretrained_decoder(
 
     # strict=True will raise on any mismatch; no extra checks necessary
     model.load_state_dict(state_dict, strict=True)
+
+    # Only a quantizer from this same checkpoint verifies decoder/code ID semantics.
+    if any(key.startswith(("quantizer.", "vqvae.vector_quantizer.")) for key in state):
+        codebook = extract_gcp_component(state, "quantizer")["_codebook.embed"]
+        if codebook.ndim == 3 and codebook.shape[0] == 1:
+            codebook = codebook.squeeze(0)
+        if (
+            codebook.ndim != 2
+            or not codebook.is_floating_point()
+            or not torch.isfinite(codebook).all()
+            or codebook.shape[1] != inferred_d_code
+        ):
+            raise ValueError("Decoder checkpoint contains an invalid matching codebook")
+        model.codebook_sha256 = state_sha256({"codebook": codebook})
 
     if freeze:
         model.eval()

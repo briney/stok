@@ -940,7 +940,15 @@ def _build_dataloaders(
         resolved = (
             {} if is_mdlm else resolve_eval_metrics(cfg, name, objective=objective)
         )
-        needs_coords = any(METRIC_REGISTRY[key].requires_coords for key in resolved)
+        needs_coords = (
+            bool(
+                OmegaConf.select(
+                    cfg, "train.eval.mdlm.generation.decode", default=False
+                )
+            )
+            if is_mdlm
+            else any(METRIC_REGISTRY[key].requires_coords for key in resolved)
+        )
         requires_coords = any(
             settings["explicit"] and METRIC_REGISTRY[key].requires_coords
             for key, settings in resolved.items()
@@ -994,7 +1002,9 @@ def _build_dataloaders(
             eval_sampler = range(rank, len(ds), world_size)
         eval_kwargs = _make_dl_kwargs(eval_batch_size)
         eval_seed = int(
-            cfg.train.get("eval", {}).get("seed", cfg.train.get("seed", 1337))
+            cfg.train.get("eval", {}).get(
+                "seed", 1729 if is_mdlm else cfg.train.get("seed", 1337)
+            )
         )
         eval_kwargs["generator"] = torch.Generator().manual_seed(eval_seed)
         if is_mlm:
@@ -1170,6 +1180,13 @@ def run_training(cfg: DictConfig):
     codebook = None
     codebook_size = None
     if is_mdlm:
+        from stok.eval.mdlm import (
+            evaluate_mdlm,
+            resolve_mdlm_eval_config,
+            validate_mdlm_decoder,
+        )
+
+        decoder = None
         preflight_error = None
         try:
             if OmegaConf.select(cfg, "train.fape.enabled", default=False):
@@ -1218,6 +1235,7 @@ def run_training(cfg: DictConfig):
                     cfg, "train.eval.mdlm.generation_cohort"
                 ),
             )
+            mdlm_eval = resolve_mdlm_eval_config(cfg)
             train_loader, eval_loaders = _build_dataloaders(
                 cfg,
                 codebook_size=codebook_size,
@@ -1237,6 +1255,22 @@ def run_training(cfg: DictConfig):
                 norm_type=cfg.model.encoder.norm,
             )
             model.mdlm_regime_weights = dict(cfg.train.mdlm.regime_weights)
+            if mdlm_eval.generation.enabled and mdlm_eval.generation.decode:
+                from stok.utils.sampling import inference_context
+
+                with inference_context(model):
+                    decoder = load_pretrained_decoder(
+                        preset=cfg.model.decoder.get("preset")
+                        or cfg.model.codebook.get("preset")
+                        or "base",
+                        path=cfg.model.decoder.get("path"),
+                        device=accelerator.device if accelerator else "cpu",
+                        freeze=True,
+                        progress=is_main,
+                    )
+                    validate_mdlm_decoder(
+                        decoder, codebook, cfg.train.mdlm_identity.codebook_sha256
+                    )
             optimizer = AdamW(
                 model.parameters(),
                 lr=cfg.train.optimizer.lr,
@@ -1332,7 +1366,8 @@ def run_training(cfg: DictConfig):
 
     # load frozen geometric decoder for FAPE loss and/or eval metrics (optional)
     # Skip decoder setup for MLM objective
-    decoder = None
+    if not is_mdlm:
+        decoder = None
     want_fape = False
     want_eval_decode = False
     log_pred_nan_frac = False
@@ -2052,6 +2087,29 @@ def run_training(cfg: DictConfig):
                 running_pred_nan_frac_count = 0
                 running_masked_acc_sum = 0.0
                 running_masked_acc_count = 0
+
+            if is_mdlm:
+                denoising_due = mdlm_eval.enabled and current_step % eval_interval == 0
+                generation_due = (
+                    mdlm_eval.generation.enabled
+                    and current_step % mdlm_eval.generation.steps == 0
+                )
+                if denoising_due or generation_due:
+                    all_eval_metrics = evaluate_mdlm(
+                        model,
+                        eval_loaders,
+                        cfg,
+                        accelerator=accelerator,
+                        decoder=decoder,
+                        run_denoising=denoising_due,
+                        run_generation=generation_due,
+                    )
+                    metric_logger.log_eval_all(
+                        all_eval_metrics,
+                        current_step,
+                        current_epoch,
+                        compute_flops_6n(num_params, total_tokens),
+                    )
 
             # eval across all configured eval loaders (using modular eval system)
             if (
