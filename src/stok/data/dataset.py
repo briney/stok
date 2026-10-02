@@ -15,6 +15,15 @@ from ..utils.pretrained import json_sha256
 PARQUET_EXTENSIONS = {".parquet", ".parq", ".pq"}
 
 
+def parquet_shards(directory: Path) -> list[Path]:
+    """Files consumed by the directory reader and completed-export audit."""
+    return sorted(
+        path
+        for path in directory.iterdir()
+        if path.is_file() and path.suffix.lower() in PARQUET_EXTENSIONS
+    )
+
+
 def _structure_provenance(path: Path, schema: pa.Schema):
     """Legacy files have no provenance; generated files must have consistent digests."""
     metadata = schema.metadata or {}
@@ -386,13 +395,7 @@ class IterableTokenizedDataset(IterableDataset):
         self.rank, self.world_size = distributed_rank()
 
         # enumerate shard files and stats
-        shard_paths = sorted(
-            [
-                p
-                for p in self.dataset_path.iterdir()
-                if p.is_file() and p.suffix.lower() in PARQUET_EXTENSIONS
-            ]
-        )
+        shard_paths = parquet_shards(self.dataset_path)
         if len(shard_paths) == 0:
             raise RuntimeError("No Parquet shards found in directory.")
 

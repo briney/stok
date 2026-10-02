@@ -352,5 +352,36 @@
     "bf16_supported": true,
     "torch": "2.14.0+rocm7.2",
     "hip": "7.2.53211"
+  },
+  "rng_inventory_requalification": {
+    "prior_measurement_source_snapshot": "112c0fc",
+    "compatibility": "Internal v2 checkpoints missing explicit CUDA inventory metadata are rejected; no inferred migration.",
+    "cuda_rng_state_sizes": [
+      16
+    ],
+    "active_device": 0,
+    "successful_updates_total": 4,
+    "uninterrupted_updates": 2,
+    "interrupted_updates": 1,
+    "resumed_updates": 1,
+    "exact_model_optimizer_scheduler_counters_rng_and_data_trace": true,
+    "width": 64,
+    "layers": 2,
+    "heads": 4,
+    "ffn_mult": 2,
+    "context": 66,
+    "workers": 2,
+    "accumulation": 2,
+    "dropout": 0.2,
+    "precision": "bf16",
+    "cpu_sampling_actual_gpu_checkpoint": true,
+    "cpu_only_torch": "2.14.1+cpu",
+    "device_test_result": {
+      "passed": 1,
+      "deselected": 1,
+      "warnings": 5,
+      "seconds": 26.44
+    },
+    "operational_qualification": "pending genuine corpus/split/cohorts/intended hardware and budgets"
   }
 }

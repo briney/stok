@@ -101,12 +101,60 @@ AdamW 0.003. Exactly 64 updates were run on this same training subset.
 | Sequence | 14.7654858 | 0.000864970 |
 | Structure | 30.1240025 | 0.001502958 |
 
-Every update checked finite gradients and both head gradients/updates. Codebook
-values were unchanged. Four-step inverse-folding and folding samples preserved
+Every update checked finite gradients and nonzero gradients in both heads. Both
+heads changed across the 64-update run. Codebook values were unchanged. Four-step inverse-folding and folding samples preserved
 the complete supplied condition, used only biological output IDs and decoded
 finite N/CA/C coordinates with the matching frozen decoder outside BF16
 autocast. This is an implementation diagnostic; the evaluation subset overlaps
 training and this small-model result does not establish full-model convergence.
+
+## Strict RNG inventory repair and requalification
+
+The measurements above and their original execution signature were collected at
+`112c0fc`, before the final inventory repair. Their fit, throughput and numerical
+continuation evidence remains valid for that source snapshot. They do not certify
+older checkpoint artifacts against the repaired integrity contract.
+
+New version-2 checkpoints record `execution.cuda_rng_state_sizes` (one byte-state
+length per visible CUDA generator; `[]` for CPU) and each CUDA rank's active
+`rng.cuda_device`. Resume validates the complete saved collection and tensor
+properties, then matches current device inventory and active index before run
+artifacts or W&B. CPU checkpoint capture omits unused CUDA even when it was
+initialized earlier. Generic RNG snapshots preserve already-initialized CUDA
+without initializing an unused device. Old internal version-2 artifacts lacking
+this metadata are rejected by full-resume and checkpoint-sampling validation;
+no missing inventory is inferred or repaired. Regenerate artifacts with this
+implementation for sampling or full resume. No public legacy full-resume
+compatibility was promised.
+
+A bounded new checkpoint qualification used the same real export/archive and
+Radeon with width 64, two layers, four heads, FFN multiplier 2, context 66,
+workers 2, accumulation 2, dropout 0.2 and BF16. Four successful updates total
+(uninterrupted 2 versus interrupted 1 + resumed 1) matched **exactly** for sample
+keys/crops/corruption, model, optimizer, scheduler, counters, cursor and RNG.
+The recorded device-state inventory was `[16]`, active index 0. CPU sampling of
+that actual new checkpoint passed both with CUDA RNG access forbidden and in
+the separate Torch 2.14.1+cpu environment with no available CUDA device. This
+qualifies the repaired artifact contract; it is not another full-model capacity,
+throughput, convergence, FP16-scaler or multi-GPU measurement.
+
+The opt-in regression is
+`tests/integration/test_mdlm_device.py::test_real_device_rng_inventory_continuation`
+(1 passed, 1 sibling deselected, 5 warnings, 26.44 seconds). Reproduce it with
+the device command below plus `-k rng_inventory`. Its retained log is
+`/tmp/stok-mdlm-final-fix-device.log`; CPU-only sampling evidence is
+`/tmp/stok-mdlm-final-fix-cpu-sample.log`. Mocked two-device regressions separately
+cover active index 1 and malformed/missing/empty/truncated states. Real CPU DDP
+checks cover coordinated rank failures; these do not claim actual multi-GPU
+qualification. Operational pilot inputs and frozen-validation qualification
+remain pending.
+
+The final affected 16-module CPU run passed **493 cases**, with 176 retained
+warnings in 825.11 seconds, including actual workers and two-rank continuation
+and coordinated failures. The separate CPU device gates skipped two opt-in
+checks; the real new device check above passed. Ruff/compileall/diff checks and
+rebuilt, actually installed wheel config/override/CLI/smoke checks passed. This
+is scoped repair evidence, not a replacement whole-suite measurement.
 
 ## CPU regressions and installed package
 
@@ -131,7 +179,8 @@ failure stub rejected the new precision keyword; four DDP reference cases
 reused a now-protected populated fresh-run directory; the wrapped-model test's
 Accelerator stub lacked current precision/rank/backend fields. Minimal test-only
 adaptations preserved all original error, counter, numerical and geometry
-assertions. Production source was unchanged. Combining the full run and complete
+assertions. During that initial qualification, production source was unchanged.
+Combining the full run and complete
 corrected modules gives **1,011 unique passing CPU cases and eight intentional
 skips**. This is explicitly not a claim of one pristine full-suite invocation.
 

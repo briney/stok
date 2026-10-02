@@ -347,3 +347,14 @@ def test_raw_coordinate_length_mode_preserves_integer_semantics(
     assert torch.isnan(observed["coords"][5:]).all()
     assert torch.isnan(missing["coords"]).all()
     assert observed["dataset"] == "corpus"
+
+
+@pytest.mark.parametrize("suffix", [".parq", ".pq", ".PARQUET", ".PARQ", ".PQ"])
+def test_standalone_alias_shards_remain_readable(tmp_path, suffix):
+    from stok.data.dataset import IterableTokenizedDataset, TokenizedDataset
+    from tests.utils.synthetic import make_mdlm_rows
+
+    path = tmp_path / ("rows" + suffix)
+    pq.write_table(pa.Table.from_pylist(make_mdlm_rows()), path)
+    assert len(TokenizedDataset(str(path), max_length=None)) == 2
+    assert len(list(IterableTokenizedDataset(str(tmp_path), max_length=None))) == 2

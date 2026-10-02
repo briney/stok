@@ -341,7 +341,7 @@ def test_invalid_checkpoint_or_identity_preserves_artifacts(tmp_path, damage):
     assert snapshot(project) == before
 
 
-@pytest.mark.parametrize("failure", ["read", "write", "state"])
+@pytest.mark.parametrize("failure", ["read", "write", "state", "cuda_rng"])
 def test_rank_local_checkpoint_failures_reach_all_ranks(tmp_path, failure):
     cfg = config_for(tmp_path)
     execute(cfg, tmp_path / "original.yaml", stop=1, distributed=True, ok=False)
@@ -353,10 +353,12 @@ def test_rank_local_checkpoint_failures_reach_all_ranks(tmp_path, failure):
     OmegaConf.save(cfg, path)
     if failure == "read":
         patch = "original_read = train.read_training_checkpoint\ndef read(path):\n    if rank == 1: raise OSError('injected rank-local read failure')\n    return original_read(path)\ntrain.read_training_checkpoint = read\n"
+    elif failure == "cuda_rng":
+        patch = "original_read = train.read_training_checkpoint\ndef read(path):\n    payload = original_read(path)\n    if rank == 1: payload['rank_states'][1]['rng']['cuda'] = []\n    return payload\ntrain.read_training_checkpoint = read\n"
     elif failure == "write":
         patch = "original_torch_save = torch.save\ndef fail_save(value, path, *args, **kwargs):\n    if rank == 0 and isinstance(value, dict) and 'format_version' in value:\n        with open(path, 'wb') as out: out.write(b'partial')\n        raise OSError('injected rank-zero write failure')\n    return original_torch_save(value, path, *args, **kwargs)\ntorch.save = fail_save\n"
     else:
-        patch = "original_rng = train._collect_rng_state\ndef collect_rng():\n    if rank == 1: raise OSError('injected rank-local state failure')\n    return original_rng()\ntrain._collect_rng_state = collect_rng\n"
+        patch = "original_rng = train._collect_rng_state\ndef collect_rng(**kwargs):\n    if rank == 1: raise OSError('injected rank-local state failure')\n    return original_rng(**kwargs)\ntrain._collect_rng_state = collect_rng\n"
     probe = PROBE.replace(
         "try:\n    train.run_training(cfg)", patch + "try:\n    train.run_training(cfg)"
     )
@@ -365,8 +367,10 @@ def test_rank_local_checkpoint_failures_reach_all_ranks(tmp_path, failure):
     )
     for result in results:
         assert result.returncode != 0
-        assert "injected rank-" in result.stderr, result.stderr
-    if failure == "read":
+        assert (
+            "CUDA RNG" if failure == "cuda_rng" else "injected rank-"
+        ) in result.stderr, result.stderr
+    if failure in {"read", "cuda_rng"}:
         assert snapshot(project) == before
     else:
         assert checkpoint.read_bytes() == before["checkpoints/step_00000001.pt"]
@@ -820,3 +824,66 @@ def test_eval_only_decoder_does_not_constrain_resume_signature(tmp_path):
         cfg, sources=[], codebook=None, accelerator=None, training_decoder=decoder
     )
     assert first == second
+
+
+@pytest.fixture(scope="module")
+def rng_checkpoint(tmp_path_factory):
+    from stok.cli.train import run_training
+
+    root = tmp_path_factory.mktemp("rng-checkpoint")
+    cfg = config_for(root)
+    cfg.train.num_steps = 1
+    run_training(cfg)
+    return cfg, torch.load(root / "full/model/final.pt", weights_only=True)
+
+
+@pytest.mark.parametrize(
+    "damage", ["missing", "empty", "truncated", "dtype", "shape", "length", "active"]
+)
+def test_cuda_rng_rejected_before_artifacts_or_wandb(
+    tmp_path, monkeypatch, rng_checkpoint, damage
+):
+    import copy
+    from stok.cli import train
+
+    original_cfg, original = rng_checkpoint
+    cfg, payload = copy.deepcopy(original_cfg), copy.deepcopy(original)
+    payload["signature"]["execution"].update(
+        device="cuda", cuda_rng_state_sizes=[16, 16]
+    )
+    rng = payload["rank_states"][0]["rng"]
+    rng.update(
+        cuda=[torch.zeros(16, dtype=torch.uint8) for _ in range(2)], cuda_device=1
+    )
+    if damage == "missing":
+        del rng["cuda"]
+    elif damage == "empty":
+        rng["cuda"] = []
+    elif damage == "truncated":
+        rng["cuda"].pop()
+    elif damage == "dtype":
+        rng["cuda"][1] = rng["cuda"][1].float()
+    elif damage == "shape":
+        rng["cuda"][1] = rng["cuda"][1].view(4, 4)
+    elif damage == "length":
+        rng["cuda"][1] = rng["cuda"][1][:-1]
+    else:
+        rng["cuda_device"] = 2
+    project = tmp_path / "run"
+    project.mkdir()
+    (project / "keep").write_bytes(b"existing run artifacts")
+    checkpoint = project / "resume.pt"
+    torch.save(payload, checkpoint)
+    cfg.train.project_path, cfg.train.resume_from = str(project), str(checkpoint)
+    before = snapshot(project)
+    monkeypatch.setattr(
+        train, "resume_signature", lambda *a, **kw: payload["signature"]
+    )
+    monkeypatch.setattr(
+        train,
+        "_maybe_init_wandb",
+        lambda *a, **kw: pytest.fail("W&B before RNG validation"),
+    )
+    with pytest.raises((ValueError, RuntimeError), match="CUDA RNG"):
+        train.run_training(cfg)
+    assert snapshot(project) == before

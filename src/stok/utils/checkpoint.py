@@ -19,7 +19,8 @@ from stok.data.dataset import set_dataset_epoch
 from stok.utils.pretrained import file_sha256, state_sha256
 
 
-def collect_rng_state():
+def collect_rng_state(*, device=None):
+    """Scope training snapshots to its device; generic snapshots preserve initialized CUDA."""
     numpy = list(np.random.get_state())
     numpy[1] = numpy[1].tolist()
     state = {
@@ -27,8 +28,11 @@ def collect_rng_state():
         "numpy": numpy,
         "torch": torch.get_rng_state(),
     }
-    if torch.cuda.is_available():
+    if (device is None and torch.cuda.is_initialized()) or (
+        device is not None and device.type == "cuda"
+    ):
         state["cuda"] = torch.cuda.get_rng_state_all()
+        state["cuda_device"] = torch.cuda.current_device()
     return state
 
 
@@ -125,6 +129,11 @@ def resume_signature(cfg, *, sources, codebook, accelerator, training_decoder=No
             "device": accelerator.device.type if accelerator else "cpu",
             "distributed": accelerator.distributed_type.name if accelerator else "NO",
             "threads": torch.get_num_threads(),
+            "cuda_rng_state_sizes": [
+                state.numel() for state in torch.cuda.get_rng_state_all()
+            ]
+            if accelerator and accelerator.device.type == "cuda"
+            else [],
             "cuda": torch.version.cuda,
             "cudnn": torch.backends.cudnn.version(),
             "deterministic": torch.are_deterministic_algorithms_enabled(),
@@ -178,6 +187,14 @@ def validate_resume_signature(payload: dict, expected: dict) -> None:
         or [r.get("rank") for r in ranks] != list(range(size))
     ):
         raise ValueError("Missing or invalid per-rank resume state")
+    execution = expected["execution"]
+    sizes = execution.get("cuda_rng_state_sizes")
+    if (
+        not isinstance(sizes, list)
+        or any(type(size) is not int or size <= 0 for size in sizes)
+        or bool(sizes) != (execution["device"] == "cuda")
+    ):
+        raise ValueError("Missing or invalid CUDA RNG inventory in execution signature")
     for rank in ranks:
         required = {
             "rng",
@@ -194,6 +211,28 @@ def validate_resume_signature(payload: dict, expected: dict) -> None:
             for key in ("epoch", "batches_in_epoch")
         ):
             raise ValueError("Invalid resume cursor")
+        rng = rank["rng"]
+        if not isinstance(rng, dict):
+            raise ValueError("Invalid RNG state")
+        if sizes:
+            states, active = rng.get("cuda"), rng.get("cuda_device")
+            if (
+                not isinstance(states, list)
+                or len(states) != len(sizes)
+                or type(active) is not int
+                or not 0 <= active < len(sizes)
+                or any(
+                    not isinstance(state, torch.Tensor)
+                    or state.device.type != "cpu"
+                    or state.dtype != torch.uint8
+                    or state.shape != (size,)
+                    or not state.is_contiguous()
+                    for state, size in zip(states, sizes)
+                )
+            ):
+                raise ValueError("Incomplete or invalid CUDA RNG state collection")
+        elif "cuda" in rng or "cuda_device" in rng:
+            raise ValueError("Unexpected CUDA RNG state for CPU execution")
         logging = rank["logging"]
         required_logging = {
             "running_loss",
@@ -262,6 +301,20 @@ class TrainingProgress(TypedDict):
 def restore_training_state(
     payload: dict, *, model, optimizer, scheduler, accelerator
 ) -> TrainingProgress:
+    rank = payload["rank_states"][accelerator.process_index if accelerator else 0]
+    device = accelerator.device if accelerator else torch.device("cpu")
+    if device.type == "cuda":
+        states = collect_rng_state(device=device)
+        if rank["rng"].get("cuda_device") != states["cuda_device"] or payload[
+            "signature"
+        ]["execution"].get("cuda_rng_state_sizes") != [
+            state.numel() for state in states["cuda"]
+        ]:
+            raise ValueError(
+                "CUDA RNG inventory or active device changed for this rank"
+            )
+    elif "cuda" in rank["rng"]:
+        raise ValueError("CUDA RNG training state requires CUDA execution")
     # AdamW initializes state lazily: frozen/unused parameters may legitimately lack it.
     # Separate saved coverage detects a deleted/emptied initialized entry without
     # assuming every optimizer parameter has participated in an update.
@@ -295,7 +348,6 @@ def restore_training_state(
                 )
             ):
                 raise ValueError("Incomplete or incompatible AdamW continuation state")
-    rank = payload["rank_states"][accelerator.process_index if accelerator else 0]
     scaler = getattr(accelerator, "scaler", None)
     if (scaler is None) != (rank["scaler"] is None):
         raise ValueError(
@@ -304,7 +356,7 @@ def restore_training_state(
     if scaler is not None:
         scaler.load_state_dict(rank["scaler"])
     # Validate RNG before any output replacement; restore it again after replay.
-    rng = collect_rng_state()
+    rng = collect_rng_state(device=device)
     try:
         restore_rng_state(rank["rng"])
         torch.Generator().set_state(rank["loader_generator_state"])

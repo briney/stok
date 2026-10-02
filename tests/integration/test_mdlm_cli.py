@@ -1,5 +1,6 @@
 """Public MDLM presets, guarded launches, and checkpoint-only generation."""
 
+import copy
 import json
 import shutil
 from importlib.resources import files
@@ -509,3 +510,57 @@ def test_invalid_binary_checkpoint_reports_error_and_preserves_output(tmp_path):
     )
     assert result.exit_code != 0 and not output.exists()
     assert "Error:" in result.output
+
+
+@pytest.mark.parametrize(
+    "suffix", [".parquet", ".parq", ".pq", ".PARQUET", ".PARQ", ".PQ"]
+)
+def test_unlisted_heldout_shard_rejected_before_startup(tmp_path, monkeypatch, suffix):
+    from stok.data.mdlm import validate_mdlm_sources
+    from tests.integration.test_mdlm_evaluation import evaluation_training_fixture
+    from tests.integration.test_mdlm_resume import snapshot
+
+    cfg = evaluation_training_fixture(tmp_path)
+    codebook = torch.load(cfg.model.codebook.path, weights_only=True)["codebook"]
+    kwargs = dict(codebook=codebook, split_manifest=cfg.data.split_manifest)
+    clean = validate_mdlm_sources(cfg.data.train, cfg.data.eval, **kwargs)
+    assert clean["sources"]["local"]["row_count"] == 8
+    shutil.copyfile(
+        str(cfg.data.eval.validation.path) + "/part-000000.parquet",
+        str(cfg.data.train.local.path) + "/unlisted" + suffix,
+    )
+    before = snapshot(tmp_path)
+    monkeypatch.setattr(
+        "stok.cli.train._maybe_init_wandb",
+        lambda *a, **kw: pytest.fail("W&B reached before shard audit"),
+    )
+    with pytest.raises((ValueError, RuntimeError), match="shard inventory"):
+        run_training(cfg)
+    assert snapshot(tmp_path) == before
+
+
+def test_cpu_sampling_valid_gpu_checkpoint_never_restores_device_rng(
+    tmp_path, trained, monkeypatch
+):
+    _, original = trained
+    payload = copy.deepcopy(original)
+    payload["signature"]["execution"].update(
+        device="cuda", cuda_rng_state_sizes=[16, 16]
+    )
+    payload["rank_states"][0]["rng"].update(
+        cuda=[torch.zeros(16, dtype=torch.uint8) for _ in range(2)], cuda_device=1
+    )
+    checkpoint = tmp_path / "gpu.pt"
+    torch.save(payload, checkpoint)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("CPU sampling touched device RNG")
+
+    monkeypatch.setattr(torch.cuda, "get_rng_state_all", forbidden)
+    monkeypatch.setattr(torch.cuda, "set_rng_state_all", forbidden)
+    monkeypatch.setattr(torch.cuda, "_lazy_init", forbidden)
+    result, output = invoke_sample(
+        tmp_path, checkpoint, [{"sequence_id": "sample", "length": 3}], "joint"
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(output.read_text())["length"] == 3

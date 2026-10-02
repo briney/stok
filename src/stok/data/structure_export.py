@@ -17,7 +17,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
 
-from .dataset import TokenizedDataset, _structure_provenance
+from .dataset import TokenizedDataset, _structure_provenance, parquet_shards
 from .structure_encoding import (
     StructureExclusion,
     iter_structure_manifest,
@@ -294,7 +294,7 @@ def validate_structure_dataset(directory: str | Path) -> dict[str, Any]:
         Path(name).name != name or not name.endswith(".parquet") for name in names
     ):
         raise ValueError("Invalid shard inventory")
-    if set(names) != {path.name for path in directory.glob("*.parquet")}:
+    if set(names) != {path.name for path in parquet_shards(directory)}:
         raise ValueError("Dataset shard inventory disagrees")
     for shard in summary["shards"]:
         _validate_shard(directory / shard["path"], shard, encoded)

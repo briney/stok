@@ -189,3 +189,119 @@ def test_real_paired_bf16_overfit_and_conditioned_decode():
         "decoder_precision": "float32",
     }
     print("MDLM_DEVICE_DIAGNOSTIC=" + json.dumps(result))
+
+
+def test_real_device_rng_inventory_continuation(tmp_path, monkeypatch):
+    """Four tiny-model updates qualify the strict inventory through production resume."""
+    import subprocess
+    import sys
+
+    from tests.integration.test_mdlm_cli import invoke_sample
+    from tests.integration.test_mdlm_resume import PROBE, equal
+    from tests.integration.test_mdlm_training import mdlm_config
+    from stok.utils.checkpoint import validate_resume_signature
+
+    source, archive = os.getenv("STOK_MDLM_SOURCE"), os.getenv("STOK_MDLM_ARCHIVE")
+    if not source or not archive:
+        pytest.skip("set real source/archive for device continuation acceptance")
+    assert torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+    cfg = mdlm_config(
+        tmp_path / "full",
+        source,
+        archive,
+        **{
+            "model.encoder.d_model": 64,
+            "model.encoder.n_layers": 2,
+            "model.encoder.n_heads": 4,
+            "model.encoder.ffn_mult": 2,
+            "model.encoder.dropout": 0.2,
+            "data.num_workers": 2,
+            "data.max_len": 66,
+            "train.grad_accum_steps": 2,
+            "train.precision": "bf16",
+        },
+    )
+    for name, stop in (("full", -1), ("interrupted", 1), ("resumed", -1)):
+        cfg.train.project_path = str(
+            tmp_path / ("full" if name == "full" else "interrupted")
+        )
+        if name == "resumed":
+            cfg.train.resume_from = str(
+                tmp_path / "interrupted/checkpoints/step_00000001.pt"
+            )
+        config = tmp_path / f"{name}.yaml"
+        OmegaConf.save(cfg, config)
+        result = subprocess.run(
+            [sys.executable, "-c", PROBE, str(config), str(stop)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        (tmp_path / f"{name}.log").write_text(result.stdout + result.stderr)
+        assert (result.returncode == 0) == (stop == -1), result.stdout + result.stderr
+        if stop == 1:
+            assert "intentional interruption" in result.stderr
+    final_path = tmp_path / "interrupted/model/final.pt"
+    full = torch.load(
+        tmp_path / "full/model/final.pt", map_location="cpu", weights_only=True
+    )
+    resumed = torch.load(final_path, map_location="cpu", weights_only=True)
+    validate_resume_signature(resumed, full["signature"])
+    for key in (
+        "model",
+        "optimizer",
+        "scheduler",
+        "rank_states",
+        "global_step",
+        "micro_step",
+        "residues_seen",
+        "executed_positions",
+    ):
+        equal(full[key], resumed[key])
+
+    def trace(name):
+        return torch.load(
+            tmp_path / f"{name}.yaml.rank0.trace.pt",
+            map_location="cpu",
+            weights_only=True,
+        )
+
+    equal(trace("full"), trace("interrupted") + trace("resumed"))
+    sizes = resumed["signature"]["execution"]["cuda_rng_state_sizes"]
+    rng = resumed["rank_states"][0]["rng"]
+    assert len(sizes) == torch.cuda.device_count() and sizes
+    assert [state.numel() for state in rng["cuda"]] == sizes
+    assert rng["cuda_device"] == torch.cuda.current_device()
+    assert resumed["signature"]["execution"]["device"] == "cuda"
+    assert resumed["config"]["train"]["effective_precision"] == "bf16"
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("CPU sampler touched CUDA RNG")
+
+    monkeypatch.setattr(torch.cuda, "_lazy_init", forbidden)
+    monkeypatch.setattr(torch.cuda, "get_rng_state_all", forbidden)
+    monkeypatch.setattr(torch.cuda, "set_rng_state_all", forbidden)
+    result, output = invoke_sample(
+        tmp_path, final_path, [{"sequence_id": "sample", "length": 3}], "joint"
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(output.read_text())["length"] == 3
+    print(
+        "MDLM_RNG_CONTINUATION="
+        + json.dumps(
+            {
+                "successful_updates_total": 4,
+                "per_run_updates": 2,
+                "cuda_rng_state_sizes": sizes,
+                "active_device": rng["cuda_device"],
+                "trace_parameters_optimizer_rng_exact": True,
+                "cpu_sampler": True,
+                "workers": 2,
+                "precision": "bf16",
+                "dropout": 0.2,
+                "accumulation": 2,
+                "context": 66,
+                "checkpoint": str(final_path),
+            }
+        )
+    )

@@ -207,7 +207,9 @@ def _save_checkpoint(
             "micro_step": int(micro_step),
             "step_unit": "optimizer_update",
             "config": OmegaConf.to_container(cfg, resolve=True),
-            "rng_state": _collect_rng_state(),
+            "rng_state": _collect_rng_state(
+                device=accelerator.device if accelerator else torch.device("cpu")
+            ),
             "residues_seen": int(residues_seen),
             "executed_positions": int(executed_positions),
         }
