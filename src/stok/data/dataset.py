@@ -63,7 +63,8 @@ def _partition_length(dataset) -> int:
 
 def _partition_stream(dataset):
     """Assign positions once, outside any nested mixture streams."""
-    dataset._epoch += 1
+    if not getattr(dataset, "_explicit_epoch", False):
+        dataset._epoch += 1
     worker = get_worker_info()
     worker_id, workers = (worker.id, worker.num_workers) if worker else (0, 1)
     usable = _usable_samples(dataset)
@@ -76,6 +77,17 @@ def _partition_stream(dataset):
             and (position // dataset.world_size) % workers == worker_id
         ):
             yield item
+
+
+def set_dataset_epoch(dataset, epoch: int):
+    """Opt in to explicit epochs recursively, preserving standalone implicit iteration."""
+    setter = getattr(dataset, "set_epoch", None)
+    if callable(setter):
+        setter(epoch)
+    for child in getattr(dataset, "datasets", ()):
+        set_dataset_epoch(child, epoch)
+    if hasattr(dataset, "dataset"):
+        set_dataset_epoch(dataset.dataset, epoch)
 
 
 def _parquet_columns(
@@ -411,6 +423,10 @@ class IterableTokenizedDataset(IterableDataset):
     def __len__(self) -> int:
         return _partition_length(self)
 
+    def set_epoch(self, epoch: int):
+        self._epoch = int(epoch)
+        self._explicit_epoch = True
+
     def __iter__(self):
         return _partition_stream(self)
 
@@ -474,6 +490,10 @@ class MapAsIterableDataset(IterableDataset):
 
     def __len__(self) -> int:
         return _partition_length(self)
+
+    def set_epoch(self, epoch: int):
+        self._epoch = int(epoch)
+        self._explicit_epoch = True
 
     def __iter__(self):
         return _partition_stream(self)
@@ -550,6 +570,10 @@ class InterleavedIterableDataset(IterableDataset):
 
     def __len__(self) -> int:
         return _partition_length(self)
+
+    def set_epoch(self, epoch: int):
+        self._epoch = int(epoch)
+        self._explicit_epoch = True
 
     def __iter__(self):
         return _partition_stream(self)

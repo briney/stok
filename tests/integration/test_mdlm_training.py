@@ -309,7 +309,7 @@ def test_bad_source_fails_before_wandb_or_artifacts(tmp_path, monkeypatch):
     def forbidden(*args, **kwargs):
         pytest.fail("W&B started before preflight")
 
-    monkeypatch.setattr(train, "_maybe_wandb_login", forbidden)
+    monkeypatch.setattr(train, "_maybe_init_wandb", forbidden)
     with pytest.raises((ValueError, RuntimeError)):
         run_training(mdlm_config(tmp_path / "run", source, codebook))
     assert not (tmp_path / "run").exists()

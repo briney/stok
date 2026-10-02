@@ -1,12 +1,10 @@
 from functools import partial
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from itertools import islice
 import math
 import os
-import random
 import shutil
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any, Optional, cast
 
@@ -56,6 +54,18 @@ from stok.utils.masking import residue_mask_from_tokens
 from stok.utils.flops import compute_flops_6n, count_parameters, format_flops_scientific
 from stok.utils.losses import fape_loss, token_ce_loss
 from stok.utils.tokenizer import Tokenizer
+from stok.utils.checkpoint import (
+    atomic_destination as _atomic_destination,
+    collect_rng_state as _collect_rng_state,
+    epoch_iterator,
+    rank_errors as _raise_rank_errors,
+    read_training_checkpoint,
+    restore_rng_state,
+    restore_training_state,
+    resume_signature,
+    validate_resume_signature,
+    ResumeWandb,
+)
 
 
 def _maybe_get_accelerator(precision=None):
@@ -171,42 +181,6 @@ def _unwrap_model(model: nn.Module, accelerator) -> nn.Module:
     return accelerator.unwrap_model(model) if accelerator is not None else model
 
 
-def _collect_rng_state() -> dict[str, Any]:
-    # convert numpy RNG state to only primitives/lists to be loadable with weights_only=True
-    np_state: list[Any] = list(np.random.get_state())
-    try:
-        # element 1 is the key array
-        if hasattr(np_state[1], "tolist"):
-            np_state[1] = np_state[1].tolist()
-    except Exception:
-        pass
-    state: dict[str, Any] = {
-        "python": random.getstate(),
-        "numpy": np_state,
-        "torch": torch.get_rng_state(),
-    }
-    if torch.cuda.is_available():
-        try:
-            state["cuda"] = torch.cuda.get_rng_state_all()
-        except Exception:
-            # on some backends/devices this may not be available
-            pass
-    return state
-
-
-@contextmanager
-def _atomic_destination(path: Path):
-    """Replace a destination only after its complete sibling file is written."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    os.close(fd)
-    try:
-        yield temporary
-        os.replace(temporary, path)
-    finally:
-        Path(temporary).unlink(missing_ok=True)
-
-
 def _save_checkpoint(
     path: Path,
     *,
@@ -219,24 +193,60 @@ def _save_checkpoint(
     micro_step: int = 0,
     residues_seen: int = 0,
     executed_positions: int = 0,
+    training_state: dict | None = None,
 ):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "model": _unwrap_model(model, accelerator).state_dict(),
-        "optimizer": optimizer.state_dict(),
-        "scheduler": scheduler.state_dict(),
-        "global_step": int(global_step),
-        "micro_step": int(micro_step),
-        "step_unit": "optimizer_update",
-        "config": OmegaConf.to_container(cfg, resolve=True),
-        "rng_state": _collect_rng_state(),
-    }
-    if cfg.train.get("objective") == "mdlm":
+    payload = None
+    rank_state = None
+    error = None
+    try:
+        payload = {
+            "model": _unwrap_model(model, accelerator).state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+            "global_step": int(global_step),
+            "micro_step": int(micro_step),
+            "step_unit": "optimizer_update",
+            "config": OmegaConf.to_container(cfg, resolve=True),
+            "rng_state": _collect_rng_state(),
+            "residues_seen": int(residues_seen),
+            "executed_positions": int(executed_positions),
+        }
+        # Minimal helper callers may still write initialization artifacts; production
+        # always supplies complete rank state and only v2 supports full resume.
+        if training_state is not None:
+            if any(p.grad is not None for p in model.parameters()):
+                raise ValueError(
+                    "Checkpoint requires a completed accumulation boundary with no pending gradients"
+                )
+            scaler = getattr(accelerator, "scaler", None)
+            rank_state = {
+                **training_state["local"],
+                "rank": accelerator.process_index if accelerator else 0,
+                "rng": payload["rng_state"],
+                "scaler": scaler.state_dict() if scaler is not None else None,
+            }
+    except Exception as exc:
+        if accelerator is None:
+            raise
+        error = f"{type(exc).__name__}: {exc}"
+    _raise_rank_errors(error, accelerator, "Collecting checkpoint state failed")
+    if training_state is not None:
         payload.update(
-            residues_seen=int(residues_seen), executed_positions=int(executed_positions)
+            format_version=2,
+            rank_states=gather_object([rank_state]) if accelerator else [rank_state],
+            signature=training_state["signature"],
+            wandb_run_id=training_state["wandb_run_id"],
         )
-    with _atomic_destination(path) as temporary:
-        torch.save(payload, temporary)
+    error = None
+    if accelerator is None or accelerator.is_main_process:
+        try:
+            with _atomic_destination(path) as temporary:
+                torch.save(payload, temporary)
+        except Exception as exc:
+            if accelerator is None:
+                raise
+            error = f"{type(exc).__name__}: {exc}"
+    _raise_rank_errors(error, accelerator, "Checkpoint failed")
 
 
 def _load_pretrained_encoder(
@@ -888,7 +898,7 @@ def _build_dataloaders(
             "num_workers": num_workers,
             "pin_memory": pin_memory,
             "collate_fn": collate_fn,
-            "persistent_workers": (num_workers > 0),
+            "persistent_workers": False,
         }
         if num_workers > 0 and prefetch_factor is not None and prefetch_factor > 0:
             kwargs["prefetch_factor"] = prefetch_factor
@@ -1032,44 +1042,48 @@ def _build_dataloaders(
     return train_loader, eval_loaders
 
 
-def _maybe_wandb_login(cfg: DictConfig, *, is_main_process: bool):
-    if cfg.train.get("wandb") and cfg.train.wandb.get("enabled", True):
-        if is_main_process:
-            try:
-                import wandb
-
-                wandb.login()  # trigger login prompt early; do not create a run yet
-            except Exception:
-                # proceed without W&B
-                pass
-
-
 def _maybe_init_wandb(
-    cfg: DictConfig, *, is_main_process: bool, logs_dir: Optional[Path] = None
+    cfg: DictConfig,
+    *,
+    is_main_process: bool,
+    logs_dir: Optional[Path] = None,
+    resume_payload: dict | None = None,
 ):
-    wb = None
-    if cfg.train.get("wandb") and cfg.train.wandb.get("enabled", True):
-        if is_main_process:
-            try:
-                import wandb
+    if (
+        not is_main_process
+        or not cfg.train.get("wandb")
+        or not cfg.train.wandb.get("enabled", True)
+    ):
+        return None
+    import wandb
 
-                init_kwargs: dict[str, Any] = dict(
-                    project=cfg.train.wandb.get("project", "stok"),
-                    entity=cfg.train.wandb.get("entity"),
-                    group=cfg.train.wandb.get("group"),
-                    name=cfg.train.wandb.get("name"),
-                    tags=list(cfg.train.wandb.get("tags", [])),
-                    config=OmegaConf.to_container(cfg, resolve=True),
-                )
-                if logs_dir is not None:
-                    os.environ["WANDB_DIR"] = logs_dir.as_posix()
-                    init_kwargs["dir"] = logs_dir.as_posix()
-                wandb.init(**init_kwargs)
-                wb = wandb
-            except Exception:
-                # proceed without W&B
-                wb = None
-    return wb
+    options = cfg.train.wandb
+    init_kwargs = dict(
+        project=options.get("project", "stok"),
+        entity=options.get("entity"),
+        group=options.get("group"),
+        name=options.get("name"),
+        tags=list(options.get("tags", [])),
+        config=OmegaConf.to_container(cfg, resolve=True),
+    )
+    if options.get("mode"):
+        init_kwargs["mode"] = options.mode
+    if logs_dir is not None:
+        init_kwargs["dir"] = str(logs_dir)
+    run_id = resume_payload["wandb_run_id"] if resume_payload else None
+    if run_id:
+        init_kwargs.update(id=run_id, resume="must")
+    run = wandb.init(**init_kwargs)
+    if run is None or (run_id and run.id != run_id):
+        raise RuntimeError("W&B did not resume the recorded run ID")
+    watermark = -1
+    if resume_payload:
+        watermark = max(int(run.step) - 1, int(run.summary.get("_step", -1)))
+        run.summary["resume/rollback"] = {
+            "checkpoint_step": resume_payload["global_step"],
+            "history_watermark": watermark,
+        }
+    return ResumeWandb(wandb, watermark)
 
 
 def iter_windows(loader, size: int, accelerator=None):
@@ -1095,12 +1109,6 @@ def iter_windows(loader, size: int, accelerator=None):
         if not window:
             return
         yield window
-
-
-def _raise_rank_errors(error, accelerator, context: str):
-    errors = gather_object([error]) if accelerator else [error]
-    if any(errors):
-        raise RuntimeError(f"{context}: {errors}")
 
 
 def run_training(cfg: DictConfig):
@@ -1281,27 +1289,18 @@ def run_training(cfg: DictConfig):
             preflight_error = f"{type(exc).__name__}: {exc}"
         _raise_rank_errors(preflight_error, accelerator, "MDLM preflight failed")
 
-    # prompt for W&B login early so the API key prompt happens immediately
-    _maybe_wandb_login(cfg, is_main_process=is_main)
+    if (
+        accelerator
+        and is_main
+        and accelerator.num_processes == 1
+        and torch.cuda.device_count() > 1
+    ):
+        printer(
+            "Multiple CUDA devices detected but only one process is active. "
+            "Launch multi-GPU with: accelerate launch -m stok.train <overrides>"
+        )
 
-    # warn if multiple GPUs are visible but only one process is active
-    if accelerator and is_main:
-        world_size = getattr(accelerator, "num_processes", 1)
-        if world_size == 1 and torch.cuda.device_count() > 1:
-            printer(
-                "Multiple CUDA devices detected but only one process is active. "
-                "Launch multi-GPU with: accelerate launch -m stok.train <overrides>"
-            )
-
-    # resolve project directories and save config (main only)
     io_dirs = _resolve_project_dirs(cfg)
-    output_error = None
-    if is_main:
-        try:
-            _ensure_dirs(list(io_dirs.values()))
-        except Exception as exc:
-            output_error = f"{type(exc).__name__}: {exc}"
-    _raise_rank_errors(output_error, accelerator, "Creating project directories failed")
 
     # Load codebook only for codebook objective
     if objective == "codebook":
@@ -1429,14 +1428,6 @@ def run_training(cfg: DictConfig):
                         f"{int(E.shape[1])}"
                     )
 
-    output_error = None
-    if is_main:
-        try:
-            _save_config_snapshot(cfg, io_dirs["configs"] / "run.yaml")
-        except Exception as exc:
-            output_error = f"{type(exc).__name__}: {exc}"
-    _raise_rank_errors(output_error, accelerator, "Saving configuration failed")
-
     if not is_mdlm:
         # optimizer
         optimizer = AdamW(
@@ -1505,14 +1496,86 @@ def run_training(cfg: DictConfig):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model.to(device)
 
-    # W&B
-    wb = _maybe_init_wandb(cfg, is_main_process=is_main, logs_dir=io_dirs["logs"])
+    resume_payload = None
+    progress = None
+    resume_stream = None
+    resume_error = None
+    try:
+        signature = resume_signature(
+            cfg,
+            sources=_parse_train_configs(cfg),
+            codebook=codebook,
+            accelerator=accelerator,
+        )
+        if cfg.train.get("resume_from"):
+            resume_payload = read_training_checkpoint(Path(cfg.train.resume_from))
+            validate_resume_signature(resume_payload, signature)
+            progress = restore_training_state(
+                resume_payload,
+                model=model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                accelerator=accelerator,
+            )
+            if progress.global_step > max_steps:
+                raise ValueError("Resume counter exceeds original update budget")
+            cursor = progress.rank_state["batches_in_epoch"]
+            if cursor > len(train_loader) or (
+                cursor != len(train_loader) and cursor % grad_accum_steps
+            ):
+                raise ValueError(
+                    "Resume cursor is not a completed local accumulation boundary"
+                )
+            resume_stream, _ = epoch_iterator(
+                train_loader,
+                epoch=progress.rank_state["epoch"],
+                consumed=cursor,
+                seed=seed,
+                rank=accelerator.process_index if accelerator else 0,
+                loader_state=progress.rank_state["loader_generator_state"],
+            )
+    except Exception as exc:
+        resume_error = f"{type(exc).__name__}: {exc}"
+    _raise_rank_errors(resume_error, accelerator, "Resume preflight failed")
+
+    output_error = None
+    if is_main:
+        try:
+            _ensure_dirs(list(io_dirs.values()))
+        except Exception as exc:
+            output_error = f"{type(exc).__name__}: {exc}"
+    _raise_rank_errors(output_error, accelerator, "Creating project directories failed")
+    wb = None
+    logging_error = None
+    try:
+        wb = _maybe_init_wandb(
+            cfg,
+            is_main_process=is_main,
+            logs_dir=io_dirs["logs"],
+            resume_payload=resume_payload,
+        )
+    except Exception as exc:
+        logging_error = f"{type(exc).__name__}: {exc}"
+    _raise_rank_errors(logging_error, accelerator, "W&B initialization failed")
+    output_error = None
+    if is_main:
+        try:
+            _save_config_snapshot(cfg, io_dirs["configs"] / "run.yaml")
+        except Exception as exc:
+            output_error = f"{type(exc).__name__}: {exc}"
+    _raise_rank_errors(output_error, accelerator, "Saving configuration failed")
+    wandb_run_id = getattr(getattr(wb, "run", None), "id", None) or (
+        resume_payload["wandb_run_id"] if resume_payload else None
+    )
+    if accelerator:
+        wandb_run_id = gather_object([wandb_run_id])[0]
 
     # train loop
     model.train()
-    global_step = 0
-    micro_step = 0
+    global_step = progress.global_step if progress else 0
+    micro_step = progress.micro_step if progress else 0
     running_loss = 0.0
+    running_updates = 0
     log_interval = int(cfg.train.get("log_steps", 50))
     eval_interval = int(cfg.train.get("eval", {}).get("steps", 1000))
     ignore_index = -100 if is_mdlm else int(cfg.model.classifier.ignore_index)
@@ -1536,6 +1599,12 @@ def run_training(cfg: DictConfig):
                 file=log_file_handle,
                 flush=True,
             )
+            if resume_payload:
+                print(
+                    f"Resume/rollback: checkpoint step {global_step}; remote history watermark {getattr(wb, 'watermark', -1)}",
+                    file=log_file_handle,
+                    flush=True,
+                )
         except Exception as exc:
             output_error = f"{type(exc).__name__}: {exc}"
     _raise_rank_errors(output_error, accelerator, "Opening training log failed")
@@ -1614,23 +1683,99 @@ def run_training(cfg: DictConfig):
         # linear
         return t0 + (t1 - t0) * (float(step) / float(T))
 
-    epoch = 0
+    epoch = progress.rank_state["epoch"] if progress else 0
+    batches_in_pass = progress.rank_state["batches_in_epoch"] if progress else 0
+    loader_generator_state = (
+        progress.rank_state["loader_generator_state"]
+        if progress
+        else torch.Generator().manual_seed(seed).get_state()
+    )
+    if progress:
+        total_tokens, total_residues = (
+            progress.executed_positions,
+            progress.residues_seen,
+        )
+        saved = progress.rank_state["logging"]
+        running_loss = saved["running_loss"]
+        running_updates = saved["running_updates"]
+        running_cls_loss, running_cls_count = (
+            saved["running_cls_loss"],
+            saved["running_cls_count"],
+        )
+        running_fape_loss, running_fape_count = (
+            saved["running_fape_loss"],
+            saved["running_fape_count"],
+        )
+        running_pred_nan_frac_sum, running_pred_nan_frac_count = (
+            saved["running_pred_nan_frac_sum"],
+            saved["running_pred_nan_frac_count"],
+        )
+        running_masked_acc_sum, running_masked_acc_count = (
+            saved["running_masked_acc_sum"],
+            saved["running_masked_acc_count"],
+        )
+        total_missing_structure, total_noncanonical_sequence = (
+            saved["total_missing_structure"],
+            saved["total_noncanonical_sequence"],
+        )
+        mdlm_running = saved["mdlm_running"]
+
+    def checkpoint_state():
+        return {
+            "signature": signature,
+            "wandb_run_id": wandb_run_id,
+            "local": {
+                "epoch": epoch,
+                "batches_in_epoch": batches_in_pass,
+                "loader_generator_state": loader_generator_state,
+                "logging": {
+                    "running_loss": running_loss,
+                    "running_updates": running_updates,
+                    "running_cls_loss": running_cls_loss,
+                    "running_cls_count": running_cls_count,
+                    "running_fape_loss": running_fape_loss,
+                    "running_fape_count": running_fape_count,
+                    "running_pred_nan_frac_sum": running_pred_nan_frac_sum,
+                    "running_pred_nan_frac_count": running_pred_nan_frac_count,
+                    "running_masked_acc_sum": running_masked_acc_sum,
+                    "running_masked_acc_count": running_masked_acc_count,
+                    "total_missing_structure": total_missing_structure,
+                    "total_noncanonical_sequence": total_noncanonical_sequence,
+                    "mdlm_running": mdlm_running,
+                },
+            },
+        }
+
     epoch_limit = cfg.train.get("epochs")
     device = _get_model_device(model, accelerator)
     world_size = accelerator.num_processes if accelerator else 1
     optimizer.zero_grad(set_to_none=True)
     while global_step < max_steps and (epoch_limit is None or epoch < int(epoch_limit)):
-        set_epoch = getattr(train_loader.sampler, "set_epoch", None)
-        if callable(set_epoch):
-            set_epoch(epoch)
-        epoch += 1
-        batches_in_pass = 0
+        replay_error = None
+        try:
+            if progress:
+                stream = resume_stream
+                restore_rng_state(progress.rank_state["rng"])
+                progress = None
+                resume_stream = None
+            else:
+                stream, loader_generator_state = epoch_iterator(
+                    train_loader,
+                    epoch=epoch,
+                    consumed=0,
+                    seed=seed,
+                    rank=accelerator.process_index if accelerator else 0,
+                )
+        except Exception as exc:
+            replay_error = f"{type(exc).__name__}: {exc}"
+        _raise_rank_errors(replay_error, accelerator, "Replaying training data failed")
+        resumed_batches = batches_in_pass
         updates_before_pass = global_step
         eligible_windows_in_pass = 0
-        for window in iter_windows(train_loader, grad_accum_steps, accelerator):
+        for window in iter_windows(stream, grad_accum_steps, accelerator):
             batches_in_pass += len(window)
             current_step = global_step + 1
-            current_epoch = (epoch - 1) + batches_in_pass / max(1, len(train_loader))
+            current_epoch = epoch + batches_in_pass / max(1, len(train_loader))
             active_fape = (
                 decoder is not None
                 and want_fape
@@ -1647,7 +1792,7 @@ def run_training(cfg: DictConfig):
                             [
                                 seed,
                                 "train",
-                                epoch - 1,
+                                epoch,
                                 (micro_step + micro_index)
                                 * cfg.data.batch_size
                                 * world_size
@@ -1908,11 +2053,12 @@ def run_training(cfg: DictConfig):
                     running_fape_loss += float(sums[1])
                     running_fape_count += global_structures
 
+            running_updates += 1
             # logging
             if is_mdlm and current_step % log_interval == 0 and is_main:
                 cumulative_flops = compute_flops_6n(num_params, total_tokens)
                 payload = {
-                    "train/diffusion_loss": running_loss / log_interval,
+                    "train/diffusion_loss": running_loss / running_updates,
                     "train/micro_step": micro_step,
                     "train/residues_seen": total_residues,
                     "train/executed_positions": total_tokens,
@@ -1953,13 +2099,14 @@ def run_training(cfg: DictConfig):
                 if wb is not None:
                     wb.log(payload, step=current_step)
                 running_loss = 0.0
+                running_updates = 0
                 mdlm_running.zero_()
             if not is_mdlm and current_step % log_interval == 0 and is_main:
                 acc = running_masked_acc_sum / max(1, running_masked_acc_count)
                 lr = scheduler.get_last_lr()[0]
 
                 # compute averages over the current log interval
-                avg_total_loss = running_loss / max(1, log_interval)
+                avg_total_loss = running_loss / running_updates
                 avg_cls_loss = (
                     running_cls_loss / float(max(1, running_cls_count))
                     if running_cls_count > 0
@@ -2079,6 +2226,7 @@ def run_training(cfg: DictConfig):
 
                 # reset accumulators for the next log interval
                 running_loss = 0.0
+                running_updates = 0
                 running_cls_loss = 0.0
                 running_cls_count = 0
                 running_fape_loss = 0.0
@@ -2132,6 +2280,9 @@ def run_training(cfg: DictConfig):
                     all_eval_metrics, current_step, current_epoch, eval_train_flops
                 )
 
+            _raise_rank_errors(
+                getattr(wb, "error", None), accelerator, "W&B logging failed"
+            )
             global_step += 1
             console.step(1)
             # checkpointing
@@ -2142,63 +2293,58 @@ def run_training(cfg: DictConfig):
                 and (global_step % int(ckpt_steps) == 0)
             ):
                 step_path = io_dirs["checkpoints"] / f"step_{global_step:08d}.pt"
+                _save_checkpoint(
+                    step_path,
+                    model=model,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    global_step=global_step,
+                    cfg=cfg,
+                    accelerator=accelerator,
+                    micro_step=micro_step,
+                    residues_seen=total_residues,
+                    executed_positions=total_tokens,
+                    training_state=checkpoint_state(),
+                )
                 checkpoint_error = None
                 if is_main:
                     try:
-                        _save_checkpoint(
-                            step_path,
-                            model=model,
-                            optimizer=optimizer,
-                            scheduler=scheduler,
-                            global_step=global_step,
-                            cfg=cfg,
-                            accelerator=accelerator,
-                            micro_step=micro_step,
-                            residues_seen=total_residues,
-                            executed_positions=total_tokens,
-                        )
                         with _atomic_destination(
                             io_dirs["checkpoints"] / "latest.pt"
                         ) as temporary:
                             shutil.copyfile(step_path, temporary)
                     except Exception as exc:
                         checkpoint_error = f"{type(exc).__name__}: {exc}"
-                errors = (
-                    gather_object([checkpoint_error])
-                    if accelerator
-                    else [checkpoint_error]
-                )
-                if any(errors):
-                    raise RuntimeError(f"Checkpoint failed: {errors}")
+                _raise_rank_errors(checkpoint_error, accelerator, "Checkpoint failed")
             if global_step >= max_steps:
                 break
         if batches_in_pass == 0:
             raise RuntimeError("Training loader produced no complete batches")
-        if global_step == updates_before_pass and (
-            not is_mdlm or eligible_windows_in_pass == 0
+        if (
+            not resumed_batches
+            and global_step == updates_before_pass
+            and (not is_mdlm or eligible_windows_in_pass == 0)
         ):
             raise RuntimeError("Training pass made no successful optimizer update")
+        if global_step < max_steps:
+            epoch += 1
+            batches_in_pass = 0
 
-    checkpoint_error = None
-    if is_main:
-        try:
-            _save_checkpoint(
-                io_dirs["model"] / "final.pt",
-                model=model,
-                optimizer=optimizer,
-                scheduler=scheduler,
-                global_step=global_step,
-                micro_step=micro_step,
-                residues_seen=total_residues,
-                executed_positions=total_tokens,
-                cfg=cfg,
-                accelerator=accelerator,
-            )
-        except Exception as exc:
-            checkpoint_error = f"{type(exc).__name__}: {exc}"
-    errors = gather_object([checkpoint_error]) if accelerator else [checkpoint_error]
-    if any(errors):
-        raise RuntimeError(f"Final checkpoint failed: {errors}")
+    if progress:
+        restore_rng_state(progress.rank_state["rng"])
+    _save_checkpoint(
+        io_dirs["model"] / "final.pt",
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        global_step=global_step,
+        micro_step=micro_step,
+        residues_seen=total_residues,
+        executed_positions=total_tokens,
+        cfg=cfg,
+        accelerator=accelerator,
+        training_state=checkpoint_state(),
+    )
     if is_main:
         console.close()
         console.print("Training complete.")

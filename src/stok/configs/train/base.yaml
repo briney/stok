@@ -29,6 +29,7 @@ grad_clip_norm: 1.0
 
 # IO paths
 project_path: null
+resume_from: null  # complete version-2 continuation with the original budget
 
 # logging
 wandb:
