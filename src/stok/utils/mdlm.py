@@ -132,6 +132,57 @@ def _generator(seed: int, purpose: str) -> torch.Generator:
     return torch.Generator().manual_seed(stable_seed([seed, purpose]))
 
 
+def validate_mdlm_config(config: DictConfig) -> None:
+    """Validate corruption and modality weights before creating run artifacts."""
+    weights = config.regime_weights
+    raw = [float(weights.get(name, 0)) for name in REGIMES]
+    if (
+        set(weights) - set(REGIMES)
+        or any(not math.isfinite(w) or w < 0 for w in raw)
+        or not max(raw)
+    ):
+        raise ValueError(
+            "MDLM regime_weights must name supported regimes and be finite, nonnegative and nonzero"
+        )
+    if config.placement not in {"token", "span"}:
+        raise ValueError("Unsupported MDLM placement")
+    if not math.isfinite(float(config.span_mean)) or float(config.span_mean) < 1:
+        raise ValueError("MDLM span_mean must be finite and >= 1")
+    p_min = float(config.noise.min_mask_probability)
+    if not math.isfinite(p_min) or not 0 < p_min < 1:
+        raise ValueError("MDLM min_mask_probability must be finite and in (0,1)")
+    t_min = time_from_mask_probability(
+        torch.tensor(p_min, dtype=torch.float64),
+        name=config.noise.name,
+        power=float(config.noise.power),
+    )
+    if (
+        not 0
+        < float(t_min)
+        < float(torch.nextafter(torch.ones_like(t_min), torch.zeros_like(t_min)))
+    ):
+        raise ValueError("MDLM minimum noise time exceeds numerical support")
+    # Corruption-only callers need not specify loss weighting.
+    seq, struct = (
+        float(config.get("sequence_loss_weight", 1)),
+        float(config.get("structure_loss_weight", 1)),
+    )
+    if any(not math.isfinite(w) or w < 0 for w in (seq, struct)):
+        raise ValueError("MDLM loss weights must be finite and nonnegative")
+    for regime, enabled in zip(REGIMES, raw):
+        active = (
+            struct
+            if regime == "structure_only"
+            else seq
+            if regime == "sequence_only"
+            else seq + struct
+        )
+        if enabled and active <= 0:
+            raise ValueError(
+                f"MDLM enabled regime {regime} needs a positively weighted modality"
+            )
+
+
 def corrupt_mdlm_batch(
     batch: "MDLMBatch",
     config: DictConfig,
@@ -155,30 +206,23 @@ def corrupt_mdlm_batch(
         or not 0 <= mask_probability <= 1
     ):
         raise ValueError("MDLM diagnostic regime/probability is invalid")
-    weights = config.regime_weights
-    if set(weights) - set(REGIMES):
-        raise ValueError("Unsupported MDLM regime in regime_weights")
-    raw_weights = [float(weights.get(name, 0)) for name in REGIMES]
-    if any(not math.isfinite(w) or w < 0 for w in raw_weights) or not max(raw_weights):
-        raise ValueError("MDLM regime_weights must be finite, nonnegative and nonzero")
-    weights = torch.tensor(raw_weights, dtype=torch.float64)
+    validate_mdlm_config(config)
+    weights = torch.tensor(
+        [float(config.regime_weights.get(name, 0)) for name in REGIMES],
+        dtype=torch.float64,
+    )
     weights = weights / weights.max()
     placement = config.placement if placement is None else placement
     if placement not in {"token", "span"}:
         raise ValueError(f"Unsupported MDLM placement: {placement}")
     span_mean = float(config.span_mean)
-    if not math.isfinite(span_mean) or span_mean < 1:
-        raise ValueError("MDLM span_mean must be finite and >= 1")
     name, power = config.noise.name, float(config.noise.power)
-    p_min = float(config.noise.min_mask_probability)
-    if not math.isfinite(p_min) or not 0 < p_min < 1:
-        raise ValueError("MDLM min_mask_probability must be finite and in (0,1)")
     t_min = time_from_mask_probability(
-        torch.tensor(p_min, dtype=torch.float64), name=name, power=power
+        torch.tensor(float(config.noise.min_mask_probability), dtype=torch.float64),
+        name=name,
+        power=power,
     )
     t_upper = torch.nextafter(torch.ones_like(t_min), torch.zeros_like(t_min))
-    if not 0 < float(t_min) < float(t_upper):
-        raise ValueError("MDLM minimum noise time exceeds numerical support")
     sequence = batch["sequence_tokens"].clone()
     structure = batch["structure_tokens"].clone()
     if sequence.ndim != 2 or structure.shape != sequence.shape or not sequence.shape[0]:
@@ -256,4 +300,101 @@ def corrupt_mdlm_batch(
         "mask_probability": torch.stack(probabilities).to(sequence.device),
         "weight": torch.stack(loss_weights).to(sequence.device),
         "regimes": regimes,
+    }
+
+
+class MDLMLossTerms(TypedDict):
+    weighted_sum: Tensor
+    ce_sum: Tensor
+    correct: Tensor
+    masked_count: Tensor
+    eligible_count: Tensor
+
+
+def mdlm_loss_terms(
+    outputs: dict[str, Tensor],
+    batch: "MDLMBatch",
+    corruption: MDLMCorruption,
+    *,
+    canonical_aa_ids: Tensor,
+) -> MDLMLossTerms:
+    """Masked CE numerators; normalization uses pre-corruption eligible cells."""
+    shape = batch["sequence_tokens"].shape
+    eligible, masked = corruption["eligible"], corruption["masked"]
+    if (
+        eligible.shape != (*shape, 2)
+        or masked.shape != eligible.shape
+        or eligible.dtype != torch.bool
+        or masked.dtype != torch.bool
+        or (masked & ~eligible).any()
+    ):
+        raise ValueError("MDLM loss requires aligned eligible/masked cells")
+    available = torch.stack((batch["sequence_valid"], batch["structure_valid"]), -1)
+    if (eligible & ~(available & batch["residue_mask"][..., None])).any():
+        raise ValueError("MDLM eligible cells must be available residue targets")
+    weight = corruption["weight"]
+    if (
+        weight.shape != shape[:1]
+        or not torch.isfinite(weight).all()
+        or (weight < 0).any()
+    ):
+        raise ValueError(
+            "MDLM diffusion weights must be finite nonnegative per-sample values"
+        )
+    sequence = outputs["sequence_logits"]
+    structure = outputs["structure_logits"]
+    if (
+        sequence.shape[:2] != shape
+        or sequence.ndim != 3
+        or structure.shape != (*shape, batch["codebook_size"])
+        or canonical_aa_ids.ndim != 1
+        or not canonical_aa_ids.numel()
+        or canonical_aa_ids.dtype != torch.long
+        or (canonical_aa_ids < 0).any()
+        or (canonical_aa_ids >= sequence.shape[-1]).any()
+        or canonical_aa_ids.unique().numel() != canonical_aa_ids.numel()
+    ):
+        raise ValueError("MDLM output/canonical vocabulary shapes are invalid")
+    aa = canonical_aa_ids.to(sequence.device)
+    remap = torch.full(
+        (sequence.shape[-1],), -1, device=sequence.device, dtype=torch.long
+    )
+    remap[aa] = torch.arange(len(aa), device=aa.device)
+    weighted_sums, ce_sums, correct = [], [], []
+    with torch.autocast(sequence.device.type, enabled=False):
+        for track, (logits, targets) in enumerate(
+            (
+                (sequence, batch["sequence_tokens"]),
+                (structure, batch["structure_tokens"]),
+            )
+        ):
+            valid, selected = eligible[..., track], masked[..., track]
+            # Validate unmasked targets/predictions too: masking must not hide bad inputs.
+            if not torch.isfinite(
+                logits[available[..., track] & batch["residue_mask"]]
+            ).all():
+                raise FloatingPointError("Nonfinite valid MDLM predictions")
+            target = targets[valid]
+            if ((target < 0) | (target >= logits.shape[-1])).any():
+                raise ValueError("MDLM target IDs are outside the output vocabulary")
+            if track == 0:
+                if (remap[target] < 0).any():
+                    raise ValueError("MDLM sequence target is not canonical")
+                predictions = logits[selected].float().index_select(-1, aa)
+                target = remap[targets[selected]]
+            else:
+                predictions, target = logits[selected].float(), targets[selected]
+            # Empty reductions connect both heads, including empty local DDP ranks.
+            ce = torch.nn.functional.cross_entropy(
+                predictions, target, reduction="none"
+            )
+            ce_sums.append(ce.sum())
+            weighted_sums.append((ce * weight[:, None].expand(shape)[selected]).sum())
+            correct.append((predictions.argmax(-1) == target).sum())
+    return {
+        "weighted_sum": torch.stack(weighted_sums),
+        "ce_sum": torch.stack(ce_sums),
+        "correct": torch.stack(correct),
+        "masked_count": masked.sum((0, 1)),
+        "eligible_count": eligible.sum((0, 1)),
     }

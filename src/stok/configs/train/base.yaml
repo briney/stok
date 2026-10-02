@@ -23,6 +23,7 @@ log_steps: 50
 checkpoint_steps: null
 
 # training mechanics
+precision: null  # null inherits Accelerate; MDLM experiments select it explicitly
 grad_accum_steps: 1
 grad_clip_norm: 1.0
 

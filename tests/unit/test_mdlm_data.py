@@ -9,58 +9,13 @@ import pytest
 import torch
 
 from stok.data.dataset import IterableTokenizedDataset, TokenizedDataset
-from stok.data.structure_export import structure_export_schema
-from stok.utils.pretrained import file_sha256, json_sha256, state_sha256
+from stok.utils.pretrained import file_sha256, state_sha256
 from stok.utils.tokenizer import DEFAULT_VOCAB, Tokenizer
-from tests.utils.synthetic import make_mdlm_rows
+from tests.utils.synthetic import make_mdlm_rows, write_dataset
 
 C = 32
 CODEBOOK = torch.arange(C * 2, dtype=torch.float32).reshape(C, 2)
 
-
-def write_dataset(path, rows, *, codebook=CODEBOOK, policy=None):
-    path.mkdir()
-    provenance = {
-        "schema_version": 1,
-        "tokenizer": {
-            "codebook_size": C,
-            "codebook_sha256": state_sha256({"codebook": codebook}),
-            "encoder_state_sha256": "local-fixture",
-        },
-        "policy": policy or {"sequence_mode": "native", "context_scope": "full_chain"},
-        "execution": {"device": "cpu", "dtype": "float32"},
-    }
-    metadata = {
-        b"stok.provenance": json.dumps(provenance, sort_keys=True).encode(),
-        b"stok.tokenizer_sha256": json_sha256(provenance["tokenizer"]).encode(),
-        b"stok.policy_sha256": json_sha256(provenance["policy"]).encode(),
-    }
-    shard = path / "part-000000.parquet"
-    pq.write_table(
-        pa.Table.from_pylist(
-            rows,
-            schema=structure_export_schema(include_coordinates=True, metadata=metadata),
-        ),
-        shard,
-    )
-    counts = {
-        "row_count": len(rows),
-        "residue_count": sum(len(row["sequence"]) for row in rows),
-        "null_count": sum(row["structure_tokens"].count(None) for row in rows),
-    }
-    (path / "rejections.jsonl").write_text("")
-    manifest = {
-        "schema_version": 1,
-        "status": "complete",
-        "provenance": provenance,
-        "tokenizer_sha256": metadata[b"stok.tokenizer_sha256"].decode(),
-        "policy_sha256": metadata[b"stok.policy_sha256"].decode(),
-        "shards": [{"path": shard.name, "sha256": file_sha256(shard), **counts}],
-        "rejections_sha256": file_sha256(path / "rejections.jsonl"),
-        **counts,
-    }
-    (path / "manifest.json").write_text(json.dumps(manifest))
-    return path
 
 
 def write_jsonl(path, rows):
