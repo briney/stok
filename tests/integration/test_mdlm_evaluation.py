@@ -398,6 +398,21 @@ def test_frozen_population_fails_closed(bad):
         evaluate(FixedModel(), {"validation": loader(population)}, cfg)
 
 
+@pytest.mark.parametrize("invalid", ["settings", "codebook_size"])
+def test_invalid_evaluation_metadata_uses_configuration_error_boundary(invalid):
+    population, model = rows(1), FixedModel()
+    cfg = config(population)
+    if invalid == "settings":
+        cfg.train.eval.mdlm = []
+        message = "MDLM evaluation config must be a mapping"
+    else:
+        model.codebook_size = True
+        message = "MDLM evaluation codebook_size must be a positive integer"
+    with pytest.raises(RuntimeError, match=f"configuration:.*{message}"):
+        evaluate(model, {"validation": loader(population)}, cfg)
+    assert model.calls == []
+
+
 def _distributed_probe(path, count, fail):
     from accelerate import Accelerator
     from stok.eval.mdlm import evaluate_mdlm

@@ -3,13 +3,14 @@
 import json
 from pickle import UnpicklingError
 from pathlib import Path
+from typing import cast
 
 import click
 from omegaconf import OmegaConf
 from omegaconf.errors import OmegaConfBaseException
 import torch
 
-from stok.data.mdlm import CANONICAL_AA, prepare_mdlm_batch
+from stok.data.mdlm import CANONICAL_AA, MDLMBatch, prepare_mdlm_batch
 from stok.eval.mdlm import validate_mdlm_decoder
 from stok.models.decoder import load_pretrained_decoder
 from stok.models.mdlm import STokMDLM
@@ -114,7 +115,8 @@ def sample_cmd(
         model.load_state_dict(payload["model"], strict=True)
         model.mdlm_regime_weights = dict(cfg.train.mdlm.get("regime_weights") or {})
         model.to(device)
-        rows, ids = [], set()
+        rows: list[tuple[str, int, MDLMBatch]] = []
+        ids: set[str] = set()
         for line_number, line in enumerate(manifest.read_text().splitlines(), 1):
             row = json.loads(line)
             if not isinstance(row, dict):
@@ -205,10 +207,13 @@ def sample_cmd(
         # ponytail: buffer JSONL; stream into a temporary file if large manifests need it.
         results = []
         for sequence_id, length, batch in rows:
-            batch = {
-                name: value.to(device) if isinstance(value, torch.Tensor) else value
-                for name, value in batch.items()
-            }
+            batch = cast(
+                MDLMBatch,
+                {
+                    name: value.to(device) if isinstance(value, torch.Tensor) else value
+                    for name, value in batch.items()
+                },
+            )
             generate = batch["residue_mask"][..., None].expand(-1, -1, 2).clone()
             if mode == "folding":
                 generate[..., 0] = False
@@ -247,7 +252,7 @@ def sample_cmd(
                 ],
                 "provenance": {**provenance, "sample_seed": local_seed},
             }
-            if decode:
+            if decoder is not None:
                 available = batch["residue_mask"] & sampled["structure_tokens"].lt(
                     len(codebook)
                 )

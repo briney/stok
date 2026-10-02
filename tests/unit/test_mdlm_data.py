@@ -17,7 +17,6 @@ C = 32
 CODEBOOK = torch.arange(C * 2, dtype=torch.float32).reshape(C, 2)
 
 
-
 def write_jsonl(path, rows):
     path.write_text("".join(json.dumps(row) + "\n" for row in rows))
     return path

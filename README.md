@@ -1036,6 +1036,10 @@ execution, learning rate, and original budget unchanged. Output/log/evaluation/
 checkpoint cadence changes are allowed. Populated MDLM run directories require
 an explicit complete version-2 resume checkpoint.
 
+CPU execution records a null cuDNN version without querying CUDA. Earlier internal
+CPU checkpoints with a non-null cuDNN version fail the strict resume signature
+check and require a fresh run; GPU execution signatures are unchanged.
+
 Generate biological tokens using a complete version-2 MDLM checkpoint:
 
 ```bash

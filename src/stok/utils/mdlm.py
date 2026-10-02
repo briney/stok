@@ -200,7 +200,7 @@ def corrupt_mdlm_batch(
         raise ValueError(
             "MDLM diagnostic overrides require both regime and mask_probability"
         )
-    if diagnostic and (
+    if mask_probability is not None and (
         regime not in REGIMES
         or not math.isfinite(mask_probability)
         or not 0 <= mask_probability <= 1
@@ -259,7 +259,7 @@ def corrupt_mdlm_batch(
                 eligible[i, :, 0] = False
             elif selected == "sequence_only":
                 eligible[i, :, 1] = False
-            if diagnostic:
+            if mask_probability is not None:
                 p, weight = torch.tensor(float(mask_probability)), torch.tensor(1.0)
             else:
                 t = t_min + (1 - t_min) * torch.rand(

@@ -304,6 +304,19 @@ def test_rejects_invalid_sampling_contract(bad):
         run(model, batch, aa, generate, ids=ids, **kwargs)
 
 
+@pytest.mark.parametrize("attribute", ["embed", "pad_id", "codebook_size"])
+def test_invalid_model_metadata_fails_before_forward(attribute):
+    model, batch, aa = fixture()
+    value = getattr(model, attribute)
+    setattr(
+        model, attribute, nn.Identity() if attribute == "embed" else torch.tensor(value)
+    )
+    generate = batch["residue_mask"][..., None].expand(-1, -1, 2).clone()
+    with pytest.raises(ValueError, match="model"):
+        run(model, batch, aa, generate)
+    assert model.calls == []
+
+
 @pytest.mark.parametrize(
     "weights",
     [

@@ -3,7 +3,7 @@
 from contextlib import contextmanager
 from importlib.metadata import version
 from pathlib import Path
-from typing import TypedDict
+from typing import TypedDict, cast
 import os
 import math
 import platform
@@ -21,11 +21,12 @@ from stok.utils.pretrained import file_sha256, state_sha256
 
 def collect_rng_state(*, device=None):
     """Scope training snapshots to its device; generic snapshots preserve initialized CUDA."""
-    numpy = list(np.random.get_state())
-    numpy[1] = numpy[1].tolist()
+    numpy = cast(
+        tuple[str, np.ndarray, int, int, float], np.random.get_state(legacy=True)
+    )
     state = {
         "python": random.getstate(),
-        "numpy": numpy,
+        "numpy": [numpy[0], numpy[1].tolist(), *numpy[2:]],
         "torch": torch.get_rng_state(),
     }
     if (device is None and torch.cuda.is_initialized()) or (
@@ -67,6 +68,8 @@ def rank_errors(error, accelerator, context):
 
 def resume_signature(cfg, *, sources, codebook, accelerator, training_decoder=None):
     config = OmegaConf.to_container(cfg, resolve=True)
+    if not isinstance(config, dict):
+        raise ValueError("Resume configuration must resolve to a mapping")
     train, data = config["train"], config["data"]
     for key in (
         "project_path",
@@ -84,9 +87,14 @@ def resume_signature(cfg, *, sources, codebook, accelerator, training_decoder=No
     data.pop("eval", None)
     # Decoder settings affect training only when geometry supervision is active.
     uses_decoder = bool(train.get("fape", {}).get("enabled"))
-    if uses_decoder and training_decoder is None:
-        raise ValueError("FAPE resume identity requires the loaded training decoder")
-    if not uses_decoder:
+    decoder_identity = None
+    if uses_decoder:
+        if training_decoder is None:
+            raise ValueError(
+                "FAPE resume identity requires the loaded training decoder"
+            )
+        decoder_identity = state_sha256(training_decoder.state_dict())
+    else:
         config["model"].pop("decoder", None)
     config.pop("print_model_summary", None)
     identities = []
@@ -107,9 +115,7 @@ def resume_signature(cfg, *, sources, codebook, accelerator, training_decoder=No
         "config": config,
         "sources": identities,
         "source_order": sources,
-        "training_decoder": state_sha256(training_decoder.state_dict())
-        if uses_decoder
-        else None,
+        "training_decoder": decoder_identity,
         "mdlm_identity": OmegaConf.select(
             cfg, "train.mdlm_identity.training_signature"
         ),
@@ -135,7 +141,9 @@ def resume_signature(cfg, *, sources, codebook, accelerator, training_decoder=No
             if accelerator and accelerator.device.type == "cuda"
             else [],
             "cuda": torch.version.cuda,
-            "cudnn": torch.backends.cudnn.version(),
+            "cudnn": torch.backends.cudnn.version()
+            if accelerator and accelerator.device.type == "cuda"
+            else None,
             "deterministic": torch.are_deterministic_algorithms_enabled(),
             "tf32": torch.backends.cuda.matmul.allow_tf32,
         },

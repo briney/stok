@@ -6,7 +6,7 @@ import os
 import shutil
 import sys
 from pathlib import Path
-from typing import Any, Optional, cast
+from typing import Any, Optional, Sequence, cast
 
 import numpy as np
 import torch
@@ -39,8 +39,14 @@ from stok.eval.registry import METRIC_REGISTRY, resolve_eval_metrics
 from stok.models.decoder import load_pretrained_decoder
 from stok.models.stok import STokModel
 from stok.models.mdlm import STokMDLM
-from stok.data.mdlm import CANONICAL_AA, prepare_mdlm_batch, validate_mdlm_sources
+from stok.data.mdlm import (
+    CANONICAL_AA,
+    MDLMBatch,
+    prepare_mdlm_batch,
+    validate_mdlm_sources,
+)
 from stok.utils.mdlm import (
+    MDLMCorruption,
     corrupt_mdlm_batch,
     mdlm_loss_terms,
     stable_seed,
@@ -235,6 +241,7 @@ def _save_checkpoint(
             raise
         error = f"{type(exc).__name__}: {exc}"
     _raise_rank_errors(error, accelerator, "Collecting checkpoint state failed")
+    assert payload is not None
     if training_state is not None:
         payload.update(
             format_version=2,
@@ -255,7 +262,7 @@ def _save_checkpoint(
 
 
 def _load_pretrained_encoder(
-    model: STokModel,
+    model: nn.Module,
     checkpoint_path: str,
     *,
     accelerator,
@@ -1063,22 +1070,21 @@ def _maybe_init_wandb(
     import wandb
 
     options = cfg.train.wandb
-    init_kwargs = dict(
+    serialized_config = OmegaConf.to_container(cfg, resolve=True)
+    assert isinstance(serialized_config, dict)
+    run_id = resume_payload["wandb_run_id"] if resume_payload else None
+    run = wandb.init(
         project=options.get("project", "stok"),
         entity=options.get("entity"),
         group=options.get("group"),
         name=options.get("name"),
         tags=list(options.get("tags", [])),
-        config=OmegaConf.to_container(cfg, resolve=True),
+        config=cast(dict[str, Any], serialized_config),
+        mode=options.get("mode") or None,
+        dir=str(logs_dir) if logs_dir is not None else None,
+        id=run_id,
+        resume="must" if run_id else None,
     )
-    if options.get("mode"):
-        init_kwargs["mode"] = options.mode
-    if logs_dir is not None:
-        init_kwargs["dir"] = str(logs_dir)
-    run_id = resume_payload["wandb_run_id"] if resume_payload else None
-    if run_id:
-        init_kwargs.update(id=run_id, resume="must")
-    run = wandb.init(**init_kwargs)
     if run is None or (run_id and run.id != run_id):
         raise RuntimeError("W&B did not resume the recorded run ID")
     watermark = -1
@@ -1274,7 +1280,7 @@ def run_training(cfg: DictConfig):
             )
             codebook_size = codebook.shape[0]
             train_sources = {item["name"]: item for item in _parse_train_configs(cfg)}
-            cfg.train.mdlm_identity = validate_mdlm_sources(
+            mdlm_identity = validate_mdlm_sources(
                 train_sources,
                 _parse_eval_configs(cfg),
                 codebook=codebook,
@@ -1284,6 +1290,7 @@ def run_training(cfg: DictConfig):
                     cfg, "train.eval.mdlm.generation_cohort"
                 ),
             )
+            cfg.train.mdlm_identity = mdlm_identity
             mdlm_eval = resolve_mdlm_eval_config(cfg)
             train_loader, eval_loaders = _build_dataloaders(
                 cfg,
@@ -1318,7 +1325,7 @@ def run_training(cfg: DictConfig):
                         progress=is_main,
                     )
                     validate_mdlm_decoder(
-                        decoder, codebook, cfg.train.mdlm_identity.codebook_sha256
+                        decoder, codebook, mdlm_identity["codebook_sha256"]
                     )
             optimizer = AdamW(
                 model.parameters(),
@@ -1705,25 +1712,22 @@ def run_training(cfg: DictConfig):
     total_residues = 0
     total_missing_structure = 0
     total_noncanonical_sequence = 0
-    mdlm_weights = (
-        torch.tensor(
+    mdlm_weights = None
+    mdlm_tokenizer = None
+    canonical_ids = None
+    if is_mdlm:
+        mdlm_weights = torch.tensor(
             [
                 cfg.train.mdlm.get("sequence_loss_weight", 1),
                 cfg.train.mdlm.get("structure_loss_weight", 1),
             ],
             dtype=torch.float64,
         )
-        if is_mdlm
-        else None
-    )
-    if is_mdlm:
         mdlm_weights /= mdlm_weights.max()
-    mdlm_tokenizer = Tokenizer() if is_mdlm else None
-    canonical_ids = (
-        torch.tensor(mdlm_tokenizer.convert_tokens_to_ids(list(CANONICAL_AA)))
-        if is_mdlm
-        else None
-    )
+        mdlm_tokenizer = Tokenizer()
+        canonical_ids = torch.tensor(
+            mdlm_tokenizer.convert_tokens_to_ids(list(CANONICAL_AA))
+        )
     mdlm_running = torch.zeros(5, 2, dtype=torch.float64)
 
     # Gumbel temperature schedule (only for codebook objective)
@@ -1842,6 +1846,8 @@ def run_training(cfg: DictConfig):
             prepare_error = None
             if is_mdlm:
                 try:
+                    assert mdlm_tokenizer is not None
+                    assert codebook_size is not None
                     prepared = []
                     for micro_index, rows in enumerate(window):
                         occurrences = [
@@ -1859,7 +1865,7 @@ def run_training(cfg: DictConfig):
                             ]
                             for j, row in enumerate(rows)
                         ]
-                        batch = prepare_mdlm_batch(
+                        paired_batch = prepare_mdlm_batch(
                             rows,
                             mdlm_tokenizer,
                             max_len=int(cfg.data.max_len),
@@ -1868,13 +1874,13 @@ def run_training(cfg: DictConfig):
                             seeds=[stable_seed([*key, "crop"]) for key in occurrences],
                         )
                         corruption = corrupt_mdlm_batch(
-                            batch,
+                            paired_batch,
                             cfg.train.mdlm,
                             seeds=[
                                 stable_seed([*key, "corruption"]) for key in occurrences
                             ],
                         )
-                        prepared.append(batch)
+                        prepared.append(paired_batch)
                         corruptions.append(corruption)
                     window = prepared
                 except Exception as exc:
@@ -1882,6 +1888,7 @@ def run_training(cfg: DictConfig):
                 _raise_rank_errors(
                     prepare_error, accelerator, "Preparing MDLM window failed"
                 )
+                assert mdlm_weights is not None
                 local_eligible = sum(
                     (c["eligible"].sum((0, 1)) for c in corruptions),
                     torch.zeros(2, dtype=torch.long),
@@ -1964,25 +1971,33 @@ def run_training(cfg: DictConfig):
                     error = None
                     try:
                         if is_mdlm:
-                            batch = {
-                                key: value.to(device)
-                                if isinstance(value, torch.Tensor)
-                                else value
-                                for key, value in batch.items()
-                            }
-                            corruption = {
-                                key: value.to(device)
-                                if isinstance(value, torch.Tensor)
-                                else value
-                                for key, value in corruptions[micro_index].items()
-                            }
+                            assert canonical_ids is not None
+                            assert mdlm_weights is not None
+                            mdlm_batch = cast(
+                                MDLMBatch,
+                                {
+                                    key: value.to(device)
+                                    if isinstance(value, torch.Tensor)
+                                    else value
+                                    for key, value in batch.items()
+                                },
+                            )
+                            corruption = cast(
+                                MDLMCorruption,
+                                {
+                                    key: value.to(device)
+                                    if isinstance(value, torch.Tensor)
+                                    else value
+                                    for key, value in corruptions[micro_index].items()
+                                },
+                            )
                             outputs = model(
                                 sequence_tokens=corruption["sequence_tokens"],
                                 structure_tokens=corruption["structure_tokens"],
                             )
                             terms = mdlm_loss_terms(
                                 outputs,
-                                batch,
+                                mdlm_batch,
                                 corruption,
                                 canonical_aa_ids=canonical_ids,
                             )
@@ -1990,8 +2005,13 @@ def run_training(cfg: DictConfig):
                                 terms["weighted_sum"] * mdlm_weights.to(device)
                             ).sum() * (world_size / denominator)
                         else:
-                            tokens, labels = (t.to(device) for t in batch[:2])
-                            coords = batch[2].to(device) if len(batch) == 3 else None
+                            legacy_batch = cast(Sequence[torch.Tensor], batch)
+                            tokens, labels = (t.to(device) for t in legacy_batch[:2])
+                            coords = (
+                                legacy_batch[2].to(device)
+                                if len(legacy_batch) == 3
+                                else None
+                            )
                             outputs = model(tokens=tokens)
                             ce_sum = token_ce_loss(
                                 outputs["logits"], labels, ignore_index, reduction="sum"
@@ -2083,6 +2103,7 @@ def run_training(cfg: DictConfig):
                 continue
             scheduler.step()
             if is_mdlm:
+                assert mdlm_weights is not None
                 if accelerator:
                     window_mdlm = accelerator.reduce(window_mdlm, reduction="sum")
                 running_loss += (
@@ -2321,6 +2342,7 @@ def run_training(cfg: DictConfig):
                 and current_step % eval_interval == 0
                 and len(eval_loaders) > 0
             ):
+                assert evaluator is not None
                 all_eval_metrics = evaluator.evaluate_all(eval_loaders)
 
                 # Add epoch to metrics if available

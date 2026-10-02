@@ -24,6 +24,8 @@ __all__ = [
 
 
 class GeometricDecoder(nn.Module):
+    codebook_sha256: str | None
+
     def __init__(
         self,
         d_model: int,

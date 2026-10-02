@@ -443,7 +443,7 @@ def init(**kwargs):
     random.random(); np.random.rand(); torch.rand(7)
     record['init'].append(kwargs)
     if os.environ.get('WB_INIT_FAIL'): raise RuntimeError('visible W&B initialization failure')
-    wb.run = SimpleNamespace(id=kwargs.get('id', 'fixed-run-id'), step=int(os.environ.get('WB_WATERMARK', '-1'))+1, summary=record['summary'])
+    wb.run = SimpleNamespace(id=kwargs.get('id') or 'fixed-run-id', step=int(os.environ.get('WB_WATERMARK', '-1'))+1, summary=record['summary'])
     if os.environ.get('WB_HISTORY_FAIL'):
         class Step:
             def __int__(self): raise RuntimeError('visible W&B history inspection failure')

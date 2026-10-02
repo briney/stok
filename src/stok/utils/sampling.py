@@ -133,18 +133,27 @@ def sample_mdlm(
     if len(seeds) != shape[0] or any(type(seed) is not int for seed in seeds):
         raise ValueError("MDLM sampling requires one integer seed per sample")
     mask_id, size = batch["sequence_mask_id"], batch["codebook_size"]
-    vocab = model.embed.num_embeddings
+    embed = getattr(model, "embed", None)
+    pad_id = getattr(model, "pad_id", None)
+    model_size = getattr(model, "codebook_size", None)
+    if (
+        not isinstance(embed, nn.Embedding)
+        or type(pad_id) is not int
+        or type(model_size) is not int
+    ):
+        raise ValueError("MDLM model embedding or vocabulary metadata is invalid")
+    vocab = embed.num_embeddings
     if (
         type(mask_id) is not int
         or not 0 <= mask_id < vocab
-        or mask_id == model.pad_id
+        or mask_id == pad_id
         or type(size) is not int
         or size < 1
-        or size != model.codebook_size
+        or size != model_size
         or ((sequence < 0) | (sequence >= vocab)).any()
         or ((structure < 0) | (structure >= size + 3)).any()
-        or (sequence.eq(model.pad_id) & structure.ne(size)).any()
-        or (batch["residue_mask"] & sequence.eq(model.pad_id)).any()
+        or (sequence.eq(pad_id) & structure.ne(size)).any()
+        or (batch["residue_mask"] & sequence.eq(pad_id)).any()
         or (sequence.eq(mask_id) & ~generate_mask[..., 0]).any()
         or (structure.eq(size + 1) & ~generate_mask[..., 1]).any()
     ):
@@ -156,7 +165,7 @@ def sample_mdlm(
         or not aa.numel()
         or ((aa < 0) | (aa >= vocab)).any()
         or aa.unique().numel() != aa.numel()
-        or ((aa == mask_id) | (aa == model.pad_id)).any()
+        or ((aa == mask_id) | (aa == pad_id)).any()
         or torch.isin(aa, sequence[~batch["residue_mask"]].to(aa.device)).any()
     ):
         raise ValueError(

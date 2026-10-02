@@ -330,6 +330,7 @@ def validate_mdlm_sources(
                         }
             except (OSError, KeyError, TypeError, ValueError) as error:
                 raise ValueError(f"{context}: {error}") from error
+    assert compatible is not None
     assignments = {}
     split_sha256 = None
     if split_manifest is not None:

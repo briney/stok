@@ -15,6 +15,9 @@ class STokMDLM(nn.Module):
     structure PAD at sequence BOS/EOS remains visible.
     """
 
+    structure_codebook: Tensor
+    mdlm_regime_weights: dict[str, float]
+
     def __init__(
         self,
         *,

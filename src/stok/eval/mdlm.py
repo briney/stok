@@ -4,13 +4,14 @@ from collections import Counter
 from collections.abc import Mapping
 from contextlib import ExitStack
 import math
+from typing import cast
 
 from accelerate.utils import gather_object
 from omegaconf import DictConfig, OmegaConf, open_dict
 import torch
 from torch.utils.data import DataLoader
 
-from stok.data.mdlm import CANONICAL_AA, _sample_key, prepare_mdlm_batch
+from stok.data.mdlm import CANONICAL_AA, MDLMBatch, _sample_key, prepare_mdlm_batch
 from stok.eval.evaluator import _get_model_device, _unwrap_model
 from stok.eval.metrics.structure import LDDTMetric, RMSDMetric, TMScoreMetric
 from stok.utils.decoding import decode_token_aligned_coords
@@ -81,7 +82,9 @@ def resolve_mdlm_eval_config(cfg: DictConfig) -> DictConfig:
         if raw_config is not None
         else {}
     )
-    resolved = OmegaConf.merge(defaults, provided)
+    if not isinstance(provided, dict):
+        raise ValueError("MDLM evaluation config must be a mapping")
+    resolved = cast(DictConfig, OmegaConf.merge(defaults, provided))
     # Case maps are whole benchmark definitions, rather than incremental overrides.
     for section in (resolved, resolved.generation):
         source = provided if section is resolved else provided.get("generation", {})
@@ -216,6 +219,13 @@ def evaluate_mdlm(
         run_generation = run_generation and settings.generation.enabled
         eval_model = _unwrap_model(model, accelerator)
         device = _get_model_device(model, accelerator)
+        if run_denoising or run_generation:
+            model_codebook_size = getattr(eval_model, "codebook_size", None)
+            if type(model_codebook_size) is not int or model_codebook_size < 1:
+                raise ValueError(
+                    "MDLM evaluation codebook_size must be a positive integer"
+                )
+            codebook_size = cast(int, model_codebook_size)
         if run_generation and settings.generation.decode:
             validate_mdlm_decoder(
                 decoder,
@@ -279,16 +289,19 @@ def evaluate_mdlm(
                             eval_rows,
                             tokenizer,
                             max_len=int(cfg.data.max_len),
-                            codebook_size=eval_model.codebook_size,
+                            codebook_size=codebook_size,
                             crop="center",
                             seeds=[0] * len(eval_rows),
                         )
-                        batch = {
-                            key: value.to(device)
-                            if isinstance(value, torch.Tensor)
-                            else value
-                            for key, value in batch.items()
-                        }
+                        batch = cast(
+                            MDLMBatch,
+                            {
+                                key: value.to(device)
+                                if isinstance(value, torch.Tensor)
+                                else value
+                                for key, value in batch.items()
+                            },
+                        )
                         populations[0] += len(eval_rows)
                         for index, (name, case) in enumerate(denoising_cases):
                             # This diagnostic config is fixed and never reads train.mdlm.
@@ -343,16 +356,19 @@ def evaluate_mdlm(
                             [row],
                             tokenizer,
                             max_len=int(cfg.data.max_len),
-                            codebook_size=eval_model.codebook_size,
+                            codebook_size=codebook_size,
                             crop="center",
                             seeds=[0],
                         )
-                        batch = {
-                            name: value.to(device)
-                            if isinstance(value, torch.Tensor)
-                            else value
-                            for name, value in batch.items()
-                        }
+                        batch = cast(
+                            MDLMBatch,
+                            {
+                                name: value.to(device)
+                                if isinstance(value, torch.Tensor)
+                                else value
+                                for name, value in batch.items()
+                            },
+                        )
                         for index, (name, case) in enumerate(generation_cases):
                             if case.regime.startswith("joint") and not joint_qualified:
                                 continue
@@ -386,13 +402,15 @@ def evaluate_mdlm(
                                 seeds=[seed],
                                 canonical_aa_ids=canonical,
                             )
-                            for track, tokens in enumerate(
-                                ("sequence_tokens", "structure_tokens")
+                            for track, (tokens, target) in enumerate(
+                                (
+                                    ("sequence_tokens", batch["sequence_tokens"]),
+                                    ("structure_tokens", batch["structure_tokens"]),
+                                )
                             ):
                                 condition = ~generate[..., track]
                                 generation[index, 0] += (
-                                    sampled[tokens][condition]
-                                    == batch[tokens][condition]
+                                    sampled[tokens][condition] == target[condition]
                                 ).sum()
                                 generation[index, 1] += condition.sum()
                                 completed = (
@@ -400,7 +418,7 @@ def evaluate_mdlm(
                                     if track == 0
                                     else (
                                         (sampled[tokens] >= 0)
-                                        & (sampled[tokens] < eval_model.codebook_size)
+                                        & (sampled[tokens] < codebook_size)
                                     )
                                 )
                                 generation[index, 2] += (

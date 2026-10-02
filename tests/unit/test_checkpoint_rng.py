@@ -5,9 +5,19 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from omegaconf import OmegaConf
 
 from stok.utils import checkpoint as ck
 from tests.integration.test_mdlm_training import mdlm_config, training_fixture
+
+
+def test_resume_signature_rejects_nonmapping_configuration():
+    with pytest.raises(
+        ValueError, match="Resume configuration must resolve to a mapping"
+    ):
+        ck.resume_signature(
+            OmegaConf.create([]), sources=[], codebook=None, accelerator=None
+        )
 
 
 @pytest.fixture
@@ -172,7 +182,10 @@ def test_complete_cuda_inventory_restores_active_device_one(cuda_resume, monkeyp
 
 
 @pytest.mark.parametrize("initialized", [False, True])
-def test_cpu_record_does_not_initialize_unused_cuda(tmp_path, monkeypatch, initialized):
+@pytest.mark.parametrize("with_accelerator", [False, True])
+def test_cpu_record_does_not_initialize_unused_cuda(
+    tmp_path, monkeypatch, initialized, with_accelerator
+):
     source, codebook = training_fixture(tmp_path)
     cfg = mdlm_config(tmp_path / "run", source, codebook)
 
@@ -183,10 +196,24 @@ def test_cpu_record_does_not_initialize_unused_cuda(tmp_path, monkeypatch, initi
     monkeypatch.setattr(torch.cuda, "is_initialized", lambda: initialized)
     monkeypatch.setattr(torch.cuda, "get_rng_state_all", forbidden)
     monkeypatch.setattr(torch.cuda, "_lazy_init", forbidden)
+    monkeypatch.setattr(torch.backends.cudnn, "version", forbidden)
     rng = ck.collect_rng_state(device=torch.device("cpu"))
     if not initialized:
         assert "cuda" not in ck.collect_rng_state()
-    signature = ck.resume_signature(cfg, sources=[], codebook=None, accelerator=None)
+    accelerator = (
+        SimpleNamespace(
+            device=torch.device("cpu"),
+            num_processes=1,
+            mixed_precision="no",
+            distributed_type=SimpleNamespace(name="NO"),
+        )
+        if with_accelerator
+        else None
+    )
+    signature = ck.resume_signature(
+        cfg, sources=[], codebook=None, accelerator=accelerator
+    )
     assert "cuda" not in rng
     assert signature["execution"]["cuda_rng_state_sizes"] == []
+    assert signature["execution"]["cudnn"] is None
     ck.restore_rng_state(rng)
