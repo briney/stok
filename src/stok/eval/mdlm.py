@@ -110,7 +110,11 @@ def resolve_mdlm_eval_config(cfg: DictConfig) -> DictConfig:
                     "MDLM evaluation probability must be explicit and in [0,1]"
                 )
     generation = resolved.generation
+    if generation.steps is None:
+        generation.enabled = False
     for name in ("steps", "sampling_steps", "max_samples"):
+        if name == "steps" and generation.steps is None:
+            continue
         if type(generation[name]) is not int or generation[name] < 1:
             raise ValueError(f"MDLM generation {name} must be a positive integer")
     if generation.max_samples > 16:

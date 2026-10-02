@@ -5,6 +5,7 @@ import click
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
+from stok.cli.sample import sample_cmd
 from stok.cli.smoke_test import run_smoke_test
 from stok.cli.tokenize import tokenize_structures_cmd
 
@@ -169,6 +170,7 @@ def train_cmd(
 
 
 cli.add_command(tokenize_structures_cmd)
+cli.add_command(sample_cmd)
 
 if __name__ == "__main__":
     cli()

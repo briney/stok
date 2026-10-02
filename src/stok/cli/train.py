@@ -1119,6 +1119,21 @@ def run_training(cfg: DictConfig):
     if objective not in {"codebook", "mlm", "mdlm"}:
         raise ValueError(f"Unknown train.objective: {objective}")
     is_mdlm = objective == "mdlm"
+    if is_mdlm:
+        project = cfg.train.get("project_path")
+        if not isinstance(project, str) or not project.strip():
+            raise ValueError("MDLM requires a nonempty unique train.project_path")
+        destination = Path(project).resolve()
+        if (
+            not cfg.train.get("resume_from")
+            and destination.exists()
+            and (not destination.is_dir() or any(destination.iterdir()))
+        ):
+            raise ValueError(
+                "Fresh MDLM project_path is populated; choose a unique directory or resume"
+            )
+        if cfg.train.get("precision") not in {None, "no", "fp16", "bf16"}:
+            raise ValueError("Unsupported MDLM precision; use no, fp16, or bf16")
     if str(cfg.train.get("objective", "codebook")).lower() == "mlm":
         for key in (
             "train.fape.enabled",
@@ -1200,19 +1215,40 @@ def run_training(cfg: DictConfig):
         decoder = None
         preflight_error = None
         try:
+            device = accelerator.device if accelerator else torch.device("cpu")
+            effective_precision = cfg.train.effective_precision
+            requested_precision = cfg.train.get("precision")
+            if effective_precision not in {"no", "fp16", "bf16"} or (
+                requested_precision is not None
+                and requested_precision != effective_precision
+            ):
+                raise ValueError("Unsupported requested/effective MDLM precision")
+            if effective_precision == "fp16" and device.type != "cuda":
+                raise ValueError("MDLM fp16 precision requires CUDA")
+            if effective_precision == "bf16" and (
+                device.type not in {"cpu", "cuda"}
+                or (device.type == "cuda" and not torch.cuda.is_bf16_supported())
+            ):
+                raise ValueError("MDLM bf16 precision is unsupported on this device")
             if OmegaConf.select(cfg, "train.fape.enabled", default=False):
                 raise ValueError("train.fape.enabled is unsupported for MDLM")
             mlm = cfg.train.get("mlm") or {}
             defaults = OmegaConf.load(
                 Path(__file__).resolve().parents[1] / "configs/train/base.yaml"
-            ).mlm
+            )
             if mlm.get("enabled", False) or any(
-                key in mlm and mlm[key] != defaults[key]
+                key in mlm and mlm[key] != defaults.mlm[key]
                 for key in ("mask_prob", "mask_token_prob", "random_token_prob")
             ):
                 raise ValueError(
                     "MLM masking/replacement options are unsupported for MDLM"
                 )
+            gumbel = cfg.train.get("gumbel") or {}
+            if gumbel.get("enabled", False) or any(
+                key not in defaults.gumbel or value != defaults.gumbel[key]
+                for key, value in gumbel.items()
+            ):
+                raise ValueError("Gumbel loss options are unsupported for MDLM")
             for key, expected in (
                 ("model.codebook.trainable", False),
                 ("model.decoder.freeze", True),
@@ -1356,6 +1392,18 @@ def run_training(cfg: DictConfig):
     num_params = count_parameters(model, trainable_only=True)
     if is_main:
         printer(f"Trainable parameters: {num_params:,}")
+        if is_mdlm:
+            device = accelerator.device if accelerator else torch.device("cpu")
+            hardware = (
+                torch.cuda.get_device_name(device) if device.type == "cuda" else "CPU"
+            )
+            mdlm_startup = [
+                f"Trainable parameters: {num_params:,}",
+                f"MDLM hardware: device={device}, hardware={hardware}, requested_precision={cfg.train.get('precision')}, mixed_precision={cfg.train.effective_precision}",
+                f"MDLM data identity: {OmegaConf.to_container(cfg.train.mdlm_identity, resolve=True)}",
+            ]
+            for line in mdlm_startup[1:]:
+                printer(line)
 
     # data
     if not is_mdlm:
@@ -1603,6 +1651,8 @@ def run_training(cfg: DictConfig):
                 file=log_file_handle,
                 flush=True,
             )
+            if is_mdlm:
+                print("\n".join(mdlm_startup), file=log_file_handle, flush=True)
             if resume_payload:
                 print(
                     f"Resume/rollback: checkpoint step {global_step}; remote history watermark {getattr(wb, 'watermark', -1)}",
