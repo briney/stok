@@ -1,6 +1,6 @@
 """Create polymer-aligned training datasets directly from structure directories."""
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator
 import json
 from pathlib import Path
 import tempfile
@@ -84,7 +84,6 @@ def write_structure_folder_dataset(
     output_dir: str | Path,
     *,
     tokenizer: GCPVQTokenizer,
-    policy: Mapping[str, Any],
     recursive: bool = False,
     batch_size: int = 1,
     rows_per_shard: int = 1000,
@@ -92,8 +91,8 @@ def write_structure_folder_dataset(
 ) -> dict[str, Any]:
     """Discover chains and invoke the internal encoder and existing Parquet writer.
 
-    Requires an explicit preparation policy. Missing deposited sequence metadata
-    is rejected unless that policy explicitly permits observed-sequence fallback.
+    Uses the fixed training-native-reference policy. Missing deposited sequence
+    metadata is rejected; a manifest may supply a construct sequence instead.
     Original sequence slots and null structure labels are preserved; no cropping,
     chain concatenation or deduplication is performed. The output's inputs.jsonl
     retains the discovered chains and source paths for replay.
@@ -110,7 +109,6 @@ def write_structure_folder_dataset(
             manifest,
             output_dir,
             tokenizer=tokenizer,
-            policy=policy,
             batch_size=batch_size,
             rows_per_shard=rows_per_shard,
             include_coordinates=include_coordinates,

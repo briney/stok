@@ -84,7 +84,7 @@ def test_public_policy_choice_respects_frozen_quality_and_ranking():
             assert result["selected_condition"] is None
 
 
-def test_frozen_history_and_fixed_padding_release_profiles():
+def test_frozen_history_and_fixed_padding_release_evidence():
     root = Path(__file__).resolve().parents[2] / "docs/experiments/gcp-vqvae"
     selection = json.loads((root / "public-selection-decision.json").read_text())
     heldout = json.loads((root / "public-heldout-results.json").read_text())
@@ -149,7 +149,7 @@ def test_frozen_history_and_fixed_padding_release_profiles():
         )
         assert all(check["passed"] for check in candidate["quality_checks"])
         assert candidate["hard_gate_checks"]["grouping_zero_changed_ids"]
-        path = Path(__file__).resolve().parents[2] / current["policy_file"]
+        path = root / "historical-policies" / Path(current["policy_file"]).name
         policy = json.loads(path.read_text())
         sequence, fill = condition.split("/")
         assert policy["sequence_mode"] == sequence

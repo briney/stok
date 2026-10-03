@@ -1,23 +1,15 @@
-"""Explicit-policy structure dataset generation."""
+"""Structure dataset generation using STok's fixed training policy."""
 
-import json
 from pathlib import Path
 
 import click
 
 
 @click.command("tokenize-structures")
-@click.argument(
-    "input_manifest", type=click.Path(exists=True, dir_okay=False, path_type=Path)
-)
+@click.argument("input_path", type=click.Path(exists=True, path_type=Path))
 @click.argument("output_dir", type=click.Path(file_okay=False, path_type=Path))
 @click.option("--preset", type=click.Choice(["lite", "large"]), required=True)
-@click.option(
-    "--policy",
-    "policy_path",
-    type=click.Path(exists=True, dir_okay=False, path_type=Path),
-    required=True,
-)
+@click.option("--recursive", is_flag=True, help="Search input subdirectories.")
 @click.option(
     "--checkpoint", type=click.Path(exists=True, dir_okay=False, path_type=Path)
 )
@@ -27,44 +19,51 @@ import click
     "--rows-per-shard", type=click.IntRange(min=1), default=1000, show_default=True
 )
 @click.option(
-    "--include-coordinates/--no-include-coordinates", default=True, show_default=True
+    "--include-coordinates/--no-include-coordinates", default=False, show_default=True
 )
 def tokenize_structures_cmd(
-    input_manifest,
+    input_path,
     output_dir,
     preset,
-    policy_path,
+    recursive,
     checkpoint,
     device,
     batch_size,
     rows_per_shard,
     include_coordinates,
 ):
-    """Write full independent chains with aligned nullable labels and original targets.
+    """Convert a structure directory or optional chain-selection JSONL to Parquet.
 
-    POLICY is an explicit JSON file; no production policy is selected implicitly.
+    Uses the fixed training-native-reference policy: native sequence inputs,
+    reference preparation, full chains of 25-1280 residues, and FP32 inference.
     """
-    import torch
-    from stok.data.structure_export import (
-        validate_structure_policy,
-        write_structure_dataset,
-    )
+    from stok.data.structure_directory import write_structure_folder_dataset
+    from stok.data.structure_export import write_structure_dataset
     from stok.models.gcp_vqvae import load_pretrained_tokenizer
 
+    if recursive and not input_path.is_dir():
+        raise click.UsageError("--recursive requires a structure directory")
     try:
-        policy = validate_structure_policy(
-            json.loads(policy_path.read_text()), device=torch.device(device)
-        )
         tokenizer = load_pretrained_tokenizer(preset, path=checkpoint, device=device)
-        summary = write_structure_dataset(
-            input_manifest,
-            output_dir,
-            tokenizer=tokenizer,
-            policy=policy,
-            batch_size=batch_size,
-            rows_per_shard=rows_per_shard,
-            include_coordinates=include_coordinates,
-        )
+        if input_path.is_dir():
+            summary = write_structure_folder_dataset(
+                input_path,
+                output_dir,
+                tokenizer=tokenizer,
+                recursive=recursive,
+                batch_size=batch_size,
+                rows_per_shard=rows_per_shard,
+                include_coordinates=include_coordinates,
+            )
+        else:
+            summary = write_structure_dataset(
+                input_path,
+                output_dir,
+                tokenizer=tokenizer,
+                batch_size=batch_size,
+                rows_per_shard=rows_per_shard,
+                include_coordinates=include_coordinates,
+            )
     except (OSError, ValueError, RuntimeError, FloatingPointError) as error:
         raise click.ClickException(str(error)) from error
     click.echo(

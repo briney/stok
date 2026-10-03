@@ -57,16 +57,17 @@ def test_discovery_preserves_copies_paths_and_label_chain_ids(tmp_path):
     assert len(list(iter_structure_directory(folder))) == 4
 
 
+@pytest.mark.parametrize("entrypoint", ["api", "cli"])
 def test_folder_export_preserves_missing_positions_and_input_inventory(
-    tmp_path, export_inputs
+    tmp_path, export_inputs, monkeypatch, entrypoint
 ):
     from stok.data.structure_directory import write_structure_folder_dataset
     from stok.data.structure_export import validate_structure_dataset
 
-    model, _, policy = export_inputs
-    policy = dict(policy, allow_observed_sequence=False)
+    model, _ = export_inputs
     folder = tmp_path / "structures"
-    folder.mkdir()
+    nested = folder / "nested"
+    nested.mkdir(parents=True)
     sequence = parse_polymer_structure(
         FIXTURES / "inputs/complete_pdb.pdb", allow_observed_sequence=True
     ).sequence
@@ -80,7 +81,7 @@ def test_folder_export_preserves_missing_positions_and_input_inventory(
     atoms = "".join(
         line for line in content.splitlines(True) if line.startswith("ATOM")
     )
-    (folder / "copies.pdb").write_text(
+    (nested / "copies.pdb").write_text(
         seqres
         + seqres.replace(" A ", " B ")
         + atoms
@@ -90,9 +91,34 @@ def test_folder_export_preserves_missing_positions_and_input_inventory(
     # Missing sequence metadata is an exclusion, not an observed-only fallback.
     shutil.copy(FIXTURES / "inputs/complete_pdb.pdb", folder / "no-seqres.pdb")
     output = tmp_path / "dataset"
-    summary = write_structure_folder_dataset(
-        folder, output, tokenizer=model, policy=policy, rows_per_shard=1
-    )
+    if entrypoint == "api":
+        summary = write_structure_folder_dataset(
+            folder, output, tokenizer=model, recursive=True, rows_per_shard=1
+        )
+    else:
+        from click.testing import CliRunner
+        from stok.cli.cli import cli
+        from stok.models import gcp_vqvae
+
+        monkeypatch.setattr(
+            gcp_vqvae, "load_pretrained_tokenizer", lambda *a, **kw: model
+        )
+        result = CliRunner().invoke(
+            cli,
+            [
+                "tokenize-structures",
+                str(folder),
+                str(output),
+                "--preset",
+                "lite",
+                "--recursive",
+                "--rows-per-shard",
+                "1",
+                "--no-include-coordinates",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        summary = validate_structure_dataset(output)
     assert summary["row_count"] == 2
     assert summary["rejection_count"] == 1
     assert summary["exclusions"] == {"sequence_metadata_missing": 1}
@@ -110,10 +136,10 @@ def test_folder_export_preserves_missing_positions_and_input_inventory(
         assert [
             i for i, token in enumerate(row["structure_tokens"]) if token is None
         ] == [4, 11]
-        assert row["source"]["path"] == str(folder / "copies.pdb")
+        assert row["source"]["path"] == str(nested / "copies.pdb")
         assert len(TokenizedDataset(str(output / shard["path"]), max_length=1280)) == 1
     with pytest.raises(FileExistsError):
-        write_structure_folder_dataset(folder, output, tokenizer=model, policy=policy)
+        write_structure_folder_dataset(folder, output, tokenizer=model)
     (output / "inputs.jsonl").write_text("corrupt\n")
     with pytest.raises(ValueError, match="input inventory"):
         validate_structure_dataset(output)

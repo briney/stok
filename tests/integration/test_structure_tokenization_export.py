@@ -56,6 +56,9 @@ def export_inputs(tmp_path):
             "sequence_id": "shorter",
             "path": str(FIXTURES / "inputs/shorter.pdb"),
             "chain_id": "A",
+            "sequence": parse_polymer_structure(
+                FIXTURES / "inputs/shorter.pdb", allow_observed_sequence=True
+            ).sequence,
         },
         {
             "sequence_id": "rejected",
@@ -72,25 +75,7 @@ def export_inputs(tmp_path):
     ]
     manifest = tmp_path / "inputs.jsonl"
     manifest.write_text("".join(json.dumps(row) + "\n" for row in rows))
-    policy = {
-        "schema_version": 1,
-        "sequence_source": "deposited_or_supplied",
-        "allow_observed_sequence": True,
-        "sequence_mode": "native",
-        "required_atoms": ["N", "CA", "C", "O"],
-        "imputation": "linear",
-        "graph_context": "independent_singleton",
-        "context_scope": "full_chain",
-        "min_length": 25,
-        "max_length": 1280,
-        "max_missing_ratio": 0.2,
-        "max_missing_block": 15,
-        "cropping": "none",
-        "dtype": "float32",
-        "device": "cpu",
-        "stok_revision": "test-policy",
-    }
-    return model, manifest, policy
+    return model, manifest
 
 
 def test_export_round_trip_alignment_provenance_and_grouping(tmp_path, export_inputs):
@@ -101,10 +86,15 @@ def test_export_round_trip_alignment_provenance_and_grouping(tmp_path, export_in
     from stok.data.structure_encoding import tokenize_structures
     from dataclasses import replace
 
-    model, manifest, policy = export_inputs
+    model, manifest = export_inputs
     output = tmp_path / "dataset"
     summary = write_structure_dataset(
-        manifest, output, tokenizer=model, policy=policy, batch_size=3, rows_per_shard=2
+        manifest,
+        output,
+        tokenizer=model,
+        batch_size=3,
+        rows_per_shard=2,
+        include_coordinates=True,
     )
     assert summary["status"] == "complete" and summary["row_count"] == 4
     assert summary["residue_count"] == 152 and summary["null_count"] == 3
@@ -150,7 +140,7 @@ def test_export_round_trip_alignment_provenance_and_grouping(tmp_path, export_in
         for entry in source_rows
     ]
     direct = tokenize_structures(
-        model, sources, sequence_mode="native", imputation="linear"
+        model, sources, sequence_mode="native", imputation="reference"
     )
     iterable = list(
         IterableTokenizedDataset(
@@ -172,7 +162,6 @@ def test_export_round_trip_alignment_provenance_and_grouping(tmp_path, export_in
         manifest,
         single,
         tokenizer=model,
-        policy=policy,
         batch_size=1,
         rows_per_shard=1,
         include_coordinates=False,
@@ -189,75 +178,7 @@ def test_export_round_trip_alignment_provenance_and_grouping(tmp_path, export_in
         "coordinates" not in pq.read_schema(single / other["shards"][0]["path"]).names
     )
     with pytest.raises(FileExistsError):
-        write_structure_dataset(manifest, output, tokenizer=model, policy=policy)
-
-
-@pytest.mark.parametrize(
-    "change",
-    [
-        "none",
-        "encoder",
-        "quantizer",
-        "encoder_config",
-        "quantizer_config",
-        "backend",
-        "accelerator",
-        "matmul",
-        "sdpa",
-    ],
-)
-def test_qualification_binds_model_and_runtime_before_staging(
-    tmp_path, export_inputs, monkeypatch, change
-):
-    from copy import deepcopy
-    from stok.data import structure_export as export
-    from stok.utils.pretrained import inference_metadata, json_sha256
-
-    model, manifest, policy = export_inputs
-    environment = inference_metadata(torch.device("cpu"))
-    policy["qualification"] = {
-        "tokenizer_sha256": json_sha256(export._tokenizer_identity(model)),
-        "execution": {
-            key: value
-            for key, value in environment.items()
-            if key not in {"stok_revision", "source_files", "implementation_sha256"}
-        },
-    }
-    environment = deepcopy(environment)
-    # Checkout/install provenance can change without changing numerical execution.
-    environment["stok_revision"] = "another-checkout"
-    monkeypatch.setattr(export, "inference_metadata", lambda device: environment)
-    if change == "encoder":
-        with torch.no_grad():
-            next(model.encoder.parameters()).add_(1)
-    elif change == "quantizer":
-        with torch.no_grad():
-            model.quantizer.codebook.add_(1)
-    elif change == "encoder_config":
-        model.config["encoder"]["depth"] += 1
-    elif change == "quantizer_config":
-        model.config["quantizer"]["decay"] = 0.5
-    elif change == "backend":
-        environment["torch_hip"] = "another-backend"
-    elif change == "accelerator":
-        environment["accelerator"] = "another-accelerator"
-    elif change == "matmul":
-        environment["matmul_precision"] = "high"
-    elif change == "sdpa":
-        environment["sdp_backends_enabled"]["math"] = False
-    output = tmp_path / "qualified"
-    if change == "none":
-        summary = export.write_structure_dataset(
-            manifest, output, tokenizer=model, policy=policy
-        )
-        assert summary["status"] == "complete"
-    else:
-        with pytest.raises(ValueError, match="qualification.*does not match"):
-            export.write_structure_dataset(
-                manifest, output, tokenizer=model, policy=policy
-            )
-        assert not output.exists()
-        assert not list(tmp_path.glob(".qualified.staging-*"))
+        write_structure_dataset(manifest, output, tokenizer=model)
 
 
 @pytest.mark.parametrize(
@@ -267,7 +188,7 @@ def test_qualification_binds_model_and_runtime_before_staging(
 def test_failed_runs_never_publish(tmp_path, export_inputs, monkeypatch, fault):
     from stok.data import structure_export as export
 
-    model, manifest, policy = export_inputs
+    model, manifest = export_inputs
     if fault == "duplicate":
         manifest.write_text(
             manifest.read_text() + manifest.read_text().splitlines()[0] + "\n"
@@ -299,7 +220,7 @@ def test_failed_runs_never_publish(tmp_path, export_inputs, monkeypatch, fault):
     output = tmp_path / "dataset"
     with pytest.raises((ValueError, RuntimeError, KeyboardInterrupt)):
         export.write_structure_dataset(
-            manifest, output, tokenizer=model, policy=policy, rows_per_shard=1
+            manifest, output, tokenizer=model, rows_per_shard=1
         )
     assert not output.exists()
     staging = list(tmp_path.glob(".dataset.staging-*"))
@@ -308,48 +229,10 @@ def test_failed_runs_never_publish(tmp_path, export_inputs, monkeypatch, fault):
     assert not list(staging[0].glob("*.partial"))
 
 
-@pytest.mark.parametrize(
-    "field,value",
-    [
-        ("max_length", 2048),
-        ("min_length", 0),
-        ("min_length", 3),
-        ("min_length", True),
-        ("min_length", 1281),
-        ("max_length", 24),
-        ("max_length", 1280.0),
-        ("max_missing_ratio", True),
-        ("max_missing_ratio", -0.1),
-        ("max_missing_ratio", 1.1),
-        ("max_missing_ratio", float("nan")),
-        ("max_missing_block", -1),
-        ("max_missing_block", 1.5),
-        ("dtype", "bfloat16"),
-        ("imputation", "mystery"),
-        ("required_atoms", ["CA"]),
-        ("allow_observed_sequence", "false"),
-        ("typo", True),
-        ("qualification", None),
-        ("qualification", {}),
-        ("qualification", {"tokenizer_sha256": "0" * 64, "execution": {}}),
-    ],
-)
-def test_invalid_policy_rejected_before_staging(tmp_path, export_inputs, field, value):
+def test_training_export_preserves_large_missing_blocks(tmp_path, export_inputs):
     from stok.data.structure_export import write_structure_dataset
 
-    model, manifest, policy = export_inputs
-    policy[field] = value
-    with pytest.raises(ValueError, match="policy"):
-        write_structure_dataset(
-            manifest, tmp_path / "dataset", tokenizer=model, policy=policy
-        )
-    assert not list(tmp_path.glob(".dataset.staging-*"))
-
-
-def test_configurable_filters_reach_preflight_and_tokenization(tmp_path, export_inputs):
-    from stok.data.structure_export import write_structure_dataset
-
-    model, manifest, policy = export_inputs
+    model, manifest = export_inputs
     entries = [json.loads(line) for line in manifest.read_text().splitlines()]
     incomplete = tmp_path / "large-gap.pdb"
     # 20 missing slots out of 40 exceed both upstream coverage thresholds.
@@ -363,9 +246,8 @@ def test_configurable_filters_reach_preflight_and_tokenization(tmp_path, export_
     )
     entries = [dict(entries[0], path=str(incomplete)), entries[3]]
     manifest.write_text("".join(json.dumps(entry) + "\n" for entry in entries))
-    policy = dict(policy, max_missing_ratio=None, max_missing_block=None)
     summary = write_structure_dataset(
-        manifest, tmp_path / "unfiltered", tokenizer=model, policy=policy
+        manifest, tmp_path / "unfiltered", tokenizer=model
     )
     assert summary["row_count"] == 2 and summary["null_count"] == 20
     rows = pq.read_table(tmp_path / "unfiltered/part-000000.parquet").to_pylist()
@@ -373,23 +255,6 @@ def test_configurable_filters_reach_preflight_and_tokenization(tmp_path, export_
     assert [
         i for i, token in enumerate(rows[0]["structure_tokens"]) if token is None
     ] == list(range(5, 25))
-    for field, value, reason in (
-        ("max_missing_ratio", 0.49, "missing_ratio_exceeded"),
-        ("max_missing_block", 19, "missing_block_exceeded"),
-        ("max_length", 39, "chains_too_long"),
-        ("min_length", 41, "chains_too_short"),
-    ):
-        filtered = dict(policy, **{field: value})
-        if field == "min_length":
-            with pytest.raises(ValueError, match="All input structures were rejected"):
-                write_structure_dataset(
-                    manifest, tmp_path / field, tokenizer=model, policy=filtered
-                )
-            continue
-        result = write_structure_dataset(
-            manifest, tmp_path / field, tokenizer=model, policy=filtered
-        )
-        assert result["row_count"] == 1 and result["exclusions"] == {reason: 1}
 
 
 def test_corruption_and_incompatible_shards_fail_validation(tmp_path, export_inputs):
@@ -398,10 +263,10 @@ def test_corruption_and_incompatible_shards_fail_validation(tmp_path, export_inp
         validate_structure_dataset,
     )
 
-    model, manifest, policy = export_inputs
+    model, manifest = export_inputs
     output = tmp_path / "dataset"
     summary = write_structure_dataset(
-        manifest, output, tokenizer=model, policy=policy, rows_per_shard=2
+        manifest, output, tokenizer=model, rows_per_shard=2
     )
     shard = output / summary["shards"][1]["path"]
     table = pq.read_table(shard)
@@ -445,7 +310,7 @@ def test_cli_loads_tokenizer_once_and_publishes(tmp_path, export_inputs, monkeyp
     from stok.cli.cli import cli
     from stok.models import gcp_vqvae
 
-    model, manifest, policy = export_inputs
+    model, manifest = export_inputs
     calls = []
 
     def load(*args, **kwargs):
@@ -453,8 +318,6 @@ def test_cli_loads_tokenizer_once_and_publishes(tmp_path, export_inputs, monkeyp
         return model
 
     monkeypatch.setattr(gcp_vqvae, "load_pretrained_tokenizer", load)
-    policy_path = tmp_path / "policy.json"
-    policy_path.write_text(json.dumps(policy))
     result = CliRunner().invoke(
         cli,
         [
@@ -463,8 +326,6 @@ def test_cli_loads_tokenizer_once_and_publishes(tmp_path, export_inputs, monkeyp
             str(tmp_path / "cli-dataset"),
             "--preset",
             "lite",
-            "--policy",
-            str(policy_path),
             "--rows-per-shard",
             "2",
         ],
@@ -472,6 +333,16 @@ def test_cli_loads_tokenizer_once_and_publishes(tmp_path, export_inputs, monkeyp
     assert result.exit_code == 0, result.output
     assert len(calls) == 1
     assert "4 chains" in result.output
+
+
+def test_export_uses_training_policy_without_configuration(tmp_path, export_inputs):
+    from stok.data.structure_export import write_structure_dataset
+
+    model, manifest = export_inputs
+    summary = write_structure_dataset(manifest, tmp_path / "dataset", tokenizer=model)
+    assert summary["row_count"] == 4
+    assert summary["null_count"] == 3
+    assert summary["provenance"]["policy"]["imputation"] == "reference"
 
 
 def test_publication_refuses_concurrent_destination(tmp_path):
@@ -488,16 +359,14 @@ def test_publication_refuses_concurrent_destination(tmp_path):
 def test_export_forces_fp32_inside_outer_autocast(tmp_path, export_inputs):
     from stok.data.structure_export import write_structure_dataset
 
-    model, manifest, policy = export_inputs
+    model, manifest = export_inputs
     observed = []
     hook = model.encoder.register_forward_hook(
         lambda module, inputs, output: observed.append(output.dtype)
     )
     try:
         with torch.autocast("cpu", dtype=torch.bfloat16):
-            write_structure_dataset(
-                manifest, tmp_path / "dataset", tokenizer=model, policy=policy
-            )
+            write_structure_dataset(manifest, tmp_path / "dataset", tokenizer=model)
     finally:
         hook.remove()
     assert observed and set(observed) == {torch.float32}
@@ -513,10 +382,10 @@ def test_generated_data_collation_decoder_and_training(tmp_path, export_inputs):
     from stok.utils.decoding import decode_structure_tokens
     from stok.utils.tokenizer import Tokenizer
 
-    model, manifest, policy = export_inputs
+    model, manifest = export_inputs
     output = tmp_path / "dataset"
     summary = write_structure_dataset(
-        manifest, output, tokenizer=model, policy=policy, rows_per_shard=2
+        manifest, output, tokenizer=model, rows_per_shard=2, include_coordinates=True
     )
     items = list(
         IterableTokenizedDataset(

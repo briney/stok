@@ -714,13 +714,15 @@ or family-held-out policy evaluation. The separate
 [public study](../docs/experiments/gcp-vqvae/public-report.md) freezes 40 distinct
 30% sequence clusters before inference and freezes the decision before held-out
 evaluation. Three public-contract tests cover split/identity quotas, the
-historical selection arithmetic and numerical audit counts, and the current
-fixed-1280 release profiles. Native/reference is supported for both Lite and
+historical selection arithmetic and numerical audit counts, and the archived
+fixed-1280 release evidence. Native/reference was checked for both Lite and
 Large on the recorded ROCm FP32 configuration. Variable-padding comparisons
 remain diagnostic; the report records correction of the original overstrict gate.
-Exporter checks also cover matching qualification and rejection before staging
-of changed encoder/quantizer state, configuration, backend, accelerator and
-math/SDPA settings. The packaged profile's constraints match the frozen evidence.
+Current export uses one fixed training-native-reference policy for both directory
+and JSONL inputs through the CLI and Python APIs. Tests preserve large missing
+blocks without coverage exclusions, reject missing sequence metadata, verify
+recursive directory discovery and publication, and retain execution provenance
+without binding exports to an experimental machine-specific profile.
 
 The [full public roundtrip experiment](../docs/experiments/gcp-vqvae/public-roundtrip-report.md)
 compares both complete released STok/upstream encoder, VQ and decoder stacks on

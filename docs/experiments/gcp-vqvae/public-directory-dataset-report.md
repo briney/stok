@@ -1,5 +1,10 @@
 # Directory dataset pilot — October 1, 2026
 
+This is a historical experiment record. STok now exports with one fixed
+training-native-reference policy; earlier policy files and CLI commands below
+record the experiment interface. Policy snapshots are retained under
+[historical-policies](historical-policies/), outside the installed package.
+
 The directory builder uses stok's internal GCP-VQVAE Lite encoder with
 native/reference preparation and ROCm FP32 execution. The initial run used the
 qualified policy's coverage filters; the latest run uses the training policy
