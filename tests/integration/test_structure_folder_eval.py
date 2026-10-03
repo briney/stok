@@ -118,17 +118,17 @@ class TestStructureFolderEvalExplicit:
             # Small codebook preset
             "model.codebook.preset=lite",
             # Small data loader
-            "data.batch_size=2",
+            "train.batch_size=2",
             f"data.max_len={max_len}",
             "data.num_workers=0",
             "data.pin_memory=false",
             # Short run with eval
-            "train.num_steps=4",
-            "train.log_steps=2",
+            "train.max_steps=4",
+            "train.log_every=2",
             "train.eval.steps=2",
             # Disable external logging
             "train.wandb.enabled=false",
-            f"train.project_path={tmp_path.as_posix()}",
+            f"train.output_dir={tmp_path.as_posix()}",
         ]
 
         result = runner.invoke(cli, ["train", *overrides])
@@ -163,15 +163,15 @@ class TestStructureFolderEvalAutoDetect:
             "model.encoder.dropout=0.0",
             "model.encoder.attn_dropout=0.0",
             "model.codebook.preset=lite",
-            "data.batch_size=2",
+            "train.batch_size=2",
             f"data.max_len={max_len}",
             "data.num_workers=0",
             "data.pin_memory=false",
-            "train.num_steps=4",
-            "train.log_steps=2",
+            "train.max_steps=4",
+            "train.log_every=2",
             "train.eval.steps=2",
             "train.wandb.enabled=false",
-            f"train.project_path={tmp_path.as_posix()}",
+            f"train.output_dir={tmp_path.as_posix()}",
         ]
 
         result = runner.invoke(cli, ["train", *overrides])
@@ -205,15 +205,15 @@ class TestStructureFolderMLM:
             "model.encoder.dropout=0.0",
             "model.encoder.attn_dropout=0.0",
             "model.codebook.preset=lite",
-            "data.batch_size=2",
+            "train.batch_size=2",
             f"data.max_len={max_len}",
             "data.num_workers=0",
             "data.pin_memory=false",
-            "train.num_steps=4",
-            "train.log_steps=2",
+            "train.max_steps=4",
+            "train.log_every=2",
             "train.eval.steps=2",
             "train.wandb.enabled=false",
-            f"train.project_path={tmp_path.as_posix()}",
+            f"train.output_dir={tmp_path.as_posix()}",
         ]
 
         result = runner.invoke(cli, ["train", *overrides])
@@ -253,15 +253,15 @@ class TestStructureFolderMetricWhitelist:
             "model.encoder.dropout=0.0",
             "model.encoder.attn_dropout=0.0",
             "model.codebook.preset=lite",
-            "data.batch_size=2",
+            "train.batch_size=2",
             f"data.max_len={max_len}",
             "data.num_workers=0",
             "data.pin_memory=false",
-            "train.num_steps=4",
-            "train.log_steps=2",
+            "train.max_steps=4",
+            "train.log_every=2",
             "train.eval.steps=2",
             "train.wandb.enabled=false",
-            f"train.project_path={tmp_path.as_posix()}",
+            f"train.output_dir={tmp_path.as_posix()}",
         ]
 
         result = runner.invoke(cli, ["train", *overrides])
@@ -298,15 +298,15 @@ class TestStructureFolderChainId:
             "model.encoder.dropout=0.0",
             "model.encoder.attn_dropout=0.0",
             "model.codebook.preset=lite",
-            "data.batch_size=2",
+            "train.batch_size=2",
             f"data.max_len={max_len}",
             "data.num_workers=0",
             "data.pin_memory=false",
-            "train.num_steps=4",
-            "train.log_steps=2",
+            "train.max_steps=4",
+            "train.log_every=2",
             "train.eval.steps=2",
             "train.wandb.enabled=false",
-            f"train.project_path={tmp_path.as_posix()}",
+            f"train.output_dir={tmp_path.as_posix()}",
         ]
 
         result = runner.invoke(cli, ["train", *overrides])

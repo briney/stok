@@ -1,34 +1,35 @@
-optimizer:
-  name: adamw
-  lr: 3e-4
-  betas: [0.9, 0.95]
-  weight_decay: 0.01
+optimizer: adamw
+lr: 3e-4
+adam_beta1: 0.9
+adam_beta2: 0.95
+adam_eps: 1e-8
+weight_decay: 0.01
 
-scheduler:
-  decay: linear  # "cosine" | "linear"
-  warmup_steps: 2000
-  stable_steps: 0      # if 0, no stable hold, decay starts immediately after warmup
-  decay_steps: null    # if null, auto-derived as (num_steps − warmup_steps − stable_steps), clamped at 0
+scheduler: warmup_linear  # warmup_linear | warmup_cosine | wsd_linear | wsd_cosine
+warmup_steps: 2000
+stable_steps: 0      # WSD plateau; must be 0 for warmup_* schedules
+decay_steps: null    # if null, derived from max_steps minus warmup and stable steps
 
 seed: 1337
 
 # All step budgets/cadences count successful optimizer updates.
-# epochs, when set, governs passes; final partial accumulation windows are flushed.
+# max_epochs, when set, governs passes; final partial accumulation windows are flushed.
 # step/epoch governance
-num_steps: 10000
-epochs: null
+max_steps: 10000
+max_epochs: null
 
 # intervals (in successful optimizer updates)
-log_steps: 50
-checkpoint_steps: null
+log_every: 50
+save_every: null
 
 # training mechanics
-precision: null  # null inherits Accelerate; MDLM experiments select it explicitly
-grad_accum_steps: 1
-grad_clip_norm: 1.0
+batch_size: 8  # per process/device, before gradient accumulation
+mixed_precision: null  # null inherits Accelerate; MDLM experiments select it explicitly
+gradient_accumulation_steps: 1
+max_grad_norm: 1.0
 
 # IO paths
-project_path: null
+output_dir: null
 resume_from: null  # complete version-2 continuation with the original budget
 
 # logging

@@ -683,10 +683,10 @@ def test_optional_decoder_loading_preserves_training_random_stream(
 
     cfg = evaluation_training_fixture(tmp_path)
     cfg.train.eval.mdlm.generation.steps = 10000
-    cfg.train.num_steps = 1
+    cfg.train.max_steps = 1
     training.run_training(cfg)
     expected = torch.load(tmp_path / "run/model/final.pt", weights_only=False)["model"]
-    cfg.train.project_path = str(tmp_path / "with_decoder")
+    cfg.train.output_dir = str(tmp_path / "with_decoder")
     cfg.train.eval.mdlm.generation.decode = True
     codebook = torch.load(cfg.model.codebook.path, weights_only=True)["codebook"]
 

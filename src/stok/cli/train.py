@@ -158,7 +158,7 @@ class _TeeIO:
 
 
 def _resolve_project_dirs(cfg: DictConfig) -> dict[str, Path]:
-    root = Path(str(cfg.train.get("project_path") or Path.cwd())).resolve()
+    root = Path(str(cfg.train.get("output_dir") or Path.cwd())).resolve()
     model_dir = root / "model"
     ckpt_dir = root / "checkpoints"
     logs_dir = root / "logs"
@@ -566,7 +566,7 @@ def _build_dataloaders(
     objective = objective or ("mlm" if is_mlm else "codebook")
     is_mlm, is_mdlm = objective == "mlm", objective == "mdlm"
     rank, world_size = distributed_rank()
-    batch_size: int = cfg.data.batch_size
+    batch_size: int = cfg.train.batch_size
     max_len: int = cfg.data.max_len
     num_workers: int = cfg.data.num_workers
     pin_memory: bool = cfg.data.pin_memory
@@ -1128,9 +1128,9 @@ def run_training(cfg: DictConfig):
         raise ValueError(f"Unknown train.objective: {objective}")
     is_mdlm = objective == "mdlm"
     if is_mdlm:
-        project = cfg.train.get("project_path")
+        project = cfg.train.get("output_dir")
         if not isinstance(project, str) or not project.strip():
-            raise ValueError("MDLM requires a nonempty unique train.project_path")
+            raise ValueError("MDLM requires a nonempty unique train.output_dir")
         destination = Path(project).resolve()
         if (
             not cfg.train.get("resume_from")
@@ -1138,9 +1138,9 @@ def run_training(cfg: DictConfig):
             and (not destination.is_dir() or any(destination.iterdir()))
         ):
             raise ValueError(
-                "Fresh MDLM project_path is populated; choose a unique directory or resume"
+                "Fresh MDLM output_dir is populated; choose a unique directory or resume"
             )
-        if cfg.train.get("precision") not in {None, "no", "fp16", "bf16"}:
+        if cfg.train.get("mixed_precision") not in {None, "no", "fp16", "bf16"}:
             raise ValueError("Unsupported MDLM precision; use no, fp16, or bf16")
     if str(cfg.train.get("objective", "codebook")).lower() == "mlm":
         for key in (
@@ -1163,18 +1163,40 @@ def run_training(cfg: DictConfig):
     ):
         if OmegaConf.select(cfg, key, default=supported) != supported:
             raise ValueError(f"{key} only supports {supported} in the training CLI")
-    if str(cfg.train.optimizer.get("name", "adamw")).lower() != "adamw":
-        raise ValueError("train.optimizer.name only supports adamw")
+    if str(cfg.train.get("optimizer", "adamw")).lower() != "adamw":
+        raise ValueError("train.optimizer only supports adamw")
+    schedule = str(cfg.train.scheduler).lower()
+    if schedule not in {"warmup_linear", "warmup_cosine", "wsd_linear", "wsd_cosine"}:
+        raise ValueError(f"Unknown train.scheduler: {schedule}")
+    decay = schedule.rsplit("_", 1)[1]
+    warmup_steps = int(cfg.train.get("warmup_steps", 0))
+    stable_steps = int(cfg.train.get("stable_steps", 0))
+    decay_steps_raw = cfg.train.get("decay_steps")
+    decay_steps = int(decay_steps_raw) if decay_steps_raw is not None else None
+    if (
+        warmup_steps < 0
+        or stable_steps < 0
+        or (decay_steps is not None and decay_steps < 0)
+    ):
+        raise ValueError("scheduler step counts must be non-negative")
+    if schedule.startswith("warmup_") and stable_steps:
+        raise ValueError(
+            "train.stable_steps requires a wsd_linear or wsd_cosine scheduler"
+        )
     if OmegaConf.select(cfg, "model.init.std") is not None:
         raise ValueError(
             "model.init.std is unsupported; initialization follows module defaults"
         )
     for name, value, minimum in (
-        ("grad_accum_steps", cfg.train.get("grad_accum_steps", 1), 1),
-        ("log_steps", cfg.train.get("log_steps", 1), 1),
+        (
+            "gradient_accumulation_steps",
+            cfg.train.get("gradient_accumulation_steps", 1),
+            1,
+        ),
+        ("log_every", cfg.train.get("log_every", 1), 1),
         ("eval.steps", cfg.train.eval.get("steps", 1), 1),
-        ("num_steps", cfg.train.get("num_steps", 0), 0),
-        ("epochs", cfg.train.get("epochs"), 0),
+        ("max_steps", cfg.train.get("max_steps", 0), 0),
+        ("max_epochs", cfg.train.get("max_epochs"), 0),
     ):
         if value is not None and int(value) < minimum:
             raise ValueError(f"train.{name} must be >= {minimum}")
@@ -1184,7 +1206,7 @@ def run_training(cfg: DictConfig):
     seed = int(cfg.train.get("seed", cfg.get("seed", 1337)))
     set_seed(seed)
 
-    precision = cfg.train.get("precision")
+    precision = cfg.train.get("mixed_precision")
     accelerator = (
         _maybe_get_accelerator(precision)
         if precision is not None
@@ -1225,7 +1247,7 @@ def run_training(cfg: DictConfig):
         try:
             device = accelerator.device if accelerator else torch.device("cpu")
             effective_precision = cfg.train.effective_precision
-            requested_precision = cfg.train.get("precision")
+            requested_precision = cfg.train.get("mixed_precision")
             if effective_precision not in {"no", "fp16", "bf16"} or (
                 requested_precision is not None
                 and requested_precision != effective_precision
@@ -1264,16 +1286,6 @@ def run_training(cfg: DictConfig):
                 if OmegaConf.select(cfg, key, default=expected) != expected:
                     raise ValueError(f"{key} only supports {expected} for MDLM")
             validate_mdlm_config(cfg.train.mdlm)
-            if str(cfg.train.scheduler.get("decay", "")).lower() not in {
-                "linear",
-                "cosine",
-            }:
-                raise ValueError("Unknown scheduler.decay")
-            if any(
-                int(cfg.train.scheduler.get(key) or 0) < 0
-                for key in ("warmup_steps", "stable_steps", "decay_steps")
-            ):
-                raise ValueError("scheduler step counts must be non-negative")
             codebook = load_codebook(
                 preset=cfg.model.codebook.get("preset"),
                 path=cfg.model.codebook.get("path"),
@@ -1329,9 +1341,10 @@ def run_training(cfg: DictConfig):
                     )
             optimizer = AdamW(
                 model.parameters(),
-                lr=cfg.train.optimizer.lr,
-                betas=tuple(cfg.train.optimizer.betas),
-                weight_decay=cfg.train.optimizer.weight_decay,
+                lr=cfg.train.lr,
+                betas=(cfg.train.adam_beta1, cfg.train.adam_beta2),
+                eps=cfg.train.adam_eps,
+                weight_decay=cfg.train.weight_decay,
             )
         except Exception as exc:
             preflight_error = f"{type(exc).__name__}: {exc}"
@@ -1408,7 +1421,7 @@ def run_training(cfg: DictConfig):
             )
             mdlm_startup = [
                 f"Trainable parameters: {num_params:,}",
-                f"MDLM hardware: device={device}, hardware={hardware}, requested_precision={cfg.train.get('precision')}, mixed_precision={cfg.train.effective_precision}",
+                f"MDLM hardware: device={device}, hardware={hardware}, requested_precision={cfg.train.get('mixed_precision')}, mixed_precision={cfg.train.effective_precision}",
                 f"MDLM data identity: {OmegaConf.to_container(cfg.train.mdlm_identity, resolve=True)}",
             ]
             for line in mdlm_startup[1:]:
@@ -1492,13 +1505,14 @@ def run_training(cfg: DictConfig):
         # optimizer
         optimizer = AdamW(
             model.parameters(),
-            lr=cfg.train.optimizer.lr,
-            betas=tuple(cfg.train.optimizer.betas),
-            weight_decay=cfg.train.optimizer.weight_decay,
+            lr=cfg.train.lr,
+            betas=(cfg.train.adam_beta1, cfg.train.adam_beta2),
+            eps=cfg.train.adam_eps,
+            weight_decay=cfg.train.weight_decay,
         )
 
     # determine training steps
-    grad_accum_steps: int = cfg.train.get("grad_accum_steps", 1)
+    grad_accum_steps: int = cfg.train.get("gradient_accumulation_steps", 1)
     # derive steps_per_epoch when possible (used for both max_steps and logging)
     steps_per_epoch: Optional[int] = None
     try:
@@ -1509,37 +1523,17 @@ def run_training(cfg: DictConfig):
         # len(train_loader) may be undefined for some iterable datasets
         steps_per_epoch = None
 
-    if cfg.train.get("epochs") is not None:
+    if cfg.train.get("max_epochs") is not None:
         if steps_per_epoch is None:
             raise ValueError(
-                "cfg.train.epochs is set but steps_per_epoch could not be derived "
+                "cfg.train.max_epochs is set but steps_per_epoch could not be derived "
                 "from the train dataloader."
             )
-        max_steps = int(cfg.train.epochs) * steps_per_epoch
+        max_steps = int(cfg.train.max_epochs) * steps_per_epoch
     else:
-        max_steps = int(cfg.train.get("num_steps", 10000))
+        max_steps = int(cfg.train.get("max_steps", 10000))
 
-    # build scheduler (WSD with decay selection)
-    sched_cfg = cfg.train.scheduler
-    if not sched_cfg.get("decay"):
-        raise ValueError(
-            "Missing required config: train.scheduler.decay (expected 'cosine' or 'linear')"
-        )
-    decay: str = str(sched_cfg.get("decay")).lower()
-    warmup_steps: int = int(sched_cfg.get("warmup_steps", 0))
-    stable_steps: int = int(sched_cfg.get("stable_steps", 0))
-    # Allow explicit 0; None triggers derivation in _build_scheduler
-    decay_steps_raw: Optional[int] = sched_cfg.get("decay_steps")
-    decay_steps: Optional[int] = (
-        int(decay_steps_raw) if decay_steps_raw is not None else None
-    )
-    if (
-        warmup_steps < 0
-        or stable_steps < 0
-        or (decay_steps is not None and decay_steps < 0)
-    ):
-        raise ValueError("scheduler step counts must be non-negative")
-
+    # Schedule durations are measured in successful optimizer updates.
     scheduler = _build_scheduler(
         optimizer,
         decay=decay,
@@ -1637,10 +1631,10 @@ def run_training(cfg: DictConfig):
     micro_step = progress["micro_step"] if progress else 0
     running_loss = 0.0
     running_updates = 0
-    log_interval = int(cfg.train.get("log_steps", 50))
+    log_interval = int(cfg.train.get("log_every", 50))
     eval_interval = int(cfg.train.get("eval", {}).get("steps", 1000))
     ignore_index = -100 if is_mdlm else int(cfg.model.classifier.ignore_index)
-    grad_clip = float(cfg.train.get("grad_clip_norm", 1.0))
+    grad_clip = float(cfg.train.get("max_grad_norm", 1.0))
 
     # console output (main process only
     console_cfg = cfg.train.get("console")
@@ -1806,7 +1800,7 @@ def run_training(cfg: DictConfig):
             },
         }
 
-    epoch_limit = cfg.train.get("epochs")
+    epoch_limit = cfg.train.get("max_epochs")
     device = _get_model_device(model, accelerator)
     world_size = accelerator.num_processes if accelerator else 1
     optimizer.zero_grad(set_to_none=True)
@@ -1856,7 +1850,7 @@ def run_training(cfg: DictConfig):
                                 "train",
                                 epoch,
                                 (micro_step + micro_index)
-                                * cfg.data.batch_size
+                                * cfg.train.batch_size
                                 * world_size
                                 + j * world_size
                                 + (accelerator.process_index if accelerator else 0),
@@ -2364,7 +2358,7 @@ def run_training(cfg: DictConfig):
             global_step += 1
             console.step(1)
             # checkpointing
-            ckpt_steps = cfg.train.get("checkpoint_steps")
+            ckpt_steps = cfg.train.get("save_every")
             if (
                 ckpt_steps is not None
                 and int(ckpt_steps) > 0

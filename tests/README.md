@@ -32,7 +32,7 @@ This directory contains tests for the STōk project, organized for fast, CPU-onl
 
 - CLI training smoke (`integration/test_cli_train_smoke.py`)
   - Purpose: Exercise the `stok train` CLI end-to-end on dummy data.
-  - Scope: Invokes Click CLI with Hydra overrides for a tiny model (e.g., `d_model=64`, `n_layers=2`, `n_heads=4`, `ffn_mult=1.0`), small data loader (`batch_size=2`, `max_len=64`, `num_workers=0`), `model.codebook.preset=lite`, a few steps (`train.num_steps=3`), and `train.wandb.enabled=false`.
+  - Scope: Invokes Click CLI with Hydra overrides for a tiny model (e.g., `d_model=64`, `n_layers=2`, `n_heads=4`, `ffn_mult=1.0`), small data loader (`batch_size=2`, `max_len=64`, `num_workers=0`), `model.codebook.preset=lite`, a few steps (`train.max_steps=3`), and `train.wandb.enabled=false`.
   - Pass criteria: CLI exits with code 0 and prints `Training complete.`.
   - Notes: Includes an RMSNorm variant to ensure `model.encoder.norm=rmsnorm` works end-to-end.
 
@@ -77,7 +77,7 @@ This directory contains tests for the STōk project, organized for fast, CPU-onl
 
 - Checkpointing artifacts (`integration/test_checkpointing_and_resume.py`)
   - Purpose: Validate periodic checkpointing, final model saving, and log/config artifact placement.
-  - Scope: Runs training with `train.project_path=<tmp>` and `train.checkpoint_steps=2`; verifies:
+  - Scope: Runs training with `train.output_dir=<tmp>` and `train.save_every=2`; verifies:
     - `checkpoints/step_00000002.pt` and `checkpoints/latest.pt`
     - `logs/train.log` and `configs/run.yaml`
     - `model/final.pt`

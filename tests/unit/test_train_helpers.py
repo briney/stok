@@ -187,7 +187,7 @@ def test_required_coordinate_loading_policy(tmp_path, load_coords):
         cfg = compose(
             config_name="config",
             overrides=[
-                "data.batch_size=2",
+                "train.batch_size=2",
                 "data.max_len=6",
                 "data.num_workers=0",
                 f"data.train={source}",
@@ -239,7 +239,7 @@ def test_coordinate_alias_conflict_and_missing_source(tmp_path):
         ("model.classifier.tie_to_codebook=false", "tie_to_codebook"),
         ("model.codebook.trainable=true", "codebook.trainable"),
         ("model.decoder.freeze=false", "decoder.freeze"),
-        ("train.optimizer.name=sgd", "optimizer.name"),
+        ("train.optimizer=sgd", "train.optimizer"),
     ],
 )
 def test_unsupported_options_fail_before_accelerator(monkeypatch, override, match):

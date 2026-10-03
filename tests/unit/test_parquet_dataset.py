@@ -164,13 +164,12 @@ def test_training_rejects_structure_folders(tmp_path, is_mlm):
         {
             "data": {
                 "train": str(tmp_path),
-                "batch_size": 1,
                 "max_len": 8,
                 "num_workers": 0,
                 "pin_memory": False,
             },
             "model": {"classifier": {"ignore_index": -100}},
-            "train": {},
+            "train": {"batch_size": 1},
         }
     )
     with pytest.raises(ValueError, match="Parquet"):

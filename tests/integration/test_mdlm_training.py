@@ -31,21 +31,21 @@ def mdlm_config(project, source, codebook_path, **options):
     cfg.model.codebook.path = str(codebook_path)
     cfg.data.train = {"local": {"path": str(source)}}
     cfg.data.eval = {}
-    cfg.data.batch_size = 2
+    cfg.train.batch_size = 2
     cfg.data.max_len = 8
     cfg.data.pin_memory = False
     cfg.data.num_workers = 0
     cfg.data.shuffle_shards = cfg.data.shuffle_rows = False
     cfg.train.objective = "mdlm"
-    cfg.train.precision = "no"
-    cfg.train.num_steps = 2
-    cfg.train.optimizer.lr = 0.002
-    cfg.train.scheduler.warmup_steps = cfg.train.scheduler.decay_steps = 0
-    cfg.train.grad_clip_norm = 0
-    cfg.train.log_steps = 1
-    cfg.train.checkpoint_steps = 1
+    cfg.train.mixed_precision = "no"
+    cfg.train.max_steps = 2
+    cfg.train.lr = 0.002
+    cfg.train.warmup_steps = cfg.train.decay_steps = 0
+    cfg.train.max_grad_norm = 0
+    cfg.train.log_every = 1
+    cfg.train.save_every = 1
     cfg.train.wandb.enabled = cfg.train.console.enabled = False
-    cfg.train.project_path = str(project)
+    cfg.train.output_dir = str(project)
     cfg.train.mdlm = {
         "placement": "token",
         "span_mean": 8,
@@ -76,7 +76,7 @@ def training_fixture(tmp_path, n=8, rows=None):
 def checkpoint(cfg):
     run_training(cfg)
     return torch.load(
-        Path(cfg.train.project_path) / "model/final.pt",
+        Path(cfg.train.output_dir) / "model/final.pt",
         map_location="cpu",
         weights_only=False,
     )
@@ -150,7 +150,7 @@ def test_mdlm_partial_window_flushes(tmp_path):
         tmp_path / "run",
         source,
         codebook,
-        **{"train.epochs": 1, "train.grad_accum_steps": 4},
+        **{"train.max_epochs": 1, "train.gradient_accumulation_steps": 4},
     )
     state = checkpoint(cfg)
     assert state["global_step"] == state["scheduler"]["last_epoch"] == 2
@@ -162,11 +162,14 @@ def test_mdlm_accumulation_matches_full_batch(tmp_path):
     source, codebook = training_fixture(tmp_path)
     small = checkpoint(
         mdlm_config(
-            tmp_path / "small", source, codebook, **{"train.grad_accum_steps": 2}
+            tmp_path / "small",
+            source,
+            codebook,
+            **{"train.gradient_accumulation_steps": 2},
         )
     )
     large = checkpoint(
-        mdlm_config(tmp_path / "large", source, codebook, **{"data.batch_size": 4})
+        mdlm_config(tmp_path / "large", source, codebook, **{"train.batch_size": 4})
     )
     for name in small["model"]:
         torch.testing.assert_close(
@@ -194,8 +197,8 @@ def test_tiny_paired_subset_learns(tmp_path):
             source,
             codebook,
             **{
-                "train.num_steps": steps,
-                "train.optimizer.lr": 0.02,
+                "train.max_steps": steps,
+                "train.lr": 0.02,
                 "train.mdlm.noise.min_mask_probability": 0.99,
             },
         )
@@ -331,7 +334,7 @@ def test_no_eligible_window_skips_but_preserves_consumed_cursor(tmp_path):
             source,
             codebook,
             **{
-                "train.num_steps": 1,
+                "train.max_steps": 1,
                 "train.mdlm.regime_weights": {"structure_only": 1},
             },
         )
@@ -418,7 +421,7 @@ def test_real_zero_mask_draw_still_updates_adamw(tmp_path):
             tmp_path / "initial",
             source,
             codebook,
-            **{"train.num_steps": 0, "train.seed": 1},
+            **{"train.max_steps": 0, "train.seed": 1},
         )
     )
     cfg = mdlm_config(
@@ -426,7 +429,7 @@ def test_real_zero_mask_draw_still_updates_adamw(tmp_path):
         source,
         codebook,
         **{
-            "train.num_steps": 1,
+            "train.max_steps": 1,
             "train.seed": 1,
             "train.mdlm.regime_weights": {"sequence_only": 1},
         },
@@ -458,22 +461,22 @@ def test_real_zero_mask_draw_still_updates_adamw(tmp_path):
         ("model.encoder.n_heads", 3),
         ("model.codebook.trainable", True),
         ("model.decoder.freeze", False),
-        ("train.scheduler.decay", "bad"),
-        ("train.scheduler.warmup_steps", -1),
-        ("train.optimizer.lr", -1),
+        ("train.scheduler", "bad"),
+        ("train.warmup_steps", -1),
+        ("train.lr", -1),
     ],
 )
 def test_invalid_mdlm_model_configuration_leaves_no_artifacts(tmp_path, key, value):
     source, codebook = training_fixture(tmp_path)
     cfg = mdlm_config(tmp_path / "run", source, codebook, **{key: value})
-    with pytest.raises(RuntimeError):
+    with pytest.raises((ValueError, RuntimeError)):
         run_training(cfg)
     assert not (tmp_path / "run").exists()
 
 
 def test_mdlm_has_no_legacy_classifier_configuration_dependency(tmp_path):
     source, codebook = training_fixture(tmp_path)
-    cfg = mdlm_config(tmp_path / "run", source, codebook, **{"train.num_steps": 1})
+    cfg = mdlm_config(tmp_path / "run", source, codebook, **{"train.max_steps": 1})
     del cfg.model.classifier
     state = checkpoint(cfg)
     assert state["global_step"] == 1

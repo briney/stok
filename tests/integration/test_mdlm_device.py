@@ -217,12 +217,12 @@ def test_real_device_rng_inventory_continuation(tmp_path, monkeypatch):
             "model.encoder.dropout": 0.2,
             "data.num_workers": 2,
             "data.max_len": 66,
-            "train.grad_accum_steps": 2,
-            "train.precision": "bf16",
+            "train.gradient_accumulation_steps": 2,
+            "train.mixed_precision": "bf16",
         },
     )
     for name, stop in (("full", -1), ("interrupted", 1), ("resumed", -1)):
-        cfg.train.project_path = str(
+        cfg.train.output_dir = str(
             tmp_path / ("full" if name == "full" else "interrupted")
         )
         if name == "resumed":

@@ -119,20 +119,20 @@ def test_training_with_decoder_and_fape(tmp_path, monkeypatch):
         "train.decoding.eval_enabled=true",
         # small data loader
         "data.load_coords=true",
-        "data.batch_size=2",
+        "train.batch_size=2",
         f"data.max_len={max_len}",
         "data.num_workers=0",
         "data.pin_memory=false",
         # short run and ensure eval triggers
-        "train.num_steps=2",
-        "train.optimizer.lr=0.01",
-        "train.scheduler.warmup_steps=0",
-        "train.log_steps=1",
+        "train.max_steps=2",
+        "train.lr=0.01",
+        "train.warmup_steps=0",
+        "train.log_every=1",
         "train.eval.steps=2",
         # disable external logging
         "train.wandb.enabled=false",
         # write artifacts to temp dir
-        f"train.project_path={tmp_path.as_posix()}",
+        f"train.output_dir={tmp_path.as_posix()}",
     ]
 
     states = []
@@ -200,9 +200,9 @@ def test_fape_only_missing_coordinates_produces_finite_update(tmp_path, monkeypa
         "data.load_coords=true",
         f"model.decoder.path={decoder_path}",
         "train.fape.enabled=true",
-        "train.grad_accum_steps=2",
-        "train.scheduler.warmup_steps=0",
-        "train.log_steps=1",
+        "train.gradient_accumulation_steps=2",
+        "train.warmup_steps=0",
+        "train.log_every=1",
     )[3:]
     states = []
     for updates in (0, 1):
@@ -212,7 +212,7 @@ def test_fape_only_missing_coordinates_produces_finite_update(tmp_path, monkeypa
         ):
             cfg = compose(
                 config_name="config",
-                overrides=[*overrides, f"train.num_steps={updates}"],
+                overrides=[*overrides, f"train.max_steps={updates}"],
             )
         run_training(cfg)
         checkpoint = torch.load(

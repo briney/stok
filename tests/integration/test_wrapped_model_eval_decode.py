@@ -140,17 +140,17 @@ def test_eval_decode_with_wrapped_model(monkeypatch, tmp_path):
         "train.decoding.eval_enabled=true",
         "train.eval.steps=1",
         # short run
-        "train.num_steps=2",
-        "train.log_steps=1",
-        "train.grad_accum_steps=1",
+        "train.max_steps=2",
+        "train.log_every=1",
+        "train.gradient_accumulation_steps=1",
         # small data loader
-        "data.batch_size=2",
+        "train.batch_size=2",
         "data.max_len=64",
         "data.num_workers=0",
         "data.pin_memory=false",
         # disable external logging and write artifacts to temp dir
         "train.wandb.enabled=false",
-        f"train.project_path={tmp_path.as_posix()}",
+        f"train.output_dir={tmp_path.as_posix()}",
     ]
 
     with as_file(files("stok").joinpath("configs")) as cfg_dir:

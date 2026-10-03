@@ -258,7 +258,9 @@ def test_rank_local_bad_input_exits_all_ranks(tmp_path):
         }
     ).to_parquet(source, index=False)
     for result in run_distributed(
-        training_command(tmp_path / "run", f"data.train={source}", "data.batch_size=1"),
+        training_command(
+            tmp_path / "run", f"data.train={source}", "train.batch_size=1"
+        ),
         timeout=15,
     ):
         assert result.returncode != 0
@@ -280,7 +282,7 @@ def test_two_rank_globally_empty_pass_does_not_checkpoint(tmp_path):
         source,
     )
     for result in run_distributed(
-        training_command(tmp_path / "run", f"data.train={source}", "data.batch_size=1")
+        training_command(tmp_path / "run", f"data.train={source}", "train.batch_size=1")
     ):
         assert result.returncode != 0
         assert "no successful optimizer update" in result.stderr

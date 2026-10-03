@@ -74,7 +74,7 @@ def main():
         cfg = compose(
             config_name="config",
             overrides=[
-                "data.batch_size=2",
+                "train.batch_size=2",
                 "data.max_len=5",
                 f"data.num_workers={args.workers}",
                 "data.pin_memory=false",
@@ -92,8 +92,8 @@ def main():
             root / "data",
             root / "codebook.pt",
             **{
-                "data.batch_size": 1 if accelerator.num_processes > 1 else 2,
-                "train.grad_accum_steps": args.accum,
+                "train.batch_size": 1 if accelerator.num_processes > 1 else 2,
+                "train.gradient_accumulation_steps": args.accum,
             },
         )
         if args.case == "mdlm-unused-head":
@@ -166,15 +166,15 @@ def main():
         cfg.model.encoder.ffn_mult = 1.0
         cfg.model.encoder.dropout = 0.0
         cfg.model.codebook.preset = "lite"
-        cfg.data.batch_size = 1 if accelerator.num_processes > 1 else 2
+        cfg.train.batch_size = 1 if accelerator.num_processes > 1 else 2
         cfg.train.seed = 1337
-        cfg.train.num_steps = 2
-        cfg.train.grad_accum_steps = args.accum
-        cfg.train.optimizer.lr = 0.001
-        cfg.train.scheduler.warmup_steps = 0
+        cfg.train.max_steps = 2
+        cfg.train.gradient_accumulation_steps = args.accum
+        cfg.train.lr = 0.001
+        cfg.train.warmup_steps = 0
         cfg.train.wandb.enabled = False
         cfg.train.console.enabled = False
-        cfg.train.project_path = str(root / "run")
+        cfg.train.output_dir = str(root / "run")
         cfg.data.eval = {}
         run_training(cfg)
         accelerator.wait_for_everyone()

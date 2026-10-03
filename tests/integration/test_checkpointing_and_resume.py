@@ -19,24 +19,24 @@ def test_checkpointing_artifacts(tmp_path):
         # small codebook preset
         "model.codebook.preset=lite",
         # small data loader
-        "data.batch_size=2",
+        "train.batch_size=2",
         "data.max_len=64",
         "data.num_workers=0",
         "data.pin_memory=false",
         # disable external logging
         "train.wandb.enabled=false",
         # checkpoint interval
-        "train.checkpoint_steps=2",
+        "train.save_every=2",
         # project path
-        f"train.project_path={project_dir.as_posix()}",
+        f"train.output_dir={project_dir.as_posix()}",
     ]
 
     # First run: 3 steps → should save step_00000002 and final model
     overrides_first = base_overrides + [
-        "train.num_steps=3",
-        "train.log_steps=1",
+        "train.max_steps=3",
+        "train.log_every=1",
         "train.eval.steps=100000",
-        "train.grad_accum_steps=1",
+        "train.gradient_accumulation_steps=1",
     ]
     with as_file(files("stok").joinpath("configs")) as cfg_dir:
         with initialize_config_dir(version_base=None, config_dir=str(cfg_dir)):
@@ -60,7 +60,7 @@ def test_checkpointing_artifacts(tmp_path):
     assert first["global_step"] == 3 and first["micro_step"] == 3
     assert first["step_unit"] == "optimizer_update"
     # Existing artifacts never silently resume the next run.
-    cfg.train.num_steps = 1
+    cfg.train.max_steps = 1
     run_training(cfg)
     second = torch.load(model_dir / "final.pt", weights_only=False)
     assert second["global_step"] == 1 and second["micro_step"] == 1
