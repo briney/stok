@@ -136,13 +136,13 @@ def config_for(tmp_path, objective="mdlm", source_kind="sharded", workers=0):
         source,
         codebook,
         **{
-            "train.num_steps": 6,
-            "train.grad_accum_steps": 3,
+            "train.max_steps": 6,
+            "train.gradient_accumulation_steps": 3,
             "model.encoder.dropout": 0.2,
             "data.num_workers": workers,
-            "train.log_steps": 3,
-            "train.scheduler.decay_steps": None,
-            "train.scheduler.warmup_steps": 1,
+            "train.log_every": 3,
+            "train.decay_steps": None,
+            "train.warmup_steps": 1,
             "data.shuffle_rows": True,
             "data.shuffle_shards": True,
         },
@@ -196,7 +196,7 @@ def test_resume_matches_uninterrupted_training(
 ):
     cfg = config_for(tmp_path, objective, source_kind, workers)
     execute(cfg, tmp_path / "full.yaml")
-    cfg.train.project_path = str(tmp_path / "interrupted")
+    cfg.train.output_dir = str(tmp_path / "interrupted")
     execute(cfg, tmp_path / "interrupted.yaml", stop=stop, ok=False)
     cfg.train.resume_from = str(
         tmp_path / f"interrupted/checkpoints/step_{stop:08d}.pt"
@@ -226,10 +226,10 @@ def test_resume_matches_uninterrupted_training(
 @pytest.mark.parametrize("workers", [0, 2])
 def test_two_rank_continuation_with_actual_cpu_scaler_skip(tmp_path, workers):
     cfg = config_for(tmp_path, workers=workers)
-    cfg.train.num_steps = 4
+    cfg.train.max_steps = 4
     env = {"RESUME_SKIP": "1"}
     execute(cfg, tmp_path / "full.yaml", distributed=True, extra_env=env)
-    cfg.train.project_path = str(tmp_path / "interrupted")
+    cfg.train.output_dir = str(tmp_path / "interrupted")
     execute(
         cfg,
         tmp_path / "interrupted.yaml",
@@ -287,12 +287,12 @@ def snapshot(path):
     [
         ("train.objective", "mlm"),
         ("train.seed", 9),
-        ("train.grad_accum_steps", 2),
-        ("train.optimizer.lr", 0.001),
-        ("train.num_steps", 10),
-        ("train.scheduler.warmup_steps", 2),
-        ("train.precision", "bf16"),
-        ("data.batch_size", 1),
+        ("train.gradient_accumulation_steps", 2),
+        ("train.lr", 0.001),
+        ("train.max_steps", 10),
+        ("train.warmup_steps", 2),
+        ("train.mixed_precision", "bf16"),
+        ("train.batch_size", 1),
         ("data.num_workers", 2),
         ("model.encoder.dropout", 0.1),
         ("train.mdlm.placement", "span"),
@@ -301,7 +301,7 @@ def snapshot(path):
 def test_rejected_resume_preserves_every_artifact(tmp_path, key, value):
     cfg = config_for(tmp_path)
     execute(cfg, tmp_path / "original.yaml", stop=1, ok=False)
-    project = Path(cfg.train.project_path)
+    project = Path(cfg.train.output_dir)
     cfg.train.resume_from = str(project / "checkpoints/step_00000001.pt")
     before = snapshot(project)
     OmegaConf.update(cfg, key, value)
@@ -316,7 +316,7 @@ def test_rejected_resume_preserves_every_artifact(tmp_path, key, value):
 def test_invalid_checkpoint_or_identity_preserves_artifacts(tmp_path, damage):
     cfg = config_for(tmp_path)
     execute(cfg, tmp_path / "original.yaml", stop=1, ok=False)
-    project = Path(cfg.train.project_path)
+    project = Path(cfg.train.output_dir)
     checkpoint = project / "checkpoints/step_00000001.pt"
     payload = torch.load(checkpoint, weights_only=True)
     if damage == "data":
@@ -345,7 +345,7 @@ def test_invalid_checkpoint_or_identity_preserves_artifacts(tmp_path, damage):
 def test_rank_local_checkpoint_failures_reach_all_ranks(tmp_path, failure):
     cfg = config_for(tmp_path)
     execute(cfg, tmp_path / "original.yaml", stop=1, distributed=True, ok=False)
-    project = Path(cfg.train.project_path)
+    project = Path(cfg.train.output_dir)
     checkpoint = project / "checkpoints/step_00000001.pt"
     cfg.train.resume_from = str(checkpoint)
     before = snapshot(project)
@@ -382,9 +382,9 @@ def test_legacy_invalid_resume_does_not_touch_artifacts(tmp_path, objective):
     cfg = config_for(tmp_path, "mlm", "map")
     cfg.train.objective = objective
     execute(cfg, tmp_path / "original.yaml", stop=1, ok=False)
-    project = Path(cfg.train.project_path)
+    project = Path(cfg.train.output_dir)
     cfg.train.resume_from = str(project / "checkpoints/step_00000001.pt")
-    cfg.train.optimizer.lr *= 2
+    cfg.train.lr *= 2
     before = snapshot(project)
     execute(cfg, tmp_path / "rejected.yaml", ok=False)
     assert snapshot(project) == before
@@ -406,7 +406,7 @@ def test_legacy_invalid_resume_does_not_touch_artifacts(tmp_path, objective):
 def test_incomplete_rank_state_rejected_before_output(tmp_path, damage):
     cfg = config_for(tmp_path)
     execute(cfg, tmp_path / "original.yaml", stop=1, ok=False)
-    project = Path(cfg.train.project_path)
+    project = Path(cfg.train.output_dir)
     checkpoint = project / "checkpoints/step_00000001.pt"
     payload = torch.load(checkpoint, weights_only=True)
     rank = payload["rank_states"][0]
@@ -480,11 +480,11 @@ def execute_wandb(cfg, path, *, stop=-1, env=None, ok=True):
 
 def test_wandb_id_and_rollback_suppress_only_history(tmp_path):
     cfg = config_for(tmp_path)
-    cfg.train.log_steps = 1
+    cfg.train.log_every = 1
     cfg.train.wandb.enabled = True
     cfg.train.wandb.mode = "offline"
     execute_wandb(cfg, tmp_path / "full.yaml")
-    cfg.train.project_path = str(tmp_path / "interrupted")
+    cfg.train.output_dir = str(tmp_path / "interrupted")
     execute_wandb(cfg, tmp_path / "interrupted.yaml", stop=2, ok=False)
     cfg.train.resume_from = str(tmp_path / "interrupted/checkpoints/step_00000002.pt")
     payload = torch.load(cfg.train.resume_from, weights_only=True)
@@ -525,31 +525,31 @@ def test_wandb_id_and_rollback_suppress_only_history(tmp_path):
 def test_wandb_failure_visible_without_new_run_fallback(tmp_path, failure):
     cfg = config_for(tmp_path)
     cfg.train.wandb.enabled = True
-    cfg.train.log_steps = 1
+    cfg.train.log_every = 1
     execute_wandb(cfg, tmp_path / "original.yaml", stop=1, ok=False)
     cfg.train.resume_from = str(
-        Path(cfg.train.project_path) / "checkpoints/step_00000001.pt"
+        Path(cfg.train.output_dir) / "checkpoints/step_00000001.pt"
     )
-    before = snapshot(Path(cfg.train.project_path))
+    before = snapshot(Path(cfg.train.output_dir))
     result, record = execute_wandb(
         cfg, tmp_path / "failed.yaml", env={failure: "1"}, ok=False
     )
     if failure != "WB_LOG_FAIL":
-        assert snapshot(Path(cfg.train.project_path)) == before
+        assert snapshot(Path(cfg.train.output_dir)) == before
     assert "visible W&B" in result.stderr
     assert len(record["init"]) == 1
     assert record["init"][0]["id"] == "fixed-run-id"
-    assert not (Path(cfg.train.project_path) / "model/final.pt").exists()
+    assert not (Path(cfg.train.output_dir) / "model/final.pt").exists()
 
 
 def test_actual_wandb_offline_id_continues_without_network(tmp_path):
     cfg = config_for(tmp_path)
     cfg.train.wandb.enabled = True
-    cfg.train.num_steps = 2
-    cfg.train.log_steps = 1
+    cfg.train.max_steps = 2
+    cfg.train.log_every = 1
     env = {"WANDB_MODE": "offline", "WANDB_SILENT": "true"}
     execute(cfg, tmp_path / "original.yaml", stop=1, extra_env=env, ok=False)
-    project = Path(cfg.train.project_path)
+    project = Path(cfg.train.output_dir)
     cfg.train.resume_from = str(project / "checkpoints/step_00000001.pt")
     saved = torch.load(cfg.train.resume_from, weights_only=True)
     assert saved["wandb_run_id"]
@@ -575,14 +575,14 @@ def test_no_eligible_windows_are_in_resume_cursor(tmp_path):
         source,
         codebook,
         **{
-            "train.num_steps": 3,
-            "train.grad_accum_steps": 2,
+            "train.max_steps": 3,
+            "train.gradient_accumulation_steps": 2,
             "model.encoder.dropout": 0.2,
             "train.mdlm.regime_weights": {"structure_only": 1},
         },
     )
     execute(cfg, tmp_path / "full.yaml")
-    cfg.train.project_path = str(tmp_path / "interrupted")
+    cfg.train.output_dir = str(tmp_path / "interrupted")
     execute(cfg, tmp_path / "interrupted.yaml", stop=1, ok=False)
     cfg.train.resume_from = str(tmp_path / "interrupted/checkpoints/step_00000001.pt")
     saved = torch.load(cfg.train.resume_from, weights_only=True)
@@ -639,12 +639,12 @@ def test_explicit_epochs_recurse_and_preserve_implicit_legacy_iteration(tmp_path
 def test_resume_allows_output_logging_evaluation_and_checkpoint_overrides(tmp_path):
     cfg = config_for(tmp_path)
     execute(cfg, tmp_path / "full.yaml")
-    cfg.train.project_path = str(tmp_path / "interrupted")
+    cfg.train.output_dir = str(tmp_path / "interrupted")
     execute(cfg, tmp_path / "interrupted.yaml", stop=2, ok=False)
     cfg.train.resume_from = str(tmp_path / "interrupted/checkpoints/step_00000002.pt")
-    cfg.train.project_path = str(tmp_path / "new-output")
-    cfg.train.log_steps = 1
-    cfg.train.checkpoint_steps = 3
+    cfg.train.output_dir = str(tmp_path / "new-output")
+    cfg.train.log_every = 1
+    cfg.train.save_every = 3
     cfg.train.eval.steps = 999
     cfg.train.eval.seed = 88
     cfg.train.wandb.tags = ["resumed"]
@@ -667,7 +667,7 @@ def test_training_progress_is_flat_typed_dict(tmp_path):
     cfg = config_for(tmp_path)
     execute(cfg, tmp_path / "original.yaml", stop=1, ok=False)
     cfg.train.resume_from = str(
-        Path(cfg.train.project_path) / "checkpoints/step_00000001.pt"
+        Path(cfg.train.output_dir) / "checkpoints/step_00000001.pt"
     )
     execute(cfg, tmp_path / "resumed.yaml", extra_env={"CHECK_PROGRESS_CONTRACT": "1"})
 
@@ -693,8 +693,8 @@ def fape_config(tmp_path):
     cfg.train.fape.enabled = True
     cfg.train.fape.start_step = 0
     cfg.train.fape.weight = 1
-    cfg.train.num_steps = 3
-    cfg.train.log_steps = 1
+    cfg.train.max_steps = 3
+    cfg.train.log_every = 1
     return cfg
 
 
@@ -702,7 +702,7 @@ def test_changed_training_decoder_rejected_before_artifacts(tmp_path):
     cfg = fape_config(tmp_path)
     env = {"RESUME_TINY_DECODER": "1"}
     execute(cfg, tmp_path / "original.yaml", stop=1, ok=False, extra_env=env)
-    project = Path(cfg.train.project_path)
+    project = Path(cfg.train.output_dir)
     cfg.train.resume_from = str(project / "checkpoints/step_00000001.pt")
     before = snapshot(project)
     decoder = torch.load(cfg.model.decoder.path, weights_only=True)
@@ -717,7 +717,7 @@ def test_fape_resume_with_same_decoder_matches_uninterrupted(tmp_path):
     cfg = fape_config(tmp_path)
     env = {"RESUME_TINY_DECODER": "1"}
     execute(cfg, tmp_path / "full.yaml", extra_env=env)
-    cfg.train.project_path = str(tmp_path / "interrupted")
+    cfg.train.output_dir = str(tmp_path / "interrupted")
     execute(cfg, tmp_path / "interrupted.yaml", stop=1, ok=False, extra_env=env)
     cfg.train.resume_from = str(tmp_path / "interrupted/checkpoints/step_00000001.pt")
     execute(cfg, tmp_path / "resumed.yaml", extra_env=env)
@@ -832,7 +832,7 @@ def rng_checkpoint(tmp_path_factory):
 
     root = tmp_path_factory.mktemp("rng-checkpoint")
     cfg = config_for(root)
-    cfg.train.num_steps = 1
+    cfg.train.max_steps = 1
     run_training(cfg)
     return cfg, torch.load(root / "full/model/final.pt", weights_only=True)
 
@@ -874,7 +874,7 @@ def test_cuda_rng_rejected_before_artifacts_or_wandb(
     (project / "keep").write_bytes(b"existing run artifacts")
     checkpoint = project / "resume.pt"
     torch.save(payload, checkpoint)
-    cfg.train.project_path, cfg.train.resume_from = str(project), str(checkpoint)
+    cfg.train.output_dir, cfg.train.resume_from = str(project), str(checkpoint)
     before = snapshot(project)
     monkeypatch.setattr(
         train, "resume_signature", lambda *a, **kw: payload["signature"]

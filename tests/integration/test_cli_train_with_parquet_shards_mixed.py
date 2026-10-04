@@ -57,18 +57,18 @@ def test_cli_train_with_parquet_dir_train_and_file_eval(tmp_path):
         # small codebook preset
         "model.codebook.preset=lite",
         # small data loader
-        "data.batch_size=2",
+        "train.batch_size=2",
         f"data.max_len={max_len}",
         "data.num_workers=0",
         "data.pin_memory=false",
         # short run and ensure eval triggers
-        "train.num_steps=4",
-        "train.log_steps=1",
+        "train.max_steps=4",
+        "train.log_every=1",
         "train.eval.steps=2",
         # disable external logging
         "train.wandb.enabled=false",
         # write artifacts to temp dir
-        f"train.project_path={tmp_path.as_posix()}",
+        f"train.output_dir={tmp_path.as_posix()}",
     ]
 
     result = runner.invoke(cli, ["train", *overrides])  # type: ignore[arg-type]

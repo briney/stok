@@ -162,18 +162,18 @@ def test_eval_decoding_auto_enables_decoder(tmp_path, monkeypatch, activation):
         "train.fape.enabled=false",
         "train.decoding.eval_enabled=true",
         # small data loader
-        "data.batch_size=2",
+        "train.batch_size=2",
         f"data.max_len={max_len}",
         "data.num_workers=0",
         "data.pin_memory=false",
         # short run and ensure eval triggers
-        "train.num_steps=3",
-        "train.log_steps=1",
+        "train.max_steps=3",
+        "train.log_every=1",
         "train.eval.steps=2",
         # disable external logging
         "train.wandb.enabled=false",
         # write artifacts to temp dir
-        f"train.project_path={tmp_path.as_posix()}",
+        f"train.output_dir={tmp_path.as_posix()}",
     ]
 
     if activation == "metrics_example":

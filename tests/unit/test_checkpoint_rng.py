@@ -20,6 +20,59 @@ def test_resume_signature_rejects_nonmapping_configuration():
         )
 
 
+def test_resume_accepts_renamed_config_but_rejects_changed_budget(cuda_resume):
+    payload, _ = cuda_resume
+    payload["signature"]["config"] = {
+        "data": {"batch_size": 2},
+        "train": {
+            "num_steps": 10,
+            "epochs": None,
+            "grad_accum_steps": 4,
+            "precision": "bf16",
+            "grad_clip_norm": 1.0,
+            "optimizer": {
+                "name": "adamw",
+                "lr": 0.001,
+                "betas": [0.9, 0.95],
+                "weight_decay": 0.01,
+            },
+            "scheduler": {
+                "decay": "linear",
+                "warmup_steps": 2,
+                "stable_steps": 0,
+                "decay_steps": None,
+            },
+        },
+    }
+    expected = copy.deepcopy(payload["signature"])
+    expected["config"] = {
+        "data": {},
+        "train": {
+            "batch_size": 2,
+            "max_steps": 10,
+            "max_epochs": None,
+            "gradient_accumulation_steps": 4,
+            "mixed_precision": "bf16",
+            "max_grad_norm": 1.0,
+            "optimizer": "adamw",
+            "lr": 0.001,
+            "adam_beta1": 0.9,
+            "adam_beta2": 0.95,
+            "adam_eps": 1e-8,
+            "weight_decay": 0.01,
+            "scheduler": "warmup_linear",
+            "warmup_steps": 2,
+            "stable_steps": 0,
+            "decay_steps": None,
+        },
+    }
+    ck.validate_resume_signature(payload, expected)
+    assert "num_steps" in payload["signature"]["config"]["train"]
+    expected["config"]["train"]["max_steps"] = 11
+    with pytest.raises(ValueError, match="signature mismatch"):
+        ck.validate_resume_signature(payload, expected)
+
+
 @pytest.fixture
 def cuda_resume():
     model = torch.nn.Linear(2, 1)

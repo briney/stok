@@ -34,10 +34,10 @@ with initialize_config_dir(
             "train=mdlm_pilot",
             f"model.codebook.path={os.environ['STOK_MDLM_ARCHIVE']}",
             f"+data.train.public_diagnostic.path={os.environ['STOK_MDLM_SOURCE']}",
-            "train.num_steps=4",
-            "train.scheduler.warmup_steps=0",
-            "train.checkpoint_steps=1",
-            "train.log_steps=1",
+            "train.max_steps=4",
+            "train.warmup_steps=0",
+            "train.save_every=1",
+            "train.log_every=1",
             "train.wandb.enabled=false",
             "train.console.enabled=false",
             "train.eval.mdlm.enabled=false",
@@ -116,7 +116,7 @@ probe = PROBE.replace(
     "try:\n    train.run_training(cfg)", profile + "\ntry:\n    train.run_training(cfg)"
 )
 for name, stop in (("full", -1), ("interrupted", 1), ("resumed", -1)):
-    cfg.train.project_path = str(out / ("full" if name == "full" else "interrupted"))
+    cfg.train.output_dir = str(out / ("full" if name == "full" else "interrupted"))
     if name == "resumed":
         cfg.train.resume_from = str(out / "interrupted/checkpoints/step_00000001.pt")
     path = out / f"{name}.yaml"
@@ -134,7 +134,7 @@ for name, stop in (("full", -1), ("interrupted", 1), ("resumed", -1)):
     )
     if stop >= 0:
         assert "intentional interruption" in (out / f"{name}.log").read_text()
-    for path in Path(cfg.train.project_path).glob("checkpoints/step_*.pt"):
+    for path in Path(cfg.train.output_dir).glob("checkpoints/step_*.pt"):
         if name == "full" or path.name != "step_00000001.pt":
             path.unlink()  # only our redundant diagnostics
 full = torch.load(out / "full/model/final.pt", weights_only=True, map_location="cpu")

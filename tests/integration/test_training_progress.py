@@ -21,13 +21,13 @@ def training_command(project, *overrides):
         "model.encoder.dropout=0.0",
         "model.codebook.preset=lite",
         "data.num_workers=0",
-        "data.batch_size=2",
+        "train.batch_size=2",
         "data.max_len=8",
-        "train.num_steps=3",
-        "train.checkpoint_steps=1",
+        "train.max_steps=3",
+        "train.save_every=1",
         "train.wandb.enabled=false",
         "train.console.enabled=false",
-        f"train.project_path={project}",
+        f"train.output_dir={project}",
         *overrides,
     ]
 
@@ -63,10 +63,10 @@ def test_undersized_loader_fails_promptly(tmp_path):
 @pytest.mark.parametrize(
     "override",
     [
-        "train.grad_accum_steps=0",
-        "train.log_steps=0",
+        "train.gradient_accumulation_steps=0",
+        "train.log_every=0",
         "train.eval.steps=0",
-        "train.num_steps=-1",
+        "train.max_steps=-1",
     ],
 )
 def test_invalid_progress_configuration(tmp_path, override):
@@ -98,7 +98,7 @@ def run_checkpoint(project, *overrides):
 
 
 def test_num_steps_counts_optimizer_updates(tmp_path):
-    checkpoint = run_checkpoint(tmp_path, "train.grad_accum_steps=4")
+    checkpoint = run_checkpoint(tmp_path, "train.gradient_accumulation_steps=4")
     states = checkpoint["optimizer"]["state"].values()
     assert states and all(state["step"].item() == 3 for state in states)
     assert checkpoint["scheduler"]["last_epoch"] == 3
@@ -130,8 +130,8 @@ def test_epoch_flushes_final_partial_window(tmp_path):
     checkpoint = run_checkpoint(
         tmp_path / "run",
         f"data.train={source}",
-        "train.epochs=1",
-        "train.grad_accum_steps=4",
+        "train.max_epochs=1",
+        "train.gradient_accumulation_steps=4",
     )
     assert checkpoint["global_step"] == 2
     assert checkpoint["micro_step"] == 5
@@ -146,16 +146,22 @@ def test_accumulation_matches_large_batch_with_unequal_supervision(tmp_path):
     write_labeled_parquet(source)
     common = [
         f"data.train={source}",
-        "train.num_steps=2",
-        "train.scheduler.warmup_steps=0",
-        "train.optimizer.lr=0.001",
-        "train.grad_clip_norm=0",
+        "train.max_steps=2",
+        "train.warmup_steps=0",
+        "train.lr=0.001",
+        "train.max_grad_norm=0",
     ]
     small = run_checkpoint(
-        tmp_path / "small", *common, "data.batch_size=2", "train.grad_accum_steps=4"
+        tmp_path / "small",
+        *common,
+        "train.batch_size=2",
+        "train.gradient_accumulation_steps=4",
     )
     large = run_checkpoint(
-        tmp_path / "large", *common, "data.batch_size=8", "train.grad_accum_steps=1"
+        tmp_path / "large",
+        *common,
+        "train.batch_size=8",
+        "train.gradient_accumulation_steps=1",
     )
     for name in small["model"]:
         torch.testing.assert_close(
@@ -201,7 +207,7 @@ def test_skipped_optimizer_step_does_not_advance_schedule(tmp_path, monkeypatch)
     ):
         cfg = compose(
             config_name="config",
-            overrides=training_command(tmp_path, "train.num_steps=2")[3:],
+            overrides=training_command(tmp_path, "train.max_steps=2")[3:],
         )
     run_training(cfg)
     checkpoint = torch.load(
@@ -239,8 +245,8 @@ def test_large_finite_loss_does_not_abort_perplexity_logging(tmp_path, monkeypat
             overrides=training_command(
                 tmp_path / "run",
                 f"data.train={source}",
-                "train.num_steps=1",
-                "train.log_steps=1",
+                "train.max_steps=1",
+                "train.log_every=1",
             )[3:],
         )
     run_training(cfg)

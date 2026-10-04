@@ -17,19 +17,19 @@ def test_run_training_programmatic_smoke(capsys, tmp_path):
         # small codebook preset
         "model.codebook.preset=lite",
         # small data loader
-        "data.batch_size=2",
+        "train.batch_size=2",
         "data.max_len=64",
         "data.num_workers=0",
         "data.pin_memory=false",
         # fast training
-        "train.num_steps=3",
-        "train.log_steps=1",
+        "train.max_steps=3",
+        "train.log_every=1",
         "train.eval.steps=100000",
-        "train.grad_accum_steps=1",
+        "train.gradient_accumulation_steps=1",
         # disable external logging
         "train.wandb.enabled=false",
         # write artifacts to temp dir
-        f"train.project_path={tmp_path.as_posix()}",
+        f"train.output_dir={tmp_path.as_posix()}",
     ]
 
     with as_file(files("stok").joinpath("configs")) as cfg_dir:

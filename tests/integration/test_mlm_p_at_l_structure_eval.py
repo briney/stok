@@ -483,7 +483,7 @@ class TestEndToEndMLMWithCameoEval:
             "model.encoder.dropout=0.0",
             "model.encoder.attn_dropout=0.0",
             "model.codebook.preset=lite",
-            "data.batch_size=2",
+            "train.batch_size=2",
             "data.max_len=256",  # Enough for real proteins
             "data.num_workers=0",
             "data.pin_memory=false",
@@ -495,11 +495,11 @@ class TestEndToEndMLMWithCameoEval:
             "train.eval.metrics.p_at_l.enabled=true",
             "train.eval.metrics.p_at_l.min_seq_sep=6",
             # Short run with eval
-            "train.num_steps=4",
-            "train.log_steps=2",
+            "train.max_steps=4",
+            "train.log_every=2",
             "train.eval.steps=2",
             "train.wandb.enabled=false",
-            f"train.project_path={tmp_path.as_posix()}",
+            f"train.output_dir={tmp_path.as_posix()}",
         ]
 
         result = runner.invoke(cli, ["train", *overrides])
@@ -552,7 +552,7 @@ class TestEndToEndMLMWithCameoEval:
             "model.encoder.dropout=0.0",
             "model.encoder.attn_dropout=0.0",
             "model.codebook.preset=lite",
-            "data.batch_size=2",
+            "train.batch_size=2",
             "data.max_len=256",
             "data.num_workers=0",
             "data.pin_memory=false",
@@ -560,11 +560,11 @@ class TestEndToEndMLMWithCameoEval:
             # Pass directory directly - should auto-detect as structure folder
             f"+data.eval.cameo={CAMEO_TEST_DATA.as_posix()}",
             "train.eval.metrics.p_at_l.enabled=true",
-            "train.num_steps=4",
-            "train.log_steps=2",
+            "train.max_steps=4",
+            "train.log_every=2",
             "train.eval.steps=2",
             "train.wandb.enabled=false",
-            f"train.project_path={tmp_path.as_posix()}",
+            f"train.output_dir={tmp_path.as_posix()}",
         ]
 
         result = runner.invoke(cli, ["train", *overrides])
@@ -608,18 +608,18 @@ class TestEndToEndMLMWithCameoEval:
             "model.encoder.dropout=0.0",
             "model.encoder.attn_dropout=0.0",
             "model.codebook.preset=lite",
-            "data.batch_size=2",
+            "train.batch_size=2",
             "data.max_len=64",
             "data.num_workers=0",
             "data.pin_memory=false",
             f"data.train={train_parquet.as_posix()}",
             f"+data.eval.validation={eval_parquet.as_posix()}",
             # Don't enable p_at_l explicitly - it requires coords
-            "train.num_steps=4",
-            "train.log_steps=2",
+            "train.max_steps=4",
+            "train.log_every=2",
             "train.eval.steps=2",
             "train.wandb.enabled=false",
-            f"train.project_path={tmp_path.as_posix()}",
+            f"train.output_dir={tmp_path.as_posix()}",
         ]
 
         result = runner.invoke(cli, ["train", *overrides])

@@ -3,13 +3,13 @@ defaults: [base@train, _self_]
 
 train:
   objective: mdlm
-  precision: bf16
-  num_steps: 10000
-  scheduler:
-    warmup_steps: 500
-  log_steps: 25
-  checkpoint_steps: 500
-  grad_accum_steps: 1
+  mixed_precision: bf16
+  max_steps: 10000
+  warmup_steps: 500
+  log_every: 25
+  save_every: 500
+  batch_size: 2
+  gradient_accumulation_steps: 1
   mlm: null
   mdlm:
     placement: token
@@ -43,6 +43,5 @@ train:
 
 data:
   max_len: 514
-  batch_size: 2
   num_workers: 2
   prefetch_factor: 2

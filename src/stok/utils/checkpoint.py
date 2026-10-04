@@ -15,6 +15,7 @@ import torch
 from accelerate.utils import gather_object
 from omegaconf import OmegaConf
 
+from stok.config import normalize_training_config
 from stok.data.dataset import set_dataset_epoch
 from stok.utils.pretrained import file_sha256, state_sha256
 
@@ -70,15 +71,16 @@ def resume_signature(cfg, *, sources, codebook, accelerator, training_decoder=No
     config = OmegaConf.to_container(cfg, resolve=True)
     if not isinstance(config, dict):
         raise ValueError("Resume configuration must resolve to a mapping")
+    config = normalize_training_config(config, checkpoint=True)
     train, data = config["train"], config["data"]
     for key in (
-        "project_path",
+        "output_dir",
         "resume_from",
         "wandb",
         "console",
-        "log_steps",
+        "log_every",
         "eval",
-        "checkpoint_steps",
+        "save_every",
         "mdlm_identity",
         "effective_precision",
         "decoding",
@@ -180,10 +182,11 @@ def read_training_checkpoint(path: Path) -> dict:
 
 
 def validate_resume_signature(payload: dict, expected: dict) -> None:
-    if payload["signature"] != expected:
-        changed = [
-            key for key in expected if payload["signature"].get(key) != expected[key]
-        ]
+    saved = dict(payload["signature"])
+    if "config" in saved:
+        saved["config"] = normalize_training_config(saved["config"], checkpoint=True)
+    if saved != expected:
+        changed = [key for key in expected if saved.get(key) != expected[key]]
         raise ValueError(
             f"Resume signature mismatch: {changed}; original data/model/execution/budget must be unchanged"
         )

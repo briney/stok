@@ -35,17 +35,17 @@ def test_cli_train_mlm_with_p_at_l_disabled(tmp_path):
         "model.encoder.dropout=0.0",
         "model.encoder.attn_dropout=0.0",
         "model.codebook.preset=lite",
-        "data.batch_size=4",
+        "train.batch_size=4",
         "data.max_len=32",
         "data.num_workers=0",
         "data.pin_memory=false",
         f"data.train={train_parquet.as_posix()}",
-        "train.num_steps=3",
-        "train.log_steps=1",
+        "train.max_steps=3",
+        "train.log_every=1",
         "train.eval.steps=100000",  # Don't trigger eval
         "train.wandb.enabled=false",
         # P@L is disabled by default
-        f"train.project_path={tmp_path.as_posix()}",
+        f"train.output_dir={tmp_path.as_posix()}",
     ]
 
     result = runner.invoke(cli, ["train", *overrides])
@@ -99,21 +99,21 @@ def test_cli_train_mlm_with_p_at_l_enabled(tmp_path):
         "model.encoder.dropout=0.0",
         "model.encoder.attn_dropout=0.0",
         "model.codebook.preset=lite",
-        "data.batch_size=4",
+        "train.batch_size=4",
         "data.max_len=32",
         "data.num_workers=0",
         "data.pin_memory=false",
         "data.load_coords=true",
         f"data.train={train_parquet.as_posix()}",
         f"+data.eval.validation={eval_parquet.as_posix()}",
-        "train.num_steps=4",
-        "train.log_steps=2",
+        "train.max_steps=4",
+        "train.log_every=2",
         "train.eval.steps=2",
         "train.wandb.enabled=false",
         # Enable P@L metric (override existing config values)
         "train.eval.metrics.p_at_l.enabled=true",
         "train.eval.metrics.p_at_l.contact_threshold=8.0",
-        f"train.project_path={tmp_path.as_posix()}",
+        f"train.output_dir={tmp_path.as_posix()}",
     ]
 
     result = runner.invoke(cli, ["train", *overrides])
@@ -155,7 +155,7 @@ def test_p_at_l_metric_config_override(tmp_path):
         "model.encoder.dropout=0.0",
         "model.encoder.attn_dropout=0.0",
         "model.codebook.preset=lite",
-        "data.batch_size=4",
+        "train.batch_size=4",
         "data.max_len=32",
         "data.num_workers=0",
         "data.pin_memory=false",
@@ -163,11 +163,11 @@ def test_p_at_l_metric_config_override(tmp_path):
         f"+data.eval.validation.path={eval_parquet.as_posix()}",
         # Override metrics for this specific eval dataset
         # (P@L won't run without coords, but config parsing should work)
-        "train.num_steps=4",
-        "train.log_steps=2",
+        "train.max_steps=4",
+        "train.log_every=2",
         "train.eval.steps=2",
         "train.wandb.enabled=false",
-        f"train.project_path={tmp_path.as_posix()}",
+        f"train.output_dir={tmp_path.as_posix()}",
     ]
 
     result = runner.invoke(cli, ["train", *overrides])

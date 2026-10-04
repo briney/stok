@@ -284,6 +284,93 @@ pq.write_table(
 )
 ```
 
+### training configuration
+
+Training uses three sections: `model` for architecture, `data` for datasets and
+loading, and `train` for optimization, batching, duration, and run management.
+The common training option names match OPLM; STok keeps its own model defaults
+and objective-specific settings such as `train.mdlm` and `train.eval`.
+
+Both `stok train` and `python -m stok.train` accept the same options, including
+when the module is launched through Accelerate or torchrun:
+
+```bash
+stok train model=mdlm_150m train=mdlm_pilot \
+  --config pilot.yaml \
+  train.lr=1e-4 train.max_steps=10000
+
+accelerate launch -m stok.train model=mdlm_150m train=mdlm_pilot \
+  --config pilot.yaml \
+  train.lr=1e-4 train.max_steps=10000
+```
+
+`pilot.yaml` contains the data paths and evaluation setup described in the MDLM
+section below. It can also set training options:
+
+```yaml
+data:
+  train: /data/completed-paired-dataset
+train:
+  batch_size: 2
+  gradient_accumulation_steps: 8
+  mixed_precision: bf16
+  output_dir: /runs/stok/pilot-001
+```
+
+`model=mdlm_150m` and `train=mdlm_pilot` select packaged Hydra configuration
+groups. Dotted arguments such as `train.lr=1e-4` change individual values.
+Precedence, from lowest to highest, is:
+
+1. Packaged defaults and selected Hydra groups.
+2. The full `--config` YAML file.
+3. `--model-config`, `--train-config`, then `--data-config` section files.
+4. Command-line value overrides, regardless of where file flags appear.
+
+Section files contain only their section's contents: for example,
+`--train-config` accepts `lr: 0.0001`, without a surrounding `train:` key.
+Custom files are ordinary YAML overlays and cannot contain a Hydra `defaults`
+list. Select groups on the command line instead. Dictionaries merge recursively;
+lists replace earlier lists. Hydra's `+key=value`, `++key=value`, and `~key`
+syntax remains available for additions, additions/replacements, and deletions.
+For example, a new named training dataset uses
+`+data.train.experimental.path=/data/experimental`; a dataset already declared
+in the YAML can be changed with `data.train.experimental.path=/new/path`.
+Quote overrides containing lists, dictionaries, or `${...}` interpolations.
+
+Batch size is **per process/device**. With full accumulation windows, the
+effective batch size is `train.batch_size × train.gradient_accumulation_steps ×
+world_size`. Step budgets and logging/checkpoint intervals count successful
+optimizer updates. `train.max_epochs`, when set, governs complete data passes
+instead of `train.max_steps`; partial accumulation windows are flushed.
+
+Existing YAML files using the old names are translated when loaded. Use the new
+names in CLI overrides and new configs; saved config snapshots use these names:
+
+| Previous setting | Current setting |
+| --- | --- |
+| `data.batch_size` | `train.batch_size` |
+| `train.num_steps` / `train.epochs` | `train.max_steps` / `train.max_epochs` |
+| `train.grad_accum_steps` | `train.gradient_accumulation_steps` |
+| `train.grad_clip_norm` | `train.max_grad_norm` |
+| `train.precision` | `train.mixed_precision` |
+| `train.project_path` | `train.output_dir` |
+| `train.log_steps` / `train.checkpoint_steps` | `train.log_every` / `train.save_every` |
+| `train.optimizer.name` / `train.optimizer.lr` | `train.optimizer` / `train.lr` |
+| `train.optimizer.betas` | `train.adam_beta1` and `train.adam_beta2` |
+| `train.optimizer.weight_decay` | `train.weight_decay` |
+| `train.scheduler.warmup_steps` | `train.warmup_steps` |
+| `train.scheduler.stable_steps` / `train.scheduler.decay_steps` | `train.stable_steps` / `train.decay_steps` |
+
+STok supports `train.optimizer=adamw`; `train.adam_eps` defaults to `1e-8`.
+Legacy `train.scheduler.decay` is translated to the schedule names below.
+Conflicting old and new values in the same file are rejected. Version-2
+checkpoint comparisons account for these renames while retaining the existing
+data, model, execution, and training-budget checks.
+Scalar interpolation references (including `oc.select`) follow renamed fields.
+References to the old whole `train.optimizer.betas` list or
+`train.scheduler.decay` require explicit migration, with an error explaining the
+replacement.
+
 ### codebook training (default)
 
 Single‑GPU (quick/dev):
@@ -467,30 +554,28 @@ Configuration fields:
 
 ```yaml
 train:
-  scheduler:
-    decay: cosine        # one of: cosine, linear (required)
-    warmup_steps: 2000   # linear warmup from 0 → 1 (default: 0)
-    stable_steps: 0      # hold at 1.0 after warmup (default: 0)
-    decay_steps: null    # steps to decay 1.0 → 0.0; when null, auto‑derived as
-                         # (total_steps − warmup_steps − stable_steps), clamped at 0
+  scheduler: warmup_cosine  # warmup_linear | warmup_cosine | wsd_linear | wsd_cosine
+  warmup_steps: 2000        # linear warmup from 0 → 1
+  stable_steps: 0           # WSD plateau; must be 0 for warmup_* schedules
+  decay_steps: null         # null derives max_steps − warmup_steps − stable_steps
 ```
 
 Examples:
 
 - Cosine decay with warmup only (previous default):
   ```bash
-  stok train train.scheduler.decay=cosine train.scheduler.warmup_steps=2000
+  stok train train.scheduler=warmup_cosine train.warmup_steps=2000
   ```
 - WSD with a stable plateau and linear decay:
   ```bash
   stok train \
-    train.scheduler.decay=linear \
-    train.scheduler.warmup_steps=1000 \
-    train.scheduler.stable_steps=5000
+    train.scheduler=wsd_linear \
+    train.warmup_steps=1000 \
+    train.stable_steps=5000
   ```
 - Warmup then stable forever (no decay):
   ```bash
-  stok train train.scheduler.decay=cosine train.scheduler.warmup_steps=1000 train.scheduler.decay_steps=0
+  stok train train.scheduler=warmup_cosine train.warmup_steps=1000 train.decay_steps=0
   ```
 
 ## structure-based metrics
@@ -844,9 +929,9 @@ stok train \
 
 ### Remediation compatibility notes
 
-Training progress is measured in **successful optimizer updates**. `train.num_steps`,
+Training progress is measured in **successful optimizer updates**. `train.max_steps`,
 logging/evaluation/checkpoint intervals, and scheduler steps use that unit;
-`grad_accum_steps` controls input batches per update. Checkpoints include
+`train.gradient_accumulation_steps` controls input batches per update. Checkpoints include
 `global_step`, `micro_step` (consumed input batches), and
 `step_unit: optimizer_update`. Older runs used inconsistent counters and should
 not be compared by step number. A final partial accumulation window is flushed;
@@ -915,12 +1000,12 @@ errors are not directly comparable to corrected scores.
 preset starts at 10,000 successful optimizer updates, length 514 including
 BOS/EOS, batch 2, accumulation 1, and bf16. These values require hardware
 qualification; choose precision/batch/accumulation before freezing a comparison
-series. CPU correctness checks use `train.precision=no`. Startup reports the
+series. CPU correctness checks use `train.mixed_precision=no`. Startup reports the
 exact parameter count, actual device/hardware/mixed precision, and data hashes.
 
 Supply **completed exported dataset directories**, including their export
 summary/provenance and Parquet shards; bare Parquet and unfinished exports are
-rejected. Choose a new nonempty `train.project_path` for every fresh MDLM run.
+rejected. Choose a new nonempty `train.output_dir` for every fresh MDLM run.
 The following paths are placeholders to replace with actual local artifacts:
 
 ```bash
@@ -930,7 +1015,7 @@ stok train model=mdlm_150m train=mdlm_pilot \
   data.split_manifest=/data/stok-mdlm/splits-v1.jsonl \
   train.eval.mdlm.cohort=/data/stok-mdlm/denoising-v1.jsonl \
   train.eval.mdlm.generation_cohort=/data/stok-mdlm/generation-v1.jsonl \
-  train.project_path=/runs/stok-mdlm/baseline-001
+  train.output_dir=/runs/stok-mdlm/baseline-001
 ```
 
 Split JSONL rows use `dataset`, `sequence_id`, `split` (`train`, `validation`,
@@ -961,8 +1046,8 @@ a new run directory, a small budget, and disable both benchmark controls:
 ```bash
 stok train model=mdlm_150m train=mdlm_pilot \
   +data.train.diagnostic.path=/data/stok-mdlm/completed/diagnostic \
-  train.project_path=/runs/stok-mdlm/diagnostic-001 \
-  train.num_steps=20 train.scheduler.warmup_steps=0 \
+  train.output_dir=/runs/stok-mdlm/diagnostic-001 \
+  train.max_steps=20 train.warmup_steps=0 \
   train.eval.mdlm.enabled=false train.eval.mdlm.generation.enabled=false \
   train.wandb.enabled=false
 ```

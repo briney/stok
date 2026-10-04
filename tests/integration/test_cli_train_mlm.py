@@ -22,22 +22,22 @@ def test_cli_train_mlm_smoke_runs_end_to_end_cpu(tmp_path):
         # small codebook preset (not used for MLM but config requires it)
         "model.codebook.preset=lite",
         # small data loader
-        "data.batch_size=2",
+        "train.batch_size=2",
         "data.max_len=64",
         "data.num_workers=0",
         "data.pin_memory=false",
         # fast training
-        "train.num_steps=5",
-        "train.log_steps=2",
+        "train.max_steps=5",
+        "train.log_every=2",
         "train.eval.steps=100000",
-        "train.grad_accum_steps=1",
+        "train.gradient_accumulation_steps=1",
         # disable external logging
         "train.wandb.enabled=false",
         # MLM config
         "train.mlm.mask_prob=0.15",
         "train.mlm.tie_word_embeddings=true",
         # write artifacts to temp dir
-        f"train.project_path={tmp_path.as_posix()}",
+        f"train.output_dir={tmp_path.as_posix()}",
     ]
 
     result = runner.invoke(cli, ["train", *overrides])
@@ -58,15 +58,15 @@ def test_cli_train_mlm_logs_mask_accuracy(tmp_path):
         "model.encoder.dropout=0.0",
         "model.encoder.attn_dropout=0.0",
         "model.codebook.preset=lite",
-        "data.batch_size=2",
+        "train.batch_size=2",
         "data.max_len=64",
         "data.num_workers=0",
         "data.pin_memory=false",
-        "train.num_steps=4",
-        "train.log_steps=2",
+        "train.max_steps=4",
+        "train.log_every=2",
         "train.eval.steps=100000",
         "train.wandb.enabled=false",
-        f"train.project_path={tmp_path.as_posix()}",
+        f"train.output_dir={tmp_path.as_posix()}",
     ]
 
     result = runner.invoke(cli, ["train", *overrides])
@@ -87,15 +87,15 @@ def test_cli_train_mlm_logs_perplexity(tmp_path):
         "model.encoder.dropout=0.0",
         "model.encoder.attn_dropout=0.0",
         "model.codebook.preset=lite",
-        "data.batch_size=2",
+        "train.batch_size=2",
         "data.max_len=64",
         "data.num_workers=0",
         "data.pin_memory=false",
-        "train.num_steps=4",
-        "train.log_steps=2",
+        "train.max_steps=4",
+        "train.log_every=2",
         "train.eval.steps=100000",
         "train.wandb.enabled=false",
-        f"train.project_path={tmp_path.as_posix()}",
+        f"train.output_dir={tmp_path.as_posix()}",
     ]
 
     result = runner.invoke(cli, ["train", *overrides])
@@ -128,16 +128,16 @@ def test_cli_train_mlm_with_parquet_dataset(tmp_path):
         "model.encoder.dropout=0.0",
         "model.encoder.attn_dropout=0.0",
         "model.codebook.preset=lite",
-        "data.batch_size=4",
+        "train.batch_size=4",
         "data.max_len=64",
         "data.num_workers=0",
         "data.pin_memory=false",
         f"data.train={train_parquet.as_posix()}",
-        "train.num_steps=3",
-        "train.log_steps=1",
+        "train.max_steps=3",
+        "train.log_every=1",
         "train.eval.steps=100000",
         "train.wandb.enabled=false",
-        f"train.project_path={tmp_path.as_posix()}",
+        f"train.output_dir={tmp_path.as_posix()}",
     ]
 
     result = runner.invoke(cli, ["train", *overrides])
@@ -183,17 +183,17 @@ def test_cli_train_mlm_with_eval_dataset(tmp_path):
         "model.encoder.dropout=0.0",
         "model.encoder.attn_dropout=0.0",
         "model.codebook.preset=lite",
-        "data.batch_size=4",
+        "train.batch_size=4",
         "data.max_len=64",
         "data.num_workers=0",
         "data.pin_memory=false",
         f"data.train={train_parquet.as_posix()}",
         f"+data.eval.validation={eval_parquet.as_posix()}",
-        "train.num_steps=4",
-        "train.log_steps=2",
+        "train.max_steps=4",
+        "train.log_every=2",
         "train.eval.steps=2",  # Trigger eval
         "train.wandb.enabled=false",
-        f"train.project_path={tmp_path.as_posix()}",
+        f"train.output_dir={tmp_path.as_posix()}",
     ]
 
     result = runner.invoke(cli, ["train", *overrides])
@@ -215,16 +215,16 @@ def test_cli_train_mlm_saves_checkpoint(tmp_path):
         "model.encoder.dropout=0.0",
         "model.encoder.attn_dropout=0.0",
         "model.codebook.preset=lite",
-        "data.batch_size=2",
+        "train.batch_size=2",
         "data.max_len=64",
         "data.num_workers=0",
         "data.pin_memory=false",
-        "train.num_steps=5",
-        "train.log_steps=1",
+        "train.max_steps=5",
+        "train.log_every=1",
         "train.eval.steps=100000",
-        "train.checkpoint_steps=2",  # Save checkpoint every 2 steps
+        "train.save_every=2",  # Save checkpoint every 2 steps
         "train.wandb.enabled=false",
-        f"train.project_path={tmp_path.as_posix()}",
+        f"train.output_dir={tmp_path.as_posix()}",
     ]
 
     result = runner.invoke(cli, ["train", *overrides])
@@ -253,15 +253,15 @@ def test_cli_train_codebook_still_works(tmp_path):
         "model.encoder.dropout=0.0",
         "model.encoder.attn_dropout=0.0",
         "model.codebook.preset=lite",
-        "data.batch_size=2",
+        "train.batch_size=2",
         "data.max_len=64",
         "data.num_workers=0",
         "data.pin_memory=false",
-        "train.num_steps=3",
-        "train.log_steps=1",
+        "train.max_steps=3",
+        "train.log_every=1",
         "train.eval.steps=100000",
         "train.wandb.enabled=false",
-        f"train.project_path={tmp_path.as_posix()}",
+        f"train.output_dir={tmp_path.as_posix()}",
     ]
 
     result = runner.invoke(cli, ["train", *overrides])

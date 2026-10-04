@@ -33,16 +33,16 @@ def test_pilot_composes_pinned_values_and_parameter_count():
     cfg = pilot()
     assert cfg.model.encoder.d_model == 768 and cfg.model.encoder.n_layers == 20
     assert cfg.model.encoder.n_heads == 12 and cfg.model.encoder.ffn_mult == 8 / 3
-    assert cfg.train.objective == "mdlm" and cfg.train.precision == "bf16"
-    assert cfg.train.num_steps == 10000 and cfg.train.scheduler.warmup_steps == 500
+    assert cfg.train.objective == "mdlm" and cfg.train.mixed_precision == "bf16"
+    assert cfg.train.max_steps == 10000 and cfg.train.warmup_steps == 500
     assert (
-        cfg.train.log_steps,
-        cfg.train.checkpoint_steps,
-        cfg.train.grad_accum_steps,
+        cfg.train.log_every,
+        cfg.train.save_every,
+        cfg.train.gradient_accumulation_steps,
     ) == (25, 500, 1)
     assert (
         cfg.data.max_len,
-        cfg.data.batch_size,
+        cfg.train.batch_size,
         cfg.data.num_workers,
         cfg.data.prefetch_factor,
     ) == (514, 2, 2, 2)
@@ -100,13 +100,13 @@ def test_hydra_overrides_remain_authoritative(regime):
         "train.mdlm.span_mean=5",
         "train.mdlm.noise.name=power",
         "train.mdlm.noise.power=3",
-        "data.batch_size=1",
-        "train.precision=no",
+        "train.batch_size=1",
+        "train.mixed_precision=no",
     )
     validate_mdlm_config(cfg.train.mdlm)
     assert cfg.train.mdlm.regime_weights[regime] == 1
     assert cfg.train.mdlm.placement == "span" and cfg.train.mdlm.noise.power == 3
-    assert cfg.data.batch_size == 1 and cfg.train.precision == "no"
+    assert cfg.train.batch_size == 1 and cfg.train.mixed_precision == "no"
 
 
 def test_null_generation_cadence_disables_generation():
@@ -154,9 +154,9 @@ def test_mdlm_smoke_dispatch_uses_paired_model():
 def test_startup_fails_before_artifacts_or_wandb(tmp_path, monkeypatch, kind):
     source, codebook = training_fixture(tmp_path)
     project = tmp_path / "run"
-    cfg = mdlm_config(project, source, codebook, **{"train.num_steps": 0})
+    cfg = mdlm_config(project, source, codebook, **{"train.max_steps": 0})
     if kind == "empty_project":
-        cfg.train.project_path = " "
+        cfg.train.output_dir = " "
     elif kind == "populated_project":
         project.mkdir()
         (project / "keep").write_text("original")
@@ -167,7 +167,7 @@ def test_startup_fails_before_artifacts_or_wandb(tmp_path, monkeypatch, kind):
     elif kind == "missing_cohort":
         cfg.train.eval.mdlm = {"enabled": True}
     elif kind == "precision":
-        cfg.train.precision = "fp16"
+        cfg.train.mixed_precision = "fp16"
     else:
         cfg.train.gumbel.hard = True
     monkeypatch.setattr(
@@ -185,7 +185,7 @@ def test_startup_fails_before_artifacts_or_wandb(tmp_path, monkeypatch, kind):
 def trained(tmp_path_factory):
     root = tmp_path_factory.mktemp("sample-checkpoint")
     source, codebook = training_fixture(root, n=4)
-    cfg = mdlm_config(root / "run", source, codebook, **{"train.num_steps": 1})
+    cfg = mdlm_config(root / "run", source, codebook, **{"train.max_steps": 1})
     run_training(cfg)
     checkpoint = root / "run/model/final.pt"
     payload = torch.load(checkpoint, weights_only=True)
@@ -380,7 +380,7 @@ def test_custom_cases_replace_default_benchmark():
 
 def test_cpu_launch_logs_device_precision_and_identity(tmp_path, capsys):
     source, codebook = training_fixture(tmp_path)
-    cfg = mdlm_config(tmp_path / "run", source, codebook, **{"train.num_steps": 1})
+    cfg = mdlm_config(tmp_path / "run", source, codebook, **{"train.max_steps": 1})
     run_training(cfg)
     output = capsys.readouterr().out
     assert "Trainable parameters:" in output

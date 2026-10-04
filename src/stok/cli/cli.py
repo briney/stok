@@ -1,41 +1,11 @@
-from importlib.resources import as_file, files
 from typing import Optional
 
 import click
-from hydra import compose, initialize_config_dir
-from omegaconf import OmegaConf
 
+from stok.config import load_training_config
 from stok.cli.sample import sample_cmd
 from stok.cli.smoke_test import run_smoke_test
 from stok.cli.tokenize import tokenize_structures_cmd
-
-
-def _merge_custom_configs(
-    cfg,
-    *,
-    base_config: Optional[str] = None,
-    model_config: Optional[str] = None,
-    train_config: Optional[str] = None,
-    data_config: Optional[str] = None,
-):
-    """Merge custom config files into the base config.
-
-    Custom configs are merged in order: base_config first (full override),
-    then section-specific configs (model, train, data).
-    """
-    if base_config is not None:
-        custom = OmegaConf.load(base_config)
-        cfg = OmegaConf.merge(cfg, custom)
-    if model_config is not None:
-        custom = OmegaConf.load(model_config)
-        cfg.model = OmegaConf.merge(cfg.model, custom)
-    if train_config is not None:
-        custom = OmegaConf.load(train_config)
-        cfg.train = OmegaConf.merge(cfg.train, custom)
-    if data_config is not None:
-        custom = OmegaConf.load(data_config)
-        cfg.data = OmegaConf.merge(cfg.data, custom)
-    return cfg
 
 
 @click.group()
@@ -88,14 +58,8 @@ def smoke_test(
     Custom config files can be provided to override defaults:
       stok smoke-test --model-config ./my_model.yaml
     """
-    overrides = list(ctx.args)
-    with as_file(files("stok").joinpath("configs")) as cfg_dir:
-        with initialize_config_dir(version_base=None, config_dir=str(cfg_dir)):
-            cfg = compose(config_name="config", overrides=overrides)
-
-    # Merge custom config files if provided
-    cfg = _merge_custom_configs(
-        cfg,
+    cfg = load_training_config(
+        ctx.args,
         base_config=base_config,
         model_config=model_config,
         train_config=train_config,
@@ -142,22 +106,16 @@ def train_cmd(
     train_config: Optional[str],
     data_config: Optional[str],
 ):
-    """Run encoder training.
+    """Run training with Hydra group selections and KEY=VALUE overrides.
 
     Forwards any unknown options/arguments as Hydra overrides.
-    Example: stok train train.num_steps=5000 data.train=/path/train.parquet
+    Example: stok train train.max_steps=5000 data.train=/path/train.parquet
 
-    Custom config files can be provided to override defaults:
+    YAML files override defaults; command-line values override YAML:
       stok train --model-config ./my_model.yaml data.train=/path/train.parquet
     """
-    overrides = list(ctx.args)
-    with as_file(files("stok").joinpath("configs")) as cfg_dir:
-        with initialize_config_dir(version_base=None, config_dir=str(cfg_dir)):
-            cfg = compose(config_name="config", overrides=overrides)
-
-    # Merge custom config files if provided
-    cfg = _merge_custom_configs(
-        cfg,
+    cfg = load_training_config(
+        ctx.args,
         base_config=base_config,
         model_config=model_config,
         train_config=train_config,
