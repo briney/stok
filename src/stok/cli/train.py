@@ -37,8 +37,7 @@ from stok.data.dataset import (
 from stok.eval import Evaluator, MetricLogger
 from stok.eval.registry import METRIC_REGISTRY, resolve_eval_metrics
 from stok.models.decoder import load_pretrained_decoder
-from stok.models.stok import STokModel
-from stok.models.mdlm import STokMDLM
+from stok.models.build import build_model
 from stok.data.mdlm import (
     CANONICAL_AA,
     MDLMBatch,
@@ -1310,19 +1309,7 @@ def run_training(cfg: DictConfig):
                 pad_id=cfg.model.encoder.pad_id,
                 objective="mdlm",
             )
-            model = STokMDLM(
-                vocab_size=cfg.model.encoder.vocab_size,
-                pad_id=cfg.model.encoder.pad_id,
-                codebook=codebook,
-                d_model=cfg.model.encoder.d_model,
-                n_heads=cfg.model.encoder.n_heads,
-                n_layers=cfg.model.encoder.n_layers,
-                ffn_mult=cfg.model.encoder.ffn_mult,
-                dropout=cfg.model.encoder.dropout,
-                attn_dropout=cfg.model.encoder.attn_dropout,
-                norm_type=cfg.model.encoder.norm,
-            )
-            model.mdlm_regime_weights = dict(cfg.train.mdlm.regime_weights)
+            model = build_model(cfg, codebook=codebook)
             if mdlm_eval.generation.enabled and mdlm_eval.generation.decode:
                 from stok.utils.sampling import inference_context
 
@@ -1373,32 +1360,7 @@ def run_training(cfg: DictConfig):
 
     # Shared encoder configuration; MDLM uses paired tied heads.
     if not is_mdlm:
-        model = STokModel(
-            vocab_size=cfg.model.encoder.vocab_size,
-            pad_id=cfg.model.encoder.pad_id,
-            d_model=cfg.model.encoder.d_model,
-            n_heads=cfg.model.encoder.n_heads,
-            n_layers=cfg.model.encoder.n_layers,
-            ffn_mult=cfg.model.encoder.ffn_mult,
-            dropout=cfg.model.encoder.dropout,
-            attn_dropout=cfg.model.encoder.attn_dropout,
-            codebook=codebook,  # None for MLM
-            classifier_kwargs=(
-                dict(
-                    use_cosine=cfg.model.classifier.use_cosine,
-                    learnable_temperature=cfg.model.classifier.learnable_temperature,
-                    bias_from_code_norm=cfg.model.classifier.bias_from_code_norm,
-                    projector_dim=cfg.model.classifier.projector_dim,
-                )
-                if not is_mlm
-                else None
-            ),
-            norm_type=cfg.model.encoder.norm,
-            head_type=objective,
-            tie_word_embeddings=(
-                cfg.train.mlm.get("tie_word_embeddings", True) if is_mlm else True
-            ),
-        )
+        model = build_model(cfg, codebook=codebook)
 
     # Load pre-trained encoder if specified (typically for codebook training after MLM)
     pretrained_encoder_path = cfg.train.get("pretrained_encoder")

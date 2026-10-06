@@ -3,6 +3,7 @@
 import copy
 import json
 import shutil
+from pathlib import Path
 from importlib.resources import files
 
 from click.testing import CliRunner
@@ -232,6 +233,47 @@ def row_for(payload, mode):
             codebook_sha256=identity["codebook_sha256"],
         )
     return row
+
+
+@pytest.mark.parametrize("mode", ["folding", "inverse_folding", "joint"])
+def test_checkpoint_only_builder_matches_original_sampling(
+    tmp_path, trained, monkeypatch, mode
+):
+    from importlib import import_module
+
+    checkpoint, payload = trained
+    cfg = OmegaConf.create(payload["config"])
+    assert not Path(cfg.data.train.local.path).exists()
+    assert not Path(cfg.model.codebook.path).exists()
+    rows = [row_for(payload, mode)]
+    result, output = invoke_sample(tmp_path, checkpoint, rows, mode)
+    assert result.exit_code == 0, result.output
+    built_output = output.read_bytes()
+    output.unlink()
+
+    def original_constructor(cfg, *, codebook):
+        enc = cfg.model.encoder
+        model = STokMDLM(
+            vocab_size=enc.vocab_size,
+            pad_id=enc.pad_id,
+            codebook=codebook,
+            d_model=enc.d_model,
+            n_heads=enc.n_heads,
+            n_layers=enc.n_layers,
+            ffn_mult=enc.ffn_mult,
+            dropout=enc.dropout,
+            attn_dropout=enc.attn_dropout,
+            norm_type=enc.norm,
+        )
+        model.mdlm_regime_weights = dict(cfg.train.mdlm.get("regime_weights") or {})
+        return model
+
+    monkeypatch.setattr(
+        import_module("stok.cli.sample"), "build_model", original_constructor
+    )
+    result, output = invoke_sample(tmp_path, checkpoint, rows, mode)
+    assert result.exit_code == 0, result.output
+    assert output.read_bytes() == built_output
 
 
 @pytest.mark.parametrize("mode", ["folding", "inverse_folding", "joint"])
