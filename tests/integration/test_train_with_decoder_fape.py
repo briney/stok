@@ -231,6 +231,21 @@ def test_fape_only_missing_coordinates_produces_finite_update(tmp_path, monkeypa
         & payloads[0].keys()
     )
 
+    # Empty CE cannot make an inactive geometric reduction an optimizer update.
+    for case in ("zero_weight", "before_start", "missing_coordinates"):
+        cfg.train.output_dir = str(tmp_path / case)
+        cfg.train.fape.weight = 0.0 if case == "zero_weight" else 1.0
+        cfg.train.fape.start_step = 1 if case == "before_start" else 0
+        if case == "missing_coordinates":
+            table = pq.read_table(source)
+            rows = table.to_pylist()
+            for row in rows:
+                row["coordinates"] = np.full((4, 3, 3), np.nan).tolist()
+            pq.write_table(pa.Table.from_pylist(rows, schema=table.schema), source)
+        with pytest.raises(RuntimeError, match="no successful optimizer update"):
+            run_training(cfg)
+        assert not (Path(cfg.train.output_dir) / "model/final.pt").exists()
+
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.skipif(

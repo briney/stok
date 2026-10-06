@@ -6,7 +6,7 @@ import os
 import shutil
 import sys
 from pathlib import Path
-from typing import Any, Optional, Sequence, cast
+from typing import Any, Optional, cast
 
 import numpy as np
 import torch
@@ -43,12 +43,9 @@ from stok.utils.mdlm import validate_mdlm_config
 from stok.models.head import CodebookClassifier
 from stok.utils.codebook import load_codebook
 from stok.utils.console import ConsoleLogger
-from stok.utils.decoding import decode_token_aligned_coords, logits_to_soft_codes_gumbel
-from stok.utils.masking import residue_mask_from_tokens
-from stok.utils.flops import compute_flops_6n, count_parameters, format_flops_scientific
-from stok.utils.losses import fape_loss, token_ce_loss
+from stok.utils.flops import compute_flops_6n, count_parameters
 from stok.utils.tokenizer import Tokenizer
-from stok.training.tasks import MDLMTask
+from stok.training.tasks import ClassificationTask, MDLMTask
 from stok.utils.checkpoint import (
     atomic_destination as _atomic_destination,
     collect_rng_state as _collect_rng_state,
@@ -1394,7 +1391,6 @@ def run_training(cfg: DictConfig):
         decoder = None
     want_fape = False
     want_eval_decode = False
-    log_pred_nan_frac = False
 
     if objective == "codebook":
         want_fape = bool(getattr(cfg.train, "fape", {}).get("enabled", False))
@@ -1403,10 +1399,6 @@ def run_training(cfg: DictConfig):
             METRIC_REGISTRY[name].requires_decoder
             for loader in eval_loaders.values()
             for name in getattr(loader, "metric_configs")
-        )
-        # FAPE behavior toggles (with safe defaults)
-        log_pred_nan_frac = bool(
-            getattr(cfg.train, "fape", {}).get("log_pred_nan_frac", True)
         )
         decoder_enabled = bool(getattr(cfg.model, "decoder", {}).get("enabled", False))
 
@@ -1581,11 +1573,8 @@ def run_training(cfg: DictConfig):
     model.train()
     global_step = progress["global_step"] if progress else 0
     micro_step = progress["micro_step"] if progress else 0
-    running_loss = 0.0
-    running_updates = 0
     log_interval = int(cfg.train.get("log_every", 50))
     eval_interval = int(cfg.train.get("eval", {}).get("steps", 1000))
-    ignore_index = -100 if is_mdlm else int(cfg.model.classifier.ignore_index)
     grad_clip = float(cfg.train.get("max_grad_norm", 1.0))
 
     # console output (main process only
@@ -1643,39 +1632,23 @@ def run_training(cfg: DictConfig):
         objective=objective,
     )
 
-    # additional training accumulators (over the current log window)
-    running_cls_loss = 0.0
-    running_cls_count = 0
-    running_fape_loss = 0.0
-    running_fape_count = 0
-    running_pred_nan_frac_sum = 0.0
-    running_pred_nan_frac_count = 0
-    # MLM-specific accumulators
-    running_masked_acc_sum = 0.0
-    running_masked_acc_count = 0
-    # FLOPs tracking (cumulative tokens for 6N approximation)
+    # FLOPs tracking preserves each task's historical position accounting.
     total_tokens = 0
     total_residues = 0
-    total_missing_structure = 0
-    total_noncanonical_sequence = 0
-    task = None
+    task: MDLMTask | ClassificationTask
     if is_mdlm:
         assert codebook_size is not None
         task = MDLMTask(cfg, codebook_size=codebook_size)
-    mdlm_running = torch.zeros(5, 2, dtype=torch.float64)
-
-    # Gumbel temperature schedule (only for codebook objective)
-    def _anneal_tau(step: int) -> float:
-        gcfg = getattr(cfg.train, "gumbel", {})
-        t0 = float(gcfg.get("tau_start", 1.0))
-        t1 = float(gcfg.get("tau_end", 0.5))
-        T = int(gcfg.get("anneal_steps", 20000))
-        if T <= 0:
-            return t1
-        if step >= T:
-            return t1
-        # linear
-        return t0 + (t1 - t0) * (float(step) / float(T))
+    else:
+        task = ClassificationTask(
+            cfg,
+            decoder=decoder,
+            codebook=None
+            if is_mlm
+            else cast(
+                CodebookClassifier, _unwrap_model(model, accelerator).classifier
+            ).E,
+        )
 
     epoch = progress["epoch"] if progress else 0
     batches_in_pass = progress["batches_in_epoch"] if progress else 0
@@ -1689,33 +1662,7 @@ def run_training(cfg: DictConfig):
             progress["executed_positions"],
             progress["residues_seen"],
         )
-        if task is not None:
-            task.restore_logging_state(cast(dict, progress))
-        else:
-            saved = progress
-            running_loss = saved["running_loss"]
-            running_updates = saved["running_updates"]
-            running_cls_loss, running_cls_count = (
-                saved["running_cls_loss"],
-                saved["running_cls_count"],
-            )
-            running_fape_loss, running_fape_count = (
-                saved["running_fape_loss"],
-                saved["running_fape_count"],
-            )
-            running_pred_nan_frac_sum, running_pred_nan_frac_count = (
-                saved["running_pred_nan_frac_sum"],
-                saved["running_pred_nan_frac_count"],
-            )
-            running_masked_acc_sum, running_masked_acc_count = (
-                saved["running_masked_acc_sum"],
-                saved["running_masked_acc_count"],
-            )
-            total_missing_structure, total_noncanonical_sequence = (
-                saved["total_missing_structure"],
-                saved["total_noncanonical_sequence"],
-            )
-            mdlm_running = saved["mdlm_running"]
+        task.restore_logging_state(cast(dict, progress))
 
     def checkpoint_state():
         return {
@@ -1725,23 +1672,7 @@ def run_training(cfg: DictConfig):
                 "epoch": epoch,
                 "batches_in_epoch": batches_in_pass,
                 "loader_generator_state": loader_generator_state,
-                "logging": task.logging_state()
-                if task is not None
-                else {
-                    "running_loss": running_loss,
-                    "running_updates": running_updates,
-                    "running_cls_loss": running_cls_loss,
-                    "running_cls_count": running_cls_count,
-                    "running_fape_loss": running_fape_loss,
-                    "running_fape_count": running_fape_count,
-                    "running_pred_nan_frac_sum": running_pred_nan_frac_sum,
-                    "running_pred_nan_frac_count": running_pred_nan_frac_count,
-                    "running_masked_acc_sum": running_masked_acc_sum,
-                    "running_masked_acc_count": running_masked_acc_count,
-                    "total_missing_structure": total_missing_structure,
-                    "total_noncanonical_sequence": total_noncanonical_sequence,
-                    "mdlm_running": mdlm_running,
-                },
+                "logging": task.logging_state(),
             },
         }
 
@@ -1775,83 +1706,37 @@ def run_training(cfg: DictConfig):
             batches_in_pass += len(window)
             current_step = global_step + 1
             current_epoch = epoch + batches_in_pass / max(1, len(train_loader))
-            active_fape = (
-                decoder is not None
-                and want_fape
-                and global_step >= int(cfg.train.fape.start_step)
-            )
             # Tasks prepare CPU payloads/counts; collectives remain in the driver.
-            if is_mdlm:
-                assert task is not None
-                prepare_error = None
-                try:
-                    prepared = task.prepare_window(
-                        window,
-                        epoch=epoch,
-                        micro_step=micro_step,
-                        global_step=global_step,
-                        rank=accelerator.process_index if accelerator else 0,
-                        world_size=world_size,
-                    )
-                except Exception as exc:
-                    prepare_error = f"{type(exc).__name__}: {exc}"
-                _raise_rank_errors(
-                    prepare_error, accelerator, "Preparing MDLM window failed"
+            prepare_error = None
+            try:
+                prepared = task.prepare_window(
+                    window,
+                    epoch=epoch,
+                    micro_step=micro_step,
+                    global_step=global_step,
+                    rank=accelerator.process_index if accelerator else 0,
+                    world_size=world_size,
                 )
-                window = prepared.batches
-                counts = prepared.counts.to(device)
-                if accelerator:
-                    counts = accelerator.reduce(counts, reduction="sum")
-                denominator = task.denominators(counts)["diffusion"]
-                accounting = task.consume_counts(counts)
-                total_residues += accounting.residues_seen
-                processed_tokens = accounting.executed_positions
-            else:
-                # Denominators precede forwards; only input batches are buffered.
-                n_tokens = sum(
-                    int((batch[1] != ignore_index).sum()) for batch in window
-                )
-                n_structures = 0
-                processed_tokens = 0
-                for batch in window:
-                    tokens = batch[0]
-                    processed_tokens += int(
-                        (tokens != int(cfg.model.encoder.pad_id)).sum()
-                    )
-                    if active_fape and len(batch) == 3:
-                        mask = residue_mask_from_tokens(
-                            tokens,
-                            pad_id=int(cfg.model.encoder.pad_id),
-                            bos_id=int(cfg.model.encoder.get("bos_id", 0)),
-                            eos_id=int(cfg.model.encoder.get("eos_id", 2)),
-                        )
-                        n_structures += int(
-                            (mask & torch.isfinite(batch[2]).all((-2, -1))).any(1).sum()
-                        )
-                counts = torch.tensor(
-                    [n_tokens, n_structures, processed_tokens],
-                    device=device,
-                    dtype=torch.long,
-                )
-                if accelerator:
-                    counts = accelerator.reduce(counts, reduction="sum")
-                global_tokens, global_structures, processed_tokens = counts.tolist()
-            if not is_mdlm:
-                total_tokens += processed_tokens
+            except Exception as exc:
+                prepare_error = f"{type(exc).__name__}: {exc}"
+            _raise_rank_errors(
+                prepare_error,
+                accelerator,
+                f"Preparing {'MDLM' if is_mdlm else 'classification'} window failed",
+            )
+            window = prepared.batches
+            counts = prepared.counts.to(device)
+            if accelerator:
+                counts = accelerator.reduce(counts, reduction="sum")
+            denominators = task.denominators(counts)
+            accounting = task.consume_counts(counts)
+            total_residues += accounting.residues_seen
+            total_tokens += accounting.executed_positions
             micro_step += len(window)
-            if (is_mdlm and denominator == 0) or (
-                not is_mdlm
-                and global_tokens == 0
-                and (global_structures == 0 or float(cfg.train.fape.weight) == 0)
-            ):
+            if not any(denominators.values()):
                 continue
-            if is_mdlm:
-                eligible_windows_in_pass += 1
-                total_tokens += processed_tokens
-            window_mdlm = torch.zeros(5, 2, dtype=torch.float64, device=device)
-            window_ce = 0.0
-            window_fape = 0.0
-            window_correct = 0
+            eligible_windows_in_pass += 1
+            window_statistics = None
             for micro_index, batch in enumerate(window):
                 sync = (
                     accelerator.no_sync(model)
@@ -1861,69 +1746,21 @@ def run_training(cfg: DictConfig):
                 with sync:
                     error = None
                     try:
-                        if is_mdlm:
-                            assert task is not None
-                            result = task.forward(
-                                model, batch, device=device, global_step=global_step
-                            )
-                            loss = result.loss_sums["diffusion"] * (
-                                world_size / denominator
-                            )
-                        else:
-                            legacy_batch = cast(Sequence[torch.Tensor], batch)
-                            tokens, labels = (t.to(device) for t in legacy_batch[:2])
-                            coords = (
-                                legacy_batch[2].to(device)
-                                if len(legacy_batch) == 3
-                                else None
-                            )
-                            outputs = model(tokens=tokens)
-                            ce_sum = token_ce_loss(
-                                outputs["logits"], labels, ignore_index, reduction="sum"
-                            )
-                            fape_sum = ce_sum * 0.0
-                            if active_fape and coords is not None:
-                                mask = residue_mask_from_tokens(
-                                    tokens,
-                                    pad_id=int(cfg.model.encoder.pad_id),
-                                    bos_id=int(cfg.model.encoder.get("bos_id", 0)),
-                                    eos_id=int(cfg.model.encoder.get("eos_id", 2)),
-                                )
-                                eligible = (
-                                    mask & torch.isfinite(coords).all((-2, -1))
-                                ).any(1)
-                                if eligible.any():
-                                    soft_codes = logits_to_soft_codes_gumbel(
-                                        outputs["logits"],
-                                        cast(
-                                            CodebookClassifier,
-                                            _unwrap_model(
-                                                model, accelerator
-                                            ).classifier,
-                                        ).E,
-                                        tau=_anneal_tau(global_step),
-                                        hard=bool(cfg.train.gumbel.get("hard", False)),
-                                    )
-                                    pred_coords = decode_token_aligned_coords(
-                                        decoder, soft_codes, mask
-                                    )
-                                    fape_sum = (
-                                        fape_loss(pred_coords, coords, mask)
-                                        * eligible.sum()
-                                    )
-                                    if log_pred_nan_frac:
-                                        running_pred_nan_frac_sum += float(
-                                            torch.isnan(pred_coords[mask])
-                                            .float()
-                                            .mean()
-                                        )
-                                        running_pred_nan_frac_count += 1
-                            loss = ce_sum * (
-                                world_size / global_tokens if global_tokens else 0.0
-                            )
-                            loss = loss + float(cfg.train.fape.weight) * fape_sum * (
-                                world_size / global_structures
-                                if global_structures
+                        result = task.forward(
+                            model, batch, device=device, global_step=global_step
+                        )
+                        # Preserve numerator order: classification CE then weighted FAPE.
+                        losses = iter(result.loss_sums.items())
+                        name, numerator = next(losses)
+                        loss = numerator * (
+                            world_size / denominators[name]
+                            if denominators[name]
+                            else 0.0
+                        )
+                        for name, numerator in losses:
+                            loss = loss + numerator * (
+                                world_size / denominators[name]
+                                if denominators[name]
                                 else 0.0
                             )
                         if not torch.isfinite(loss):
@@ -1935,16 +1772,9 @@ def run_training(cfg: DictConfig):
                         accelerator.backward(loss)
                     else:
                         loss.backward()
-                    if is_mdlm:
-                        window_mdlm += result.statistics
-                    else:
-                        window_ce += float(ce_sum.detach())
-                        window_fape += float(fape_sum.detach())
-                        with torch.no_grad():
-                            valid = labels != ignore_index
-                            window_correct += int(
-                                ((outputs["logits"].argmax(-1) == labels) & valid).sum()
-                            )
+                    if window_statistics is None:
+                        window_statistics = torch.zeros_like(result.statistics)
+                    window_statistics += result.statistics
             if grad_clip > 0:
                 if accelerator:
                     accelerator.clip_grad_norm_(model.parameters(), grad_clip)
@@ -1956,37 +1786,15 @@ def run_training(cfg: DictConfig):
             if skipped:
                 continue
             scheduler.step()
-            if is_mdlm:
-                assert task is not None
-                if accelerator:
-                    window_mdlm = accelerator.reduce(window_mdlm, reduction="sum")
-                task.record_update(window_mdlm, counts)
-            else:
-                sums = torch.tensor(
-                    [window_ce, window_fape, window_correct],
-                    device=device,
-                    dtype=torch.float64,
+            assert window_statistics is not None
+            if accelerator:
+                window_statistics = accelerator.reduce(
+                    window_statistics, reduction="sum"
                 )
-                if accelerator:
-                    sums = accelerator.reduce(sums, reduction="sum")
-                cls_mean = float(sums[0]) / max(1, global_tokens)
-                fape_mean = float(sums[1]) / max(1, global_structures)
-                running_loss += cls_mean + float(cfg.train.fape.weight) * fape_mean
-                if global_tokens:
-                    running_cls_loss += float(sums[0])
-                    running_cls_count += global_tokens
-                    running_masked_acc_sum += float(sums[2])
-                    running_masked_acc_count += global_tokens
-                if global_structures:
-                    running_fape_loss += float(sums[1])
-                    running_fape_count += global_structures
-
-            if not is_mdlm:
-                running_updates += 1
+            task.record_update(window_statistics, counts)
             # logging
-            if is_mdlm and current_step % log_interval == 0 and is_main:
+            if current_step % log_interval == 0 and is_main:
                 cumulative_flops = compute_flops_6n(num_params, total_tokens)
-                assert task is not None
                 msg, payload = task.format_log(
                     step=current_step,
                     max_steps=max_steps,
@@ -2007,140 +1815,6 @@ def run_training(cfg: DictConfig):
                 if wb is not None:
                     wb.log(payload, step=current_step)
                 task.reset_log_window()
-            if not is_mdlm and current_step % log_interval == 0 and is_main:
-                acc = running_masked_acc_sum / max(1, running_masked_acc_count)
-                lr = scheduler.get_last_lr()[0]
-
-                # compute averages over the current log interval
-                avg_total_loss = running_loss / running_updates
-                avg_cls_loss = (
-                    running_cls_loss / float(max(1, running_cls_count))
-                    if running_cls_count > 0
-                    else None
-                )
-                try:
-                    ppl = math.exp(avg_cls_loss) if avg_cls_loss is not None else None
-                except OverflowError:
-                    ppl = float("inf")
-
-                # Compute cumulative FLOPs (6N approximation)
-                cumulative_flops = compute_flops_6n(num_params, total_tokens)
-
-                # build console log message
-                msg = f"step {current_step}/{max_steps} | micro_step {micro_step}"
-                if current_epoch is not None:
-                    msg += f" | epoch {current_epoch:.3f}"
-                # add FLOPs (scientific notation for console)
-                msg += f" | flops {format_flops_scientific(cumulative_flops)}"
-                # loss
-                msg += f" | loss {avg_total_loss:.4f}"
-
-                if is_mlm:
-                    # MLM-specific logging
-                    avg_masked_acc = (
-                        running_masked_acc_sum / float(max(1, running_masked_acc_count))
-                        if running_masked_acc_count > 0
-                        else acc
-                    )
-                    msg += f" | acc {avg_masked_acc:.4f}"
-                    if ppl is not None:
-                        msg += f" | ppl {ppl:.2f}"
-                    msg += f" | lr {lr:.2e}"
-                else:
-                    # Codebook-specific logging
-                    msg += (
-                        f" | acc {acc:.4f}"
-                        if running_masked_acc_count
-                        else " | acc unavailable"
-                    )
-                    msg += f" | lr {lr:.2e}"
-                    if avg_cls_loss is not None:
-                        msg += f" | cls {avg_cls_loss:.4f} | ppl {ppl:.2f}"
-
-                    avg_fape_loss = (
-                        running_fape_loss / float(max(1, running_fape_count))
-                        if running_fape_count > 0
-                        else None
-                    )
-                    avg_pred_nan_frac = (
-                        running_pred_nan_frac_sum
-                        / float(max(1, running_pred_nan_frac_count))
-                        if running_pred_nan_frac_count > 0
-                        else None
-                    )
-                    if avg_fape_loss is not None:
-                        msg += f" | fape {avg_fape_loss:.4f}"
-                    if log_pred_nan_frac and (avg_pred_nan_frac is not None):
-                        msg += f" | pnan {avg_pred_nan_frac:.3f}"
-
-                console.train(msg)
-                if log_file_handle is not None:
-                    # Include full FLOPs value in file log
-                    file_msg = msg + f" (flops_actual={cumulative_flops})"
-                    print(file_msg, file=log_file_handle, flush=True)
-
-                # W&B logging
-                if wb is not None:
-                    payload: dict[str, float] = {
-                        "train/loss": float(avg_total_loss),
-                        "lr": float(lr),
-                        "train/micro_step": float(micro_step),
-                        f"train/{'mask_acc' if is_mlm else 'acc'}/num_valid": float(
-                            running_masked_acc_count
-                        ),
-                        "train/fape_loss/num_valid": float(running_fape_count),
-                    }
-
-                    if is_mlm:
-                        avg_masked_acc = (
-                            running_masked_acc_sum
-                            / float(max(1, running_masked_acc_count))
-                            if running_masked_acc_count > 0
-                            else acc
-                        )
-                        payload["train/mask_acc"] = float(avg_masked_acc)
-                        if ppl is not None:
-                            payload["train/ppl"] = float(ppl)
-                    else:
-                        if running_masked_acc_count:
-                            payload["train/acc"] = float(acc)
-                        if avg_cls_loss is not None and ppl is not None:
-                            payload["train/cls_loss"] = float(avg_cls_loss)
-                            payload["train/ppl"] = float(ppl)
-                        avg_fape_loss = (
-                            running_fape_loss / float(max(1, running_fape_count))
-                            if running_fape_count > 0
-                            else None
-                        )
-                        avg_pred_nan_frac = (
-                            running_pred_nan_frac_sum
-                            / float(max(1, running_pred_nan_frac_count))
-                            if running_pred_nan_frac_count > 0
-                            else None
-                        )
-                        if avg_fape_loss is not None:
-                            payload["train/fape_loss"] = float(avg_fape_loss)
-                        if log_pred_nan_frac and (avg_pred_nan_frac is not None):
-                            payload["train/pred_nan_frac"] = float(avg_pred_nan_frac)
-
-                    if current_epoch is not None:
-                        payload["train/epoch"] = float(current_epoch)
-                    # Add cumulative FLOPs
-                    payload["train/flops"] = float(cumulative_flops)
-                    payload["train/tokens"] = float(total_tokens)
-                    wb.log(payload, step=current_step)
-
-                # reset accumulators for the next log interval
-                running_loss = 0.0
-                running_updates = 0
-                running_cls_loss = 0.0
-                running_cls_count = 0
-                running_fape_loss = 0.0
-                running_fape_count = 0
-                running_pred_nan_frac_sum = 0.0
-                running_pred_nan_frac_count = 0
-                running_masked_acc_sum = 0.0
-                running_masked_acc_count = 0
 
             if is_mdlm:
                 denoising_due = mdlm_eval.enabled and current_step % eval_interval == 0
@@ -2230,11 +1904,7 @@ def run_training(cfg: DictConfig):
         if (
             not resumed_batches
             and global_step == updates_before_pass
-            and (
-                task is None
-                or not task.allow_skipped_only_pass
-                or eligible_windows_in_pass == 0
-            )
+            and (not task.allow_skipped_only_pass or eligible_windows_in_pass == 0)
         ):
             raise RuntimeError("Training pass made no successful optimizer update")
         if global_step < max_steps:
