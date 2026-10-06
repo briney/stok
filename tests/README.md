@@ -799,3 +799,18 @@ The real production frozen-validation `evaluate_mdlm` boundary remains pending
 supplied validation-only cohorts; training-subset utility checks are distinct.
 Actual GPU FP16 scaler overflow and multi-GPU launch are not qualified by BF16
 or CPU tests. Longer experiments require explicit identities/hardware/budgets.
+
+### Extraction reference
+
+The immutable historical reference captures `7a3e0fc` in a separate subprocess,
+then checks fresh and continued candidate training plus fixed seeded CLI samples.
+See [baseline commands and gate inventory](../docs/experiments/refactor/baseline.md).
+
+```bash
+PYTHONPATH="$PWD/src" python -m tests.utils.refactor_reference check \
+  --reference /path/to/retained-reference --output /path/to/new-candidate-output
+```
+
+Run the focused `test_refactor_reference.py` and `test_mdlm_resume.py` checks with
+the documented CPU environment and local worker/DDP IPC permitted. The local
+capture/check test exercises plumbing only; it provides no cross-version evidence.

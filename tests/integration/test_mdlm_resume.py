@@ -96,9 +96,17 @@ finally:
 """
 
 
-def execute(cfg, path, *, stop=-1, distributed=False, extra_env=None, ok=True):
+def execute(
+    cfg, path, *, stop=-1, distributed=False, extra_env=None, ok=True, probe=None
+):
     OmegaConf.save(cfg, path)
-    command = [sys.executable, "-c", PROBE, str(path), str(stop)]
+    command = [
+        sys.executable,
+        "-c",
+        PROBE if probe is None else probe,
+        str(path),
+        str(stop),
+    ]
     env = {**training_env(), **(extra_env or {})}
     results = (
         run_distributed(command, timeout=60, env=env)
