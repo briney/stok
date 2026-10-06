@@ -159,7 +159,7 @@ def test_fape_only_missing_coordinates_produces_finite_update(tmp_path, monkeypa
 
     payloads = []
     monkeypatch.setattr(
-        "stok.cli.train._maybe_init_wandb",
+        "stok.training.engine._maybe_init_wandb",
         lambda *args, **kwargs: SimpleNamespace(
             log=lambda data, **kwargs: payloads.append(data)
         ),

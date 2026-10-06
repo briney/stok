@@ -18,7 +18,7 @@ PROBE = r"""
 import os, sys, torch
 from pathlib import Path
 from omegaconf import OmegaConf
-from stok.cli import train
+from stok.training import engine as train
 from stok.training import tasks
 from stok.models.stok import STokModel
 cfg = OmegaConf.load(sys.argv[1])
@@ -376,9 +376,13 @@ def test_rank_local_checkpoint_failures_reach_all_ranks(tmp_path, failure):
     )
     for result in results:
         assert result.returncode != 0
-        assert (
-            "CUDA RNG" if failure == "cuda_rng" else "injected rank-"
-        ) in result.stderr, result.stderr
+        sentinel = {
+            "read": "injected rank-local read failure",
+            "write": "injected rank-zero write failure",
+            "state": "injected rank-local state failure",
+            "cuda_rng": "CUDA RNG",
+        }[failure]
+        assert sentinel in result.stderr, result.stderr
     if failure in {"read", "cuda_rng"}:
         assert snapshot(project) == before
     else:
@@ -873,7 +877,7 @@ def test_cuda_rng_rejected_before_artifacts_or_wandb(
     tmp_path, monkeypatch, rng_checkpoint, damage
 ):
     import copy
-    from stok.cli import train
+    from stok.training import engine as train
 
     original_cfg, original = rng_checkpoint
     cfg, payload = copy.deepcopy(original_cfg), copy.deepcopy(original)

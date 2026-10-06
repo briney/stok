@@ -679,7 +679,7 @@ def test_generation_failure_restores_decoder_rng_and_modes(failure):
 def test_optional_decoder_loading_preserves_training_random_stream(
     tmp_path, monkeypatch
 ):
-    from stok.cli import train as training
+    from stok.training import engine as training
 
     cfg = evaluation_training_fixture(tmp_path)
     cfg.train.eval.mdlm.generation.steps = 10000
@@ -690,12 +690,16 @@ def test_optional_decoder_loading_preserves_training_random_stream(
     cfg.train.eval.mdlm.generation.decode = True
     codebook = torch.load(cfg.model.codebook.path, weights_only=True)["codebook"]
 
+    decoder_calls = []
+
     def load_decoder(**kwargs):
+        decoder_calls.append(1)
         torch.rand(1000)  # constructor initialization consumes the CPU stream
         return Decoder(codebook)
 
     monkeypatch.setattr(training, "load_pretrained_decoder", load_decoder)
     training.run_training(cfg)
+    assert len(decoder_calls) == 1
     actual = torch.load(tmp_path / "with_decoder/model/final.pt", weights_only=False)[
         "model"
     ]

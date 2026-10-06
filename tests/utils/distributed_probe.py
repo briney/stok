@@ -6,7 +6,8 @@ from pathlib import Path
 
 import torch
 from hydra import compose, initialize_config_dir
-from stok.cli.train import _build_dataloaders, _maybe_get_accelerator, run_training
+from stok.data.loaders import _build_dataloaders
+from stok.training.engine import _maybe_get_accelerator, run_training
 from stok.eval import Evaluator
 from stok.utils.losses import token_ce_loss
 

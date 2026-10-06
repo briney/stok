@@ -172,7 +172,7 @@ def test_startup_fails_before_artifacts_or_wandb(tmp_path, monkeypatch, kind):
     else:
         cfg.train.gumbel.hard = True
     monkeypatch.setattr(
-        "stok.cli.train._maybe_init_wandb",
+        "stok.training.engine._maybe_init_wandb",
         lambda *a, **kw: pytest.fail("W&B reached before preflight"),
     )
     with pytest.raises(
@@ -573,7 +573,7 @@ def test_unlisted_heldout_shard_rejected_before_startup(tmp_path, monkeypatch, s
     )
     before = snapshot(tmp_path)
     monkeypatch.setattr(
-        "stok.cli.train._maybe_init_wandb",
+        "stok.training.engine._maybe_init_wandb",
         lambda *a, **kw: pytest.fail("W&B reached before shard audit"),
     )
     with pytest.raises((ValueError, RuntimeError), match="shard inventory"):

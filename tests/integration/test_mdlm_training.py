@@ -355,7 +355,7 @@ def test_bad_source_fails_before_wandb_or_artifacts(tmp_path, monkeypatch):
     data = json.loads(manifest.read_text())
     data["status"] = "incomplete"
     manifest.write_text(json.dumps(data))
-    from stok.cli import train
+    from stok.training import engine as train
 
     def forbidden(*args, **kwargs):
         pytest.fail("W&B started before preflight")
@@ -417,7 +417,7 @@ def test_all_unusable_mdlm_pass_fails_without_update(tmp_path):
 def test_real_cpu_amp_skip_preserves_cursor_without_advancing_schedule(
     tmp_path, monkeypatch, samples
 ):
-    from stok.cli import train
+    from stok.training import engine as train
 
     original = train._maybe_get_accelerator
     scaler = torch.amp.GradScaler("cpu")
