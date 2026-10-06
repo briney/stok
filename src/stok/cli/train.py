@@ -38,19 +38,8 @@ from stok.eval import Evaluator, MetricLogger
 from stok.eval.registry import METRIC_REGISTRY, resolve_eval_metrics
 from stok.models.decoder import load_pretrained_decoder
 from stok.models.build import build_model
-from stok.data.mdlm import (
-    CANONICAL_AA,
-    MDLMBatch,
-    prepare_mdlm_batch,
-    validate_mdlm_sources,
-)
-from stok.utils.mdlm import (
-    MDLMCorruption,
-    corrupt_mdlm_batch,
-    mdlm_loss_terms,
-    stable_seed,
-    validate_mdlm_config,
-)
+from stok.data.mdlm import validate_mdlm_sources
+from stok.utils.mdlm import validate_mdlm_config
 from stok.models.head import CodebookClassifier
 from stok.utils.codebook import load_codebook
 from stok.utils.console import ConsoleLogger
@@ -59,6 +48,7 @@ from stok.utils.masking import residue_mask_from_tokens
 from stok.utils.flops import compute_flops_6n, count_parameters, format_flops_scientific
 from stok.utils.losses import fape_loss, token_ce_loss
 from stok.utils.tokenizer import Tokenizer
+from stok.training.tasks import MDLMTask
 from stok.utils.checkpoint import (
     atomic_destination as _atomic_destination,
     collect_rng_state as _collect_rng_state,
@@ -1668,22 +1658,10 @@ def run_training(cfg: DictConfig):
     total_residues = 0
     total_missing_structure = 0
     total_noncanonical_sequence = 0
-    mdlm_weights = None
-    mdlm_tokenizer = None
-    canonical_ids = None
+    task = None
     if is_mdlm:
-        mdlm_weights = torch.tensor(
-            [
-                cfg.train.mdlm.get("sequence_loss_weight", 1),
-                cfg.train.mdlm.get("structure_loss_weight", 1),
-            ],
-            dtype=torch.float64,
-        )
-        mdlm_weights /= mdlm_weights.max()
-        mdlm_tokenizer = Tokenizer()
-        canonical_ids = torch.tensor(
-            mdlm_tokenizer.convert_tokens_to_ids(list(CANONICAL_AA))
-        )
+        assert codebook_size is not None
+        task = MDLMTask(cfg, codebook_size=codebook_size)
     mdlm_running = torch.zeros(5, 2, dtype=torch.float64)
 
     # Gumbel temperature schedule (only for codebook objective)
@@ -1711,30 +1689,33 @@ def run_training(cfg: DictConfig):
             progress["executed_positions"],
             progress["residues_seen"],
         )
-        saved = progress
-        running_loss = saved["running_loss"]
-        running_updates = saved["running_updates"]
-        running_cls_loss, running_cls_count = (
-            saved["running_cls_loss"],
-            saved["running_cls_count"],
-        )
-        running_fape_loss, running_fape_count = (
-            saved["running_fape_loss"],
-            saved["running_fape_count"],
-        )
-        running_pred_nan_frac_sum, running_pred_nan_frac_count = (
-            saved["running_pred_nan_frac_sum"],
-            saved["running_pred_nan_frac_count"],
-        )
-        running_masked_acc_sum, running_masked_acc_count = (
-            saved["running_masked_acc_sum"],
-            saved["running_masked_acc_count"],
-        )
-        total_missing_structure, total_noncanonical_sequence = (
-            saved["total_missing_structure"],
-            saved["total_noncanonical_sequence"],
-        )
-        mdlm_running = saved["mdlm_running"]
+        if task is not None:
+            task.restore_logging_state(cast(dict, progress))
+        else:
+            saved = progress
+            running_loss = saved["running_loss"]
+            running_updates = saved["running_updates"]
+            running_cls_loss, running_cls_count = (
+                saved["running_cls_loss"],
+                saved["running_cls_count"],
+            )
+            running_fape_loss, running_fape_count = (
+                saved["running_fape_loss"],
+                saved["running_fape_count"],
+            )
+            running_pred_nan_frac_sum, running_pred_nan_frac_count = (
+                saved["running_pred_nan_frac_sum"],
+                saved["running_pred_nan_frac_count"],
+            )
+            running_masked_acc_sum, running_masked_acc_count = (
+                saved["running_masked_acc_sum"],
+                saved["running_masked_acc_count"],
+            )
+            total_missing_structure, total_noncanonical_sequence = (
+                saved["total_missing_structure"],
+                saved["total_noncanonical_sequence"],
+            )
+            mdlm_running = saved["mdlm_running"]
 
     def checkpoint_state():
         return {
@@ -1744,7 +1725,9 @@ def run_training(cfg: DictConfig):
                 "epoch": epoch,
                 "batches_in_epoch": batches_in_pass,
                 "loader_generator_state": loader_generator_state,
-                "logging": {
+                "logging": task.logging_state()
+                if task is not None
+                else {
                     "running_loss": running_loss,
                     "running_updates": running_updates,
                     "running_cls_loss": running_cls_loss,
@@ -1797,80 +1780,32 @@ def run_training(cfg: DictConfig):
                 and want_fape
                 and global_step >= int(cfg.train.fape.start_step)
             )
-            # Crop/corrupt in the training process, keyed to each global occurrence.
-            corruptions = []
-            prepare_error = None
+            # Tasks prepare CPU payloads/counts; collectives remain in the driver.
             if is_mdlm:
+                assert task is not None
+                prepare_error = None
                 try:
-                    assert mdlm_tokenizer is not None
-                    assert codebook_size is not None
-                    prepared = []
-                    for micro_index, rows in enumerate(window):
-                        occurrences = [
-                            [
-                                seed,
-                                "train",
-                                epoch,
-                                (micro_step + micro_index)
-                                * cfg.train.batch_size
-                                * world_size
-                                + j * world_size
-                                + (accelerator.process_index if accelerator else 0),
-                                row["dataset"],
-                                row["sequence_id"],
-                            ]
-                            for j, row in enumerate(rows)
-                        ]
-                        paired_batch = prepare_mdlm_batch(
-                            rows,
-                            mdlm_tokenizer,
-                            max_len=int(cfg.data.max_len),
-                            codebook_size=codebook_size,
-                            crop="random",
-                            seeds=[stable_seed([*key, "crop"]) for key in occurrences],
-                        )
-                        corruption = corrupt_mdlm_batch(
-                            paired_batch,
-                            cfg.train.mdlm,
-                            seeds=[
-                                stable_seed([*key, "corruption"]) for key in occurrences
-                            ],
-                        )
-                        prepared.append(paired_batch)
-                        corruptions.append(corruption)
-                    window = prepared
+                    prepared = task.prepare_window(
+                        window,
+                        epoch=epoch,
+                        micro_step=micro_step,
+                        global_step=global_step,
+                        rank=accelerator.process_index if accelerator else 0,
+                        world_size=world_size,
+                    )
                 except Exception as exc:
                     prepare_error = f"{type(exc).__name__}: {exc}"
                 _raise_rank_errors(
                     prepare_error, accelerator, "Preparing MDLM window failed"
                 )
-                assert mdlm_weights is not None
-                local_eligible = sum(
-                    (c["eligible"].sum((0, 1)) for c in corruptions),
-                    torch.zeros(2, dtype=torch.long),
-                )
-                local_residues = sum(int(b["residue_mask"].sum()) for b in window)
-                processed_tokens = sum(b["sequence_tokens"].numel() for b in window)
-                counts = torch.tensor(
-                    [
-                        *local_eligible.tolist(),
-                        local_residues,
-                        processed_tokens,
-                        sum(b["missing_structure_count"] for b in window),
-                        sum(b["noncanonical_sequence_count"] for b in window),
-                    ],
-                    device=device,
-                    dtype=torch.long,
-                )
+                window = prepared.batches
+                counts = prepared.counts.to(device)
                 if accelerator:
                     counts = accelerator.reduce(counts, reduction="sum")
-                global_eligible = counts[:2]
-                global_tokens, global_structures = int(global_eligible.sum()), 0
-                total_residues += int(counts[2])
-                total_missing_structure += int(counts[4])
-                total_noncanonical_sequence += int(counts[5])
-                processed_tokens = int(counts[3])
-                denominator = float((global_eligible.cpu() * mdlm_weights).sum())
+                denominator = task.denominators(counts)["diffusion"]
+                accounting = task.consume_counts(counts)
+                total_residues += accounting.residues_seen
+                processed_tokens = accounting.executed_positions
             else:
                 # Denominators precede forwards; only input batches are buffered.
                 n_tokens = sum(
@@ -1927,39 +1862,13 @@ def run_training(cfg: DictConfig):
                     error = None
                     try:
                         if is_mdlm:
-                            assert canonical_ids is not None
-                            assert mdlm_weights is not None
-                            mdlm_batch = cast(
-                                MDLMBatch,
-                                {
-                                    key: value.to(device)
-                                    if isinstance(value, torch.Tensor)
-                                    else value
-                                    for key, value in batch.items()
-                                },
+                            assert task is not None
+                            result = task.forward(
+                                model, batch, device=device, global_step=global_step
                             )
-                            corruption = cast(
-                                MDLMCorruption,
-                                {
-                                    key: value.to(device)
-                                    if isinstance(value, torch.Tensor)
-                                    else value
-                                    for key, value in corruptions[micro_index].items()
-                                },
+                            loss = result.loss_sums["diffusion"] * (
+                                world_size / denominator
                             )
-                            outputs = model(
-                                sequence_tokens=corruption["sequence_tokens"],
-                                structure_tokens=corruption["structure_tokens"],
-                            )
-                            terms = mdlm_loss_terms(
-                                outputs,
-                                mdlm_batch,
-                                corruption,
-                                canonical_aa_ids=canonical_ids,
-                            )
-                            loss = (
-                                terms["weighted_sum"] * mdlm_weights.to(device)
-                            ).sum() * (world_size / denominator)
                         else:
                             legacy_batch = cast(Sequence[torch.Tensor], batch)
                             tokens, labels = (t.to(device) for t in legacy_batch[:2])
@@ -2027,18 +1936,7 @@ def run_training(cfg: DictConfig):
                     else:
                         loss.backward()
                     if is_mdlm:
-                        window_mdlm += torch.stack(
-                            [
-                                terms[key].detach()
-                                for key in (
-                                    "weighted_sum",
-                                    "ce_sum",
-                                    "correct",
-                                    "masked_count",
-                                    "eligible_count",
-                                )
-                            ]
-                        )
+                        window_mdlm += result.statistics
                     else:
                         window_ce += float(ce_sum.detach())
                         window_fape += float(fape_sum.detach())
@@ -2059,13 +1957,10 @@ def run_training(cfg: DictConfig):
                 continue
             scheduler.step()
             if is_mdlm:
-                assert mdlm_weights is not None
+                assert task is not None
                 if accelerator:
                     window_mdlm = accelerator.reduce(window_mdlm, reduction="sum")
-                running_loss += (
-                    float((window_mdlm[0].cpu() * mdlm_weights).sum()) / denominator
-                )
-                mdlm_running += window_mdlm.cpu()
+                task.record_update(window_mdlm, counts)
             else:
                 sums = torch.tensor(
                     [window_ce, window_fape, window_correct],
@@ -2086,42 +1981,22 @@ def run_training(cfg: DictConfig):
                     running_fape_loss += float(sums[1])
                     running_fape_count += global_structures
 
-            running_updates += 1
+            if not is_mdlm:
+                running_updates += 1
             # logging
             if is_mdlm and current_step % log_interval == 0 and is_main:
                 cumulative_flops = compute_flops_6n(num_params, total_tokens)
-                payload = {
-                    "train/diffusion_loss": running_loss / running_updates,
-                    "train/micro_step": micro_step,
-                    "train/residues_seen": total_residues,
-                    "train/executed_positions": total_tokens,
-                    "train/missing_structure_count": total_missing_structure,
-                    "train/noncanonical_sequence_count": total_noncanonical_sequence,
-                    "train/flops": cumulative_flops,
-                    "lr": scheduler.get_last_lr()[0],
-                }
-                msg = f"step {current_step}/{max_steps} | micro_step {micro_step} | diffusion_loss {payload['train/diffusion_loss']:.4f}"
-                for track, name in enumerate(("sequence", "structure")):
-                    weighted, ce, correct, masked, eligible = mdlm_running[
-                        :, track
-                    ].tolist()
-                    payload[f"train/{name}/weighted_sum"] = weighted
-                    payload[f"train/{name}/ce_sum"] = ce
-                    payload[f"train/{name}/masked_count"] = masked
-                    payload[f"train/{name}/eligible_count"] = eligible
-                    payload[f"train/{name}/mask_rate"] = (
-                        masked / eligible if eligible else 0
-                    )
-                    if masked:
-                        payload[f"train/{name}/masked_ce"] = ce / masked
-                        payload[f"train/{name}/masked_accuracy"] = correct / masked
-                    msg += (
-                        f" | {name}_ce {ce / masked:.4f}"
-                        if masked
-                        else f" | {name}_ce unavailable"
-                    )
-                    msg += f" | {name}_masked {int(masked)}/{int(eligible)}"
-                msg += f" | residues {total_residues} | positions {total_tokens} | missing_structure {total_missing_structure} | noncanonical_sequence {total_noncanonical_sequence} | flops {format_flops_scientific(cumulative_flops)}"
+                assert task is not None
+                msg, payload = task.format_log(
+                    step=current_step,
+                    max_steps=max_steps,
+                    micro_step=micro_step,
+                    epoch=current_epoch,
+                    lr=scheduler.get_last_lr()[0],
+                    flops=cumulative_flops,
+                    residues_seen=total_residues,
+                    executed_positions=total_tokens,
+                )
                 console.train(msg)
                 if log_file_handle is not None:
                     print(
@@ -2131,9 +2006,7 @@ def run_training(cfg: DictConfig):
                     )
                 if wb is not None:
                     wb.log(payload, step=current_step)
-                running_loss = 0.0
-                running_updates = 0
-                mdlm_running.zero_()
+                task.reset_log_window()
             if not is_mdlm and current_step % log_interval == 0 and is_main:
                 acc = running_masked_acc_sum / max(1, running_masked_acc_count)
                 lr = scheduler.get_last_lr()[0]
@@ -2357,7 +2230,11 @@ def run_training(cfg: DictConfig):
         if (
             not resumed_batches
             and global_step == updates_before_pass
-            and (not is_mdlm or eligible_windows_in_pass == 0)
+            and (
+                task is None
+                or not task.allow_skipped_only_pass
+                or eligible_windows_in_pass == 0
+            )
         ):
             raise RuntimeError("Training pass made no successful optimizer update")
         if global_step < max_steps:

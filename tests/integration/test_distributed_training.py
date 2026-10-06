@@ -474,4 +474,6 @@ def test_mdlm_rank_local_failure_terminates_every_rank(tmp_path, case, context):
     for result in run_distributed(command, timeout=20):
         assert result.returncode != 0
         assert context in result.stderr, result.stdout + result.stderr
+        sentinel = "preparation" if case == "mdlm-bad-prepare" else "forward"
+        assert f"injected rank-local MDLM {sentinel} failure" in result.stderr
     assert not list((tmp_path / "run/checkpoints").glob("step_*.pt"))

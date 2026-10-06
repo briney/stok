@@ -82,6 +82,46 @@ def checkpoint(cfg):
     )
 
 
+def test_mdlm_task_accounting_and_flat_logging_round_trip(tmp_path):
+    from stok.training.tasks import MDLMTask
+    from tests.integration.test_mdlm_resume import equal
+
+    source, codebook = training_fixture(tmp_path)
+    cfg = mdlm_config(
+        tmp_path / "run",
+        source,
+        codebook,
+        **{
+            "train.mdlm.sequence_loss_weight": 1e300,
+            "train.mdlm.structure_loss_weight": 1e299,
+        },
+    )
+    task = MDLMTask(cfg, codebook_size=32)
+    empty = torch.tensor([0, 0, 3, 8, 1, 2], dtype=torch.int64)
+    eligible = torch.tensor([10, 20, 6, 16, 2, 1], dtype=torch.int64)
+    assert task.allow_skipped_only_pass is True
+    assert task.denominators(eligible) == {"diffusion": 12.0}
+    assert task.consume_counts(empty).executed_positions == 0
+    accounting = task.consume_counts(eligible)
+    assert (accounting.residues_seen, accounting.executed_positions) == (6, 16)
+    saved = task.logging_state()
+    assert saved["total_missing_structure"] == 3
+    assert saved["total_noncanonical_sequence"] == 3
+    saved["running_cls_loss"] = 7.0  # Even inactive v2 placeholders round-trip.
+    saved["running_cls_count"] = 9
+    saved["running_loss"] = 2.0
+    saved["running_updates"] = 1
+    saved["mdlm_running"] = torch.arange(10, dtype=torch.float64).reshape(5, 2)
+    task.restore_logging_state(saved)
+    equal(task.logging_state(), saved)
+    task.reset_log_window()
+    reset = task.logging_state()
+    assert reset["running_loss"] == reset["running_updates"] == 0
+    assert not reset["mdlm_running"].any()
+    assert reset["running_cls_loss"] == 7.0 and reset["running_cls_count"] == 9
+    assert reset["total_missing_structure"] == reset["total_noncanonical_sequence"] == 3
+
+
 def test_paired_parquet_update_both_heads_and_compute_accounting(tmp_path):
     source, codebook = training_fixture(tmp_path)
     cfg = mdlm_config(tmp_path / "run", source, codebook)
@@ -156,6 +196,8 @@ def test_mdlm_partial_window_flushes(tmp_path):
     assert state["global_step"] == state["scheduler"]["last_epoch"] == 2
     assert state["micro_step"] == 5
     assert state["executed_positions"] == 80
+    assert state["residues_seen"] == 45
+    assert state["rank_states"][0]["batches_in_epoch"] == 5
 
 
 def test_mdlm_accumulation_matches_full_batch(tmp_path):
@@ -177,6 +219,12 @@ def test_mdlm_accumulation_matches_full_batch(tmp_path):
         )
     assert small["executed_positions"] == large["executed_positions"]
     assert small["residues_seen"] == large["residues_seen"]
+    assert small["micro_step"] == 4 and large["micro_step"] == 2
+    for state in (small, large):
+        logging = state["rank_states"][0]["logging"]
+        assert logging["running_updates"] == 0
+        assert logging["mdlm_running"].shape == (5, 2)
+        assert not logging["mdlm_running"].any()
 
 
 def test_tiny_paired_subset_learns(tmp_path):
@@ -343,6 +391,8 @@ def test_no_eligible_window_skips_but_preserves_consumed_cursor(tmp_path):
     assert state["micro_step"] == 2
     assert state["residues_seen"] == 12
     assert state["executed_positions"] == 16
+    assert state["rank_states"][0]["batches_in_epoch"] == 2
+    assert state["rank_states"][0]["logging"]["total_missing_structure"] == 6
     assert all(s["step"].item() == 1 for s in state["optimizer"]["state"].values())
 
 
@@ -393,12 +443,19 @@ def test_real_cpu_amp_skip_preserves_cursor_without_advancing_schedule(
 
     monkeypatch.setattr(STokMDLM, "__init__", instrument)
     source, codebook = training_fixture(tmp_path, n=samples)
-    state = checkpoint(mdlm_config(tmp_path / "run", source, codebook))
+    state = checkpoint(
+        mdlm_config(tmp_path / "run", source, codebook, **{"train.log_every": 3})
+    )
     assert len(calls) == 3
     assert scaler.get_scale() == 32768  # actual overflow detected by GradScaler
     assert state["global_step"] == state["scheduler"]["last_epoch"] == 2
     assert state["micro_step"] == 3
     assert state["executed_positions"] == 48
+    assert state["residues_seen"] == 27
+    logging = state["rank_states"][0]["logging"]
+    assert logging["running_updates"] == 2
+    assert logging["mdlm_running"][4, 0] == 16  # AMP-skipped statistics never commit.
+    assert logging["total_noncanonical_sequence"] == 3  # Consumed views still count.
     assert all(s["step"].item() == 2 for s in state["optimizer"]["state"].values())
 
 
@@ -444,6 +501,8 @@ def test_real_zero_mask_draw_still_updates_adamw(tmp_path):
         == 1
     )
     assert all(s["step"].item() == 1 for s in state["optimizer"]["state"].values())
+    assert state["residues_seen"] == 2 and state["executed_positions"] == 16
+    assert state["rank_states"][0]["batches_in_epoch"] == 1
     assert all(
         torch.count_nonzero(s["exp_avg"]) == 0
         for s in state["optimizer"]["state"].values()

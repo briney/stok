@@ -19,12 +19,13 @@ import os, sys, torch
 from pathlib import Path
 from omegaconf import OmegaConf
 from stok.cli import train
+from stok.training import tasks
 from stok.models.stok import STokModel
 cfg = OmegaConf.load(sys.argv[1])
 stop = int(sys.argv[2])
 rank = int(os.environ.get("RANK", 0))
 trace = []
-original_corrupt = train.corrupt_mdlm_batch
+original_corrupt = tasks.corrupt_mdlm_batch
 original_forward = STokModel.forward
 original_save = train._save_checkpoint
 
@@ -42,7 +43,7 @@ def save(*args, **kwargs):
     if kwargs['global_step'] == stop:
         raise InterruptedError('intentional interruption after completed checkpoint')
 
-train.corrupt_mdlm_batch = corrupt
+tasks.corrupt_mdlm_batch = corrupt
 STokModel.forward = forward
 train._save_checkpoint = save
 if os.environ.get('RESUME_SKIP'):

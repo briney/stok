@@ -85,7 +85,7 @@ def main():
         )
     if args.case.startswith("mdlm-"):
         from tests.integration.test_mdlm_training import mdlm_config
-        from stok.cli import train as training
+        from stok.training import tasks
 
         cfg = mdlm_config(
             root / "run",
@@ -99,26 +99,35 @@ def main():
         if args.case == "mdlm-unused-head":
             cfg.train.mdlm.regime_weights = {"sequence_only": 1}
         if args.case == "mdlm-bad-prepare":
-            original = training.prepare_mdlm_batch
+            original = tasks.prepare_mdlm_batch
 
             def bad_row(rows, *arguments, **kwargs):
                 if accelerator.process_index == 0:
                     rows[0]["structure_tokens"][-1] = 99999
-                return original(rows, *arguments, **kwargs)
+                try:
+                    return original(rows, *arguments, **kwargs)
+                except ValueError as exc:
+                    raise ValueError(
+                        "injected rank-local MDLM preparation failure"
+                    ) from exc
 
-            training.prepare_mdlm_batch = bad_row
+            tasks.prepare_mdlm_batch = bad_row
         if args.case == "mdlm-bad-forward":
-            original = training.STokMDLM.forward
+            original = tasks.mdlm_loss_terms
 
-            def bad_prediction(self, *arguments, **kwargs):
-                outputs = original(self, *arguments, **kwargs)
+            def bad_prediction(outputs, *arguments, **kwargs):
                 if accelerator.process_index == 0:
                     outputs["sequence_logits"] = outputs["sequence_logits"] * float(
                         "nan"
                     )
-                return outputs
+                try:
+                    return original(outputs, *arguments, **kwargs)
+                except FloatingPointError as exc:
+                    raise FloatingPointError(
+                        "injected rank-local MDLM forward failure"
+                    ) from exc
 
-            training.STokMDLM.forward = bad_prediction
+            tasks.mdlm_loss_terms = bad_prediction
         run_training(cfg)
         if torch.distributed.is_initialized():
             torch.distributed.destroy_process_group()

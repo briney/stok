@@ -74,7 +74,7 @@ def instrument(probe):
 
 def candidate_probe():
     """Adapt candidate hook owners here when tasks/engine move; keep capture frozen."""
-    return instrument(PROBE)
+    return instrument(PROBE).replace("train.mdlm_loss_terms", "tasks.mdlm_loss_terms")
 
 
 def identity(source):
@@ -244,7 +244,7 @@ def capture_reference(cfg: DictConfig, directory: Path, *, source_root: Path) ->
             for target in node.targets
         )
     )
-    probe = instrument(old_probe)
+    probe = candidate_probe() if source_root == ROOT else instrument(old_probe)
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "capture-probe.py").write_text(probe)
     OmegaConf.save(cfg, directory / "authored.yaml")
