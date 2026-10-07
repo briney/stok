@@ -236,7 +236,15 @@ def test_manifest_paths_and_defaults_are_explicit(tmp_path):
     source.write_text((FIXTURES / "inputs/complete_pdb.pdb").read_text())
     manifest = tmp_path / "chains.jsonl"
     manifest.write_text(
-        json.dumps({"sequence_id": "chain-1", "path": "input.pdb", "chain_id": "A"})
+        json.dumps(
+            {
+                "sequence_id": "chain-1",
+                "path": "input.pdb",
+                "chain_id": "A",
+                "source_namespace": "pdb",
+                "source_accession": "example",
+            }
+        )
         + "\n"
     )
     (row,) = iter_structure_manifest(manifest)
@@ -247,7 +255,9 @@ def test_manifest_paths_and_defaults_are_explicit(tmp_path):
 @pytest.mark.parametrize(
     "fault",
     [
-        "duplicate",
+        "duplicate_parent",
+        "source_namespace",
+        "source_accession",
         "id",
         "path",
         "namespace",
@@ -262,8 +272,15 @@ def test_manifest_paths_and_defaults_are_explicit(tmp_path):
 def test_manifest_invalid_rows_include_path_and_line_context(tmp_path, fault):
     from stok.data.structure_encoding import iter_structure_manifest
 
-    row = {"sequence_id": "one", "path": str(FIXTURES / "inputs/complete_pdb.pdb")}
+    row = {
+        "sequence_id": "one",
+        "path": str(FIXTURES / "inputs/complete_pdb.pdb"),
+        "source_namespace": "pdb",
+        "source_accession": "example",
+    }
     field_values = {
+        "source_namespace": ("source_namespace", ""),
+        "source_accession": ("source_accession", " example "),
         "id": ("sequence_id", 3),
         "path": ("path", "missing.pdb"),
         "namespace": ("chain_namespace", "other"),
@@ -277,8 +294,9 @@ def test_manifest_invalid_rows_include_path_and_line_context(tmp_path, fault):
         field, value = field_values[fault]
         row[field] = value
     text = json.dumps(row) + "\n"
-    if fault == "duplicate":
-        text += text
+    if fault == "duplicate_parent":
+        row["parent_ids"] = ["a" * 64] * 2
+        text = json.dumps(row) + "\n"
     elif fault == "json":
         text = "{invalid}\n"
     manifest = tmp_path / "bad.jsonl"

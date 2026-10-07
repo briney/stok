@@ -147,78 +147,78 @@ experiment evidence; their snapshots live under
 [historical-policies](docs/experiments/gcp-vqvae/historical-policies/).
 Native inputs make these structure tokens sequence-conditioned.
 
-Convert a local directory on the machine holding your structures:
-
-```bash
-stok tokenize-structures /data/pdbs /data/stok-mdlm/train \
-  --preset large --device cuda:0 --recursive --rows-per-shard 2000
-```
-
-The command works from an installed package without cloning the repository.
-Default loading downloads the pinned tokenizer archive once into the local
-cache. Add `--checkpoint /weights/best_valid.pth` for offline use. Directory
-input supports uncompressed `.pdb`, `.ent`, `.cif`, and `.mmcif` files, selects the
-first model, and exports every protein chain independently without deduplication.
-Use `--recursive` for nested directories. Sequence IDs include relative filenames
-and escaped chain IDs, e.g. `nested/sample.cif:A`; CIF selection uses label IDs.
-Nonprotein chains are skipped; malformed files abort discovery.
-
-PDBs require SEQRES sequence metadata; mmCIFs use their deposited polymer sequence.
-Coordinate-only predicted structures need a manifest with supplied construct
-sequences. STok does not silently infer the full sequence from observed atoms.
-Keep chains from the same source structure and homologous clusters together when
-creating training/validation splits. Encoding does not infer biological
-assemblies or supply assembly-context tokens.
-
-JSONL is an optional convenience for selecting chains, supplying construct
-sequences, or recording bounded export jobs. One line selects one chain with a
-unique caller-supplied ID:
+Prepare a JSONL manifest with explicit source identities, then encode its frozen
+canonical inventory:
 
 ```json
-{"sequence_id":"sample-A","path":"structures/sample.pdb","chain_id":"A","model_index":0}
+{"sequence_id":"sample-A","source_namespace":"pdb","source_accession":"1ABC","path":"structures/sample.pdb","chain_id":"A","model_index":0}
 ```
 
-Pass this file instead of the input directory. Paths resolve relative to the
-manifest directory; `chain_namespace` defaults to `author`, `model_index` to 0.
-An optional `sequence` supplies the full construct sequence. Unknown fields,
-duplicate IDs, malformed rows, and missing files are fatal.
+```bash
+stok prepare-structures /data/inputs.jsonl /data/canonical
+stok tokenize-structures /data/canonical /data/stok-mdlm/train \
+  --preset large --device cuda:0 --rows-per-shard 2000
+```
 
-Outputs contain numbered Zstd-compressed Parquet shards, `inputs.jsonl`,
-`rejections.jsonl`, and a completed `manifest.json`. Required columns are
-`sequence_id`, `sequence`, and nullable `list<int64>` `structure_tokens`.
-Additional `residue_map` and `source` structs retain residue correspondence,
-source hashes, chain/entity/model and sequence-source metadata. Coordinates are
-omitted by default; `--include-coordinates` retains original-frame `[L,3,3]`
-N/CA/C observations with NaNs, never imputed targets.
+Paths resolve relative to the input manifest; `chain_namespace` defaults to
+`author`, `model_index` to 0. An optional `sequence` supplies the full construct
+sequence. PDBs otherwise require SEQRES; mmCIF uses deposited polymer sequence.
+STok does not infer the full sequence from observed atoms. Namespace/accession
+are explicit case-sensitive identifiers; the verified raw-file SHA-256 is the
+source revision. Optional `parent_ids` declares unique canonical parent IDs.
+Display labels may repeat for distinct records; repeated resolved selections,
+unknown fields, malformed rows, and missing files are fatal.
 
-Every shard records tokenizer and codebook identities, the fixed semantic policy,
-and actual execution provenance. Device, dependency versions and source revision
-are recorded as execution details, not selectable policies. MDLM requires the
-whole completed export directory; copying bare shards does not preserve its
-completion inventory. Older exports remain readable, but their recorded policy
-identities can differ; do not mix them with new exports in one MDLM run.
+The canonical directory contains `records.jsonl`, `inputs.jsonl`, categorized
+parser `rejections.jsonl`, and a completed integrity `manifest.json`. Records
+retain original float32 N/CA/C/O observations, boolean masks, complete residue
+correspondence, source declarations, and identity/content/map hashes. Missing
+coordinates are JSON null. Its sorted population digest excludes paths, labels,
+physical order, tokenizer state and shards. Parsed records remain canonical even
+if a tokenizer later rejects them. Consumers verify frozen artifacts without
+requiring the original structure files. A zero-record inventory can retain a
+complete parser-failure audit, but cannot produce a representation dataset.
 
-The directory Python API shares the same policy:
+Representation exports contain numbered Zstd-compressed schema-2 Parquet shards,
+representation `rejections.jsonl`, and a completed `manifest.json` referencing the
+shared canonical inventory. Each row carries `canonical_id`,
+`canonical_content_sha256`, `residue_map_sha256`, `canonical_identity`, `parent_ids`,
+`sequence_id`, `sequence`, nullable `list<int64>` `structure_tokens`, `residue_map`,
+and `source`. `--include-coordinates` retains original-frame `[L,3,3]` N/CA/C with
+null missing observations, never imputed targets. The reader converts missing
+values to NaNs for geometry masks.
+
+The representation digest binds population, encoder/quantizer/codebook state,
+preparation, conditioning, context/alignment and numerical execution settings.
+Physical shard order/layout and runtime remain separate replay/audit details.
+MDLM requires the completed export directory and its referenced canonical
+inventory. Schema-1 representation exports are rejected.
+
+The installed command downloads the pinned tokenizer archive once into its local
+cache. Use `--checkpoint /weights/best_valid.pth` for offline encoding. Canonical
+validation precedes tokenizer/device setup.
+
+The Python API uses the same two stages:
 
 ```python
-from stok.data.structure_directory import write_structure_folder_dataset
+from stok.data.canonical import prepare_canonical_dataset
+from stok.data.structure_export import write_structure_dataset
 from stok.models.gcp_vqvae import load_pretrained_tokenizer
 
+prepare_canonical_dataset("/data/inputs.jsonl", "/data/canonical")
 tokenizer = load_pretrained_tokenizer("large", device="cuda:0")
-summary = write_structure_folder_dataset(
-    "/data/pdbs",
-    "/data/stok-mdlm/train",
-    tokenizer=tokenizer,
-    recursive=True,
+summary = write_structure_dataset(
+    "/data/canonical", "/data/stok-mdlm/train", tokenizer=tokenizer,
     rows_per_shard=2000,
 )
 ```
 
-`stok.data.structure_export.write_structure_dataset()` accepts a JSONL manifest
-for the same export path; neither API accepts a policy argument. Inspect a
-completed dataset with `validate_structure_dataset(path)` from that module to
-verify hashes, inventory, counts, and the reader contract. Export also validates
-these properties before publication.
+`iter_structure_directory(directory, recursive=True)` remains available for
+uncompressed `.pdb`, `.ent`, `.cif`, and `.mmcif` discovery. It selects protein
+chains from the first model; callers must add explicit source namespace/accession
+before writing a preparation manifest. Neither API accepts a policy argument.
+Use `validate_canonical_dataset(path)` and `validate_structure_dataset(path)` to
+audit completed artifacts. Export validates both before publication.
 
 `--rows-per-shard` bounds each output shard; the default is 1000 chain rows.
 `--batch-size` groups chains using independent singleton forwards, preserving
@@ -228,7 +228,7 @@ sorts paths in memory. For large collections, use bounded manifests or input
 directories and separate completed exports. There is no automatic export resume.
 Training crops paired windows later without changing the stored full-chain tokens.
 
-Mapping and admission exclusions have stable reasons in `rejections.jsonl`;
+Parser and representation admission exclusions have separate stable reason audits;
 unexpected numerical/model errors abort. Existing destinations are refused,
 including concurrent publication. Failed runs leave a marked hidden sibling
 staging directory without advertising a completed dataset. Atomic no-replace

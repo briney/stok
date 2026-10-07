@@ -14,7 +14,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from stok.data.mdlm import CANONICAL_AA, prepare_mdlm_batch
-from stok.utils.pretrained import state_sha256
+from stok.utils.pretrained import json_sha256, state_sha256
 from stok.utils.tokenizer import Tokenizer
 
 
@@ -549,7 +549,9 @@ def evaluation_training_fixture(tmp_path):
             "sequence_id": "heldout_" + row["sequence_id"],
             "source": {
                 "path": "heldout_" + row["sequence_id"] + ".cif",
-                "sha256": "heldout_" + row["sequence_id"],
+                "sha256": json_sha256(
+                    {"fixture_source": "heldout_" + row["sequence_id"]}
+                ),
             },
         }
         for row in originals

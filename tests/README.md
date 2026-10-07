@@ -242,8 +242,9 @@ shard boundaries. This costs throughput compared with true tensor batching;
 mixed-length reference batching retains its documented terminal-feature
 behavior. `iter_structure_manifest` validates JSONL identifiers, fields/types,
 chain namespaces, selected models, sequences, and paths with file/line context;
-relative paths resolve against the manifest directory. Duplicate IDs and
-unknown fields are fatal. Structure-folder evaluation masks now require finite
+relative paths resolve against the manifest directory. Explicit source namespace/accession
+and sorted unique parent IDs are required; repeated resolved source selections and
+unknown fields are fatal. Display labels may repeat for distinct canonical IDs. Structure-folder evaluation masks now require finite
 original N/CA/C observations rather than merely a sequence position.
 
 ### Policy experiments and aligned export
@@ -263,8 +264,9 @@ positions, unique IDs, exclusions, independent grouping/sharding identity,
 metadata checks, interruption and concurrent-destination publication. It feeds
 both existing readers and collators, checks BOS/EOS/padding and sequence targets
 at missing structure labels, compares decoder outputs after serialization, and
-runs a real one-update training/evaluation smoke on generated shards. Legacy
-Parquet files remain supported; generated shards require compatible provenance.
+runs a tiny local one-update training/evaluation smoke on generated shards. Generic
+typed Parquet remains useful for diagnostics; representation exports require
+schema-2 provenance and complete canonical row/inventory correspondence.
 All-rejected runs and numerical model failures cannot publish a dataset.
 
 The [fixture report](../docs/experiments/gcp-vqvae/smoke-report.md) records both
@@ -376,3 +378,15 @@ checkpoint-contained sampling and qualified artifact tests listed above.
 Fault injection follows actual lookup ownership: construction in
 `stok.models.build`, preparation/loss in `stok.training.tasks`, runtime/checkpoint
 transport in `stok.training.engine`, and loaders in `stok.data.loaders`.
+
+
+`unit/test_canonical_data.py` checks path/display invariance, model/chain/revision
+identity, original four-atom roundtrip with missing oxygen, strict booleans/digests,
+sequence-only absent observations, duplicate alias selections, explicit lineage,
+conflicting mapping/content, raw-file mutation and zero-record parser audits.
+The export integration tests retokenize and reshard one canonical inventory,
+partition requests into parser rejections/canonical records and canonical records
+into admitted/representation-rejected rows, preserve original coordinates, audit
+corruption and publication failures, and verify canonical validation occurs before
+tokenizer setup. `make_mdlm_rows`/`write_dataset` produce complete local schema-2
+fixtures including original oxygen observations and explicit source identities.

@@ -25,7 +25,7 @@ def parquet_shards(directory: Path) -> list[Path]:
 
 
 def _structure_provenance(path: Path, schema: pa.Schema):
-    """Legacy files have no provenance; generated files must have consistent digests."""
+    """Generic Parquet is permitted; representation exports require current provenance."""
     metadata = schema.metadata or {}
     keys = (b"stok.provenance", b"stok.tokenizer_sha256", b"stok.policy_sha256")
     if not any(key in metadata for key in keys):
@@ -33,7 +33,8 @@ def _structure_provenance(path: Path, schema: pa.Schema):
     try:
         provenance = json.loads(metadata[keys[0]])
         if (
-            provenance["schema_version"] != 1
+            type(provenance["schema_version"]) is not int
+            or provenance["schema_version"] != 2
             or json_sha256(provenance["tokenizer"]) != metadata[keys[1]].decode()
             or json_sha256(provenance["policy"]) != metadata[keys[2]].decode()
         ):
@@ -109,6 +110,18 @@ def _parquet_columns(
     """Validate a file's schema and select the columns consumed by the dataset."""
     _structure_provenance(path, schema)
     required = {"sequence_id", "sequence"}
+    if (schema.metadata or {}).get(b"stok.provenance") is not None:
+        required.update(
+            {
+                "canonical_id",
+                "canonical_content_sha256",
+                "residue_map_sha256",
+                "canonical_identity",
+                "parent_ids",
+                "source",
+                "residue_map",
+            }
+        )
     if require_structure_tokens:
         required.add("structure_tokens")
     missing = required - set(schema.names)
@@ -147,7 +160,19 @@ def _parquet_columns(
                 f"{path}: coordinates must be three nested lists of integers or floats, got {dtype}"
             )
         columns.append("coordinates")
-    columns.extend(name for name in ("source", "residue_map") if name in schema.names)
+    columns.extend(
+        name
+        for name in (
+            "source",
+            "residue_map",
+            "canonical_id",
+            "canonical_content_sha256",
+            "residue_map_sha256",
+            "canonical_identity",
+            "parent_ids",
+        )
+        if name in schema.names
+    )
     return columns
 
 
@@ -165,7 +190,15 @@ def _build_output_from_row(
         "sequence_id": sequence_id,
         "sequence": sequence,
     }
-    for name in ("source", "residue_map"):
+    for name in (
+        "source",
+        "residue_map",
+        "canonical_id",
+        "canonical_content_sha256",
+        "residue_map_sha256",
+        "canonical_identity",
+        "parent_ids",
+    ):
         if name in row:
             out[name] = row[name]
     if "structure_tokens" in row:

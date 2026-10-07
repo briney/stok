@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from stok.data.dataset import IterableTokenizedDataset, TokenizedDataset
-from stok.utils.pretrained import file_sha256, state_sha256
+from stok.utils.pretrained import file_sha256, json_sha256, state_sha256
 from stok.utils.tokenizer import DEFAULT_VOCAB, Tokenizer
 from tests.utils.synthetic import make_mdlm_rows, write_dataset
 
@@ -243,7 +243,7 @@ def test_preflight_rejects_semantic_mismatch(tmp_path, failure):
         shutil.rmtree(val)
         row = make_mdlm_rows()[1]
         if failure == "source_overlap":
-            row["source"]["sha256"] = "long"
+            row["source"]["sha256"] = make_mdlm_rows()[0]["source"]["sha256"]
         write_dataset(
             val, [row, copy.deepcopy(row)] if failure == "duplicate_id" else [row]
         )
@@ -300,7 +300,7 @@ def test_preflight_rejects_invalid_cohorts(tmp_path, failure, kind):
         )
         row = make_mdlm_rows()[1]
         row["sequence_id"] = "test_sample"
-        row["source"]["sha256"] = "test-file"
+        row["source"]["sha256"] = json_sha256({"fixture_source": "test-file"})
         evaluations["external"] = write_dataset(tmp_path / "test", [row])
         keys = [{"dataset": "external", "sequence_id": "test_sample"}]
     elif failure == "train":
@@ -333,7 +333,7 @@ def test_preflight_accepts_loaded_test_assignments_without_tuning_on_them(tmp_pa
     train, val, manifest, assignments = paired_sources(tmp_path)
     row = make_mdlm_rows()[1]
     row["sequence_id"] = "test_sample"
-    row["source"]["sha256"] = "test-file"
+    row["source"]["sha256"] = json_sha256({"fixture_source": "test-file"})
     test = write_dataset(tmp_path / "test", [row])
     assignments.append(
         {
