@@ -74,6 +74,15 @@ def cuda_resume():
     }
     payload = dict(
         runtime={
+            "components": {
+                "objective": "mdlm",
+                "model": "stok_mdlm",
+                "sequence_tokenizer": "native",
+                "structure_representation": "frozen_vq",
+                "optimizer": "adamw",
+                "scheduler": "warmup_linear",
+            },
+            "effective_precision": "no",
             "execution": signature["execution"],
             "source": {},
             "software": {},

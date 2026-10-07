@@ -38,11 +38,15 @@ def collect_rng_state(*, device=None):
     return state
 
 
-def restore_rng_state(state):
-    random.setstate(state["python"])
+def _numpy_rng_state(state):
     numpy = list(state["numpy"])
     numpy[1] = np.asarray(numpy[1], dtype=np.uint32)
-    np.random.set_state(tuple(numpy))
+    return tuple(numpy)
+
+
+def restore_rng_state(state):
+    random.setstate(state["python"])
+    np.random.set_state(_numpy_rng_state(state))
     torch.set_rng_state(state["torch"])
     if "cuda" in state:
         torch.cuda.set_rng_state_all(state["cuda"])
@@ -203,6 +207,31 @@ def validate_resume_signature(payload: dict, expected: dict) -> None:
             f"Resume signature mismatch: {changed}; original data/model/execution/budget must be unchanged"
         )
     runtime = payload["runtime"]
+    required_runtime = {
+        "components",
+        "effective_precision",
+        "mdlm_identity",
+        "software",
+        "execution",
+        "source",
+    }
+    if not isinstance(runtime, dict) or required_runtime - runtime.keys():
+        raise ValueError("Incomplete runtime manifest")
+    components = runtime["components"]
+    required_components = {
+        "objective",
+        "model",
+        "sequence_tokenizer",
+        "structure_representation",
+        "optimizer",
+        "scheduler",
+    }
+    if (
+        not isinstance(components, dict)
+        or required_components - components.keys()
+        or any(not isinstance(value, str) or not value for value in components.values())
+    ):
+        raise ValueError("Incomplete component manifest")
     if (
         any(
             runtime.get(key) != saved[key]
@@ -244,8 +273,15 @@ def validate_resume_signature(payload: dict, expected: dict) -> None:
         ):
             raise ValueError("Invalid resume cursor")
         rng = rank["rng"]
-        if not isinstance(rng, dict):
-            raise ValueError("Invalid RNG state")
+        try:
+            # Validate native CPU states on local generators, without changing
+            # training streams or touching the saved/current CUDA device.
+            random.Random(0).setstate(rng["python"])
+            np.random.RandomState(0).set_state(_numpy_rng_state(rng))
+            torch.Generator().set_state(rng["torch"])
+            torch.Generator().set_state(rank["loader_generator_state"])
+        except (KeyError, IndexError, TypeError, ValueError, RuntimeError) as exc:
+            raise ValueError("Incomplete or invalid CPU/loader RNG state") from exc
         if sizes:
             states, active = rng.get("cuda"), rng.get("cuda_device")
             if (
@@ -266,8 +302,6 @@ def validate_resume_signature(payload: dict, expected: dict) -> None:
         elif "cuda" in rng or "cuda_device" in rng:
             raise ValueError("Unexpected CUDA RNG state for CPU execution")
         validate_logging_state(rank["logging"])
-        if not isinstance(rank["loader_generator_state"], torch.Tensor):
-            raise ValueError("Missing epoch-start loader generator state")
     if any(
         type(payload[key]) is not int or payload[key] < 0
         for key in ("global_step", "micro_step", "residues_seen", "executed_positions")
@@ -275,6 +309,32 @@ def validate_resume_signature(payload: dict, expected: dict) -> None:
         raise ValueError("Invalid resume counters")
     if payload["scheduler"].get("last_epoch") != payload["global_step"]:
         raise ValueError("Resume scheduler and successful-update counters disagree")
+    # AdamW initializes state lazily: frozen/unused parameters may legitimately lack it.
+    # Separate saved coverage detects a deleted/emptied initialized entry without
+    # assuming every optimizer parameter has participated in an update.
+    initialized = payload["optimizer_initialized"]
+    states = payload["optimizer"]["state"]
+    actual = {key for key, state in states.items() if state}
+    if (
+        not isinstance(initialized, list)
+        or len(initialized) != len(set(initialized))
+        or set(initialized) != actual
+    ):
+        raise ValueError("Missing or unexpected initialized AdamW parameter state")
+    if payload["global_step"] and not states:
+        raise ValueError(
+            "Missing optimizer continuation state after successful updates"
+        )
+    for state in states.values():
+        if state and (
+            {"step", "exp_avg", "exp_avg_sq"} - state.keys()
+            or any(
+                not isinstance(state[key], torch.Tensor)
+                for key in ("exp_avg", "exp_avg_sq")
+            )
+            or state["exp_avg"].shape != state["exp_avg_sq"].shape
+        ):
+            raise ValueError("Incomplete or incompatible AdamW continuation state")
 
 
 def restore_training_state(
@@ -294,36 +354,16 @@ def restore_training_state(
             )
     elif "cuda" in rank["rng"]:
         raise ValueError("CUDA RNG training state requires CUDA execution")
-    # AdamW initializes state lazily: frozen/unused parameters may legitimately lack it.
-    # Separate saved coverage detects a deleted/emptied initialized entry without
-    # assuming every optimizer parameter has participated in an update.
-    initialized = payload["optimizer_initialized"]
-    states = payload["optimizer"]["state"]
-    actual = {key for key, state in states.items() if state}
-    if (
-        not isinstance(initialized, list)
-        or len(initialized) != len(set(initialized))
-        or set(initialized) != actual
-    ):
-        raise ValueError("Missing or unexpected initialized AdamW parameter state")
     plain = accelerator.unwrap_model(model) if accelerator else model
     plain.load_state_dict(payload["model"], strict=True)
     plain.mdlm_regime_weights = payload["config"]["train"]["mdlm"]["regime_weights"]
     optimizer.load_state_dict(payload["optimizer"])
     scheduler.load_state_dict(payload["scheduler"])
-    if payload["global_step"] and not optimizer.state:
-        raise ValueError(
-            "Missing optimizer continuation state after successful updates"
-        )
     for group in optimizer.param_groups:
         for parameter in group["params"]:
             state = optimizer.state.get(parameter)
-            if state and (
-                {"step", "exp_avg", "exp_avg_sq"} - state.keys()
-                or any(
-                    state[key].shape != parameter.shape
-                    for key in ("exp_avg", "exp_avg_sq")
-                )
+            if state and any(
+                state[key].shape != parameter.shape for key in ("exp_avg", "exp_avg_sq")
             ):
                 raise ValueError("Incomplete or incompatible AdamW continuation state")
     scaler = getattr(accelerator, "scaler", None)
@@ -333,11 +373,10 @@ def restore_training_state(
         )
     if scaler is not None:
         scaler.load_state_dict(rank["scaler"])
-    # Validate RNG before any output replacement; restore it again after replay.
+    # Apply actual device RNG before output replacement; restore again after replay.
     rng = collect_rng_state(device=device)
     try:
         restore_rng_state(rank["rng"])
-        torch.Generator().set_state(rank["loader_generator_state"])
     finally:
         restore_rng_state(rng)
     return {

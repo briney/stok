@@ -658,3 +658,45 @@ def test_sampler_rejects_same_size_reordered_sequence_vocabulary(
     )
     assert result.exit_code != 0 and not output.exists()
     assert "vocabulary" in result.output.lower()
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "components",
+        "cpu_rng",
+        "optimizer",
+        "optimizer_partial",
+        "numpy_rng",
+        "loader_rng",
+    ],
+)
+def test_current_reader_rejects_incomplete_continuation_state(
+    tmp_path, trained, damage
+):
+    from stok.utils.checkpoint import read_training_checkpoint
+
+    _, original = trained
+    payload = copy.deepcopy(original)
+    if damage == "components":
+        del payload["runtime"]["components"]
+    elif damage == "cpu_rng":
+        payload["rank_states"][0]["rng"] = {}
+    elif damage == "optimizer":
+        payload["optimizer"]["state"].clear()
+    elif damage == "optimizer_partial":
+        next(iter(payload["optimizer"]["state"].values())).pop("exp_avg")
+    elif damage == "numpy_rng":
+        payload["rank_states"][0]["rng"]["numpy"] = []
+    else:
+        payload["rank_states"][0]["loader_generator_state"] = torch.zeros(
+            3, dtype=torch.uint8
+        )
+    checkpoint = tmp_path / "incomplete.pt"
+    torch.save(payload, checkpoint)
+    with pytest.raises(ValueError, match="manifest|RNG|AdamW"):
+        read_training_checkpoint(checkpoint)
+    result, output = invoke_sample(
+        tmp_path, checkpoint, [{"sequence_id": "sample", "length": 3}], "joint"
+    )
+    assert result.exit_code != 0 and not output.exists()

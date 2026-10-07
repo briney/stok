@@ -703,6 +703,15 @@ def test_optimizer_coverage_preserves_unused_and_frozen_parameters(tmp_path):
         residues_seen=1,
         executed_positions=1,
         runtime={
+            "components": {
+                "objective": "mdlm",
+                "model": "stok_mdlm",
+                "sequence_tokenizer": "native",
+                "structure_representation": "frozen_vq",
+                "optimizer": "adamw",
+                "scheduler": "warmup_linear",
+            },
+            "effective_precision": "no",
             "source": {},
             "software": {},
             "execution": {"world_size": 1, "device": "cpu", "cuda_rng_state_sizes": []},
