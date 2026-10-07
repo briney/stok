@@ -357,6 +357,32 @@ def test_missing_required_scientific_choices_are_rejected(field):
         load_training_config([f"~{field}"])
 
 
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("label_context", "observed_only"),
+        ("conditioning_policy", "sequence_independent"),
+    ],
+)
+def test_false_evaluation_policy_labels_fail_before_side_effects(
+    tmp_path, monkeypatch, field, value
+):
+    from stok.config import load_training_config
+    from stok.training import engine
+
+    cfg = load_training_config([f"train.output_dir={tmp_path / 'run'}"])
+    OmegaConf.set_struct(cfg, False)
+    cfg.train.eval.mdlm[field] = value
+    monkeypatch.setattr(
+        engine,
+        "_maybe_get_accelerator",
+        lambda *a, **k: pytest.fail("false policy reached devices"),
+    )
+    with pytest.raises(ValueError, match=field):
+        engine.run_training(cfg)
+    assert not (tmp_path / "run").exists()
+
+
 def test_all_explicit_zero_source_fractions_fail_before_side_effects(
     tmp_path, monkeypatch
 ):

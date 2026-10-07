@@ -106,6 +106,9 @@ def resolve_mdlm_eval_config(
         value = provided.get(key)
         if value is not None and (not isinstance(value, str) or not value.strip()):
             raise ValueError(f"train.eval.mdlm.{key} must be a nonempty path or null")
+    for key in ("conditioning_policy", "label_context"):
+        if key in provided and provided[key] != defaults[key]:
+            raise ValueError(f"train.eval.mdlm.{key} must declare {defaults[key]}")
     resolved = cast(DictConfig, OmegaConf.merge(defaults, provided))
     # Case maps are whole benchmark definitions, rather than incremental overrides.
     for section in (resolved, resolved.generation):
