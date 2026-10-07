@@ -370,6 +370,8 @@ def test_invalid_manifest_never_creates_output(tmp_path, trained, change):
     "change", ["legacy", "objective", "codebook", "conditional", "unknown"]
 )
 def test_invalid_or_unqualified_checkpoint_fails_closed(tmp_path, trained, change):
+    from stok.utils.checkpoint import scientific_config
+
     checkpoint, payload = trained
     changed = {
         **payload,
@@ -386,6 +388,10 @@ def test_invalid_or_unqualified_checkpoint_fails_closed(tmp_path, trained, chang
         )
     elif change == "conditional":
         changed["config"]["train"]["mdlm"]["regime_weights"] = {"structure_only": 1}
+        changed["signature"] = {
+            **payload["signature"],
+            "config": scientific_config(OmegaConf.create(changed["config"])),
+        }
     else:
         del changed["config"]["train"]["mdlm"]["regime_weights"]
     checkpoint = tmp_path / "bad.pt"
@@ -394,8 +400,10 @@ def test_invalid_or_unqualified_checkpoint_fails_closed(tmp_path, trained, chang
         tmp_path, checkpoint, [{"sequence_id": "sample", "length": 3}], "joint"
     )
     assert result.exit_code != 0 and not output.exists()
-    if change in {"conditional", "unknown"}:
+    if change == "conditional":
         assert "joint" in result.output and "qualified" in result.output
+    elif change == "unknown":
+        assert "configuration" in result.output
 
 
 def test_sampling_rejects_incomplete_saved_rank_state(tmp_path, trained):
@@ -700,3 +708,94 @@ def test_current_reader_rejects_incomplete_continuation_state(
         tmp_path, checkpoint, [{"sequence_id": "sample", "length": 3}], "joint"
     )
     assert result.exit_code != 0 and not output.exists()
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("config.train.mdlm.regime_weights.joint_independent", 0),
+        ("config.model.encoder.dropout", 0.9),
+        ("config.model.encoder.n_heads", 4),
+        ("runtime.effective_precision", "fp16"),
+        ("runtime.mdlm_identity.tokenizer_sha256", "changed"),
+        ("runtime.mdlm_identity.policy_sha256", "changed"),
+        ("runtime.mdlm_identity.sources.local.sha256", "changed"),
+        ("runtime.mdlm_identity.vocabulary.structure_pad", 99),
+        ("runtime.components.model", "other-model"),
+        ("runtime.components.optimizer", "other-optimizer"),
+        ("runtime.components.scheduler", "warmup_cosine"),
+        ("model.structure_codebook", None),
+        ("signature.codebook", "changed"),
+    ],
+)
+def test_current_reader_binds_scientific_and_artifact_identity(
+    tmp_path, trained, field, value
+):
+    from stok.utils.checkpoint import (
+        read_training_checkpoint,
+        validate_resume_signature,
+    )
+
+    _, original = trained
+    payload = copy.deepcopy(original)
+    target = payload
+    parts = field.split(".")
+    for part in parts[:-1]:
+        target = target[part]
+    target[parts[-1]] = target[parts[-1]] + 1 if value is None else value
+    checkpoint = tmp_path / "inconsistent.pt"
+    torch.save(payload, checkpoint)
+    with pytest.raises(
+        ValueError, match="configuration|manifest|identity|codebook|vocabulary"
+    ):
+        read_training_checkpoint(checkpoint)
+    with pytest.raises(
+        ValueError,
+        match="configuration|manifest|identity|codebook|vocabulary|signature",
+    ):
+        validate_resume_signature(payload, original["signature"])
+    result, output = invoke_sample(
+        tmp_path, checkpoint, [{"sequence_id": "sample", "length": 3}], "joint"
+    )
+    assert result.exit_code != 0 and not output.exists()
+
+
+def test_reader_and_sampling_allow_operational_overrides_and_inference_backend(
+    tmp_path, trained, monkeypatch
+):
+    from stok.utils.checkpoint import (
+        read_training_checkpoint,
+        validate_resume_signature,
+    )
+
+    _, original = trained
+    payload = copy.deepcopy(original)
+    cfg = payload["config"]
+    cfg["train"].update(
+        output_dir="/unused", resume_from="/absent", log_every=99, save_every=99
+    )
+    cfg["train"]["wandb"]["name"] = "changed"
+    cfg["train"]["eval"]["seed"] += 1
+    cfg["data"]["eval"] = {"other": {"path": "/absent/eval"}}
+    cfg["model"]["decoder"]["path"] = "/absent/decoder"
+    cfg["print_model_summary"] = not cfg["print_model_summary"]
+    checkpoint = tmp_path / "overrides.pt"
+    torch.save(payload, checkpoint)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("inference validation initialized CUDA")
+
+    monkeypatch.setattr(torch.cuda, "_lazy_init", forbidden)
+    original_flash = torch.backends.cuda.flash_sdp_enabled()
+    try:
+        torch.backends.cuda.enable_flash_sdp(not original_flash)
+        read = read_training_checkpoint(checkpoint)
+        validate_resume_signature(read, original["signature"])
+        result, output = invoke_sample(
+            tmp_path, checkpoint, [row_for(payload, "joint")], "joint"
+        )
+        assert result.exit_code == 0, result.output
+        assert json.loads(output.read_text())["length"] == 3
+    finally:
+        torch.backends.cuda.enable_flash_sdp(original_flash)
+    assert torch.backends.cuda.flash_sdp_enabled() == original_flash

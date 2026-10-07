@@ -15,7 +15,9 @@ import torch
 from accelerate.utils import gather_object
 from omegaconf import OmegaConf
 
+from stok.config import validate_training_config
 from stok.data.dataset import set_dataset_epoch
+from stok.data.mdlm import mdlm_training_signature, mdlm_vocabulary
 from stok.training.tasks import validate_logging_state
 from stok.utils.pretrained import file_sha256, state_sha256
 
@@ -88,7 +90,8 @@ def package_source_sha256(root: Path | None = None) -> str:
     return digest.hexdigest()
 
 
-def resume_signature(cfg, *, sources, codebook, accelerator, identity):
+def scientific_config(cfg):
+    """Project the training trajectory, permitting evaluation/output overrides."""
     config = OmegaConf.to_container(cfg, resolve=True)
     if not isinstance(config, dict):
         raise ValueError("Resume configuration must resolve to a mapping")
@@ -106,6 +109,11 @@ def resume_signature(cfg, *, sources, codebook, accelerator, identity):
     data.pop("eval", None)
     config["model"].pop("decoder", None)
     config.pop("print_model_summary", None)
+    return config
+
+
+def resume_signature(cfg, *, sources, codebook, accelerator, identity):
+    config = scientific_config(cfg)
     identities = []
     for source in sources:
         path = Path(source["path"])
@@ -164,6 +172,13 @@ def resume_signature(cfg, *, sources, codebook, accelerator, identity):
             else None,
             "deterministic": torch.are_deterministic_algorithms_enabled(),
             "tf32": torch.backends.cuda.matmul.allow_tf32,
+            "sdpa": {
+                "flash": torch.backends.cuda.flash_sdp_enabled(),
+                "math": torch.backends.cuda.math_sdp_enabled(),
+                "memory_efficient": torch.backends.cuda.mem_efficient_sdp_enabled(),
+                "cudnn": torch.backends.cuda.cudnn_sdp_enabled(),
+                "math_low_precision_reduction": torch.backends.cuda.fp16_bf16_reduction_math_sdp_allowed(),
+            },
         },
     }
 
@@ -218,26 +233,53 @@ def validate_resume_signature(payload: dict, expected: dict) -> None:
     if not isinstance(runtime, dict) or required_runtime - runtime.keys():
         raise ValueError("Incomplete runtime manifest")
     components = runtime["components"]
+    cfg = OmegaConf.create(payload["config"])
+    if scientific_config(cfg) != saved["config"]:
+        raise ValueError(
+            "Checkpoint scientific configuration disagrees with resume identity"
+        )
+    validate_training_config(cfg)
     required_components = {
-        "objective",
-        "model",
-        "sequence_tokenizer",
-        "structure_representation",
-        "optimizer",
-        "scheduler",
+        "objective": cfg.train.objective,
+        "model": "stok_mdlm",
+        "sequence_tokenizer": "native",
+        "structure_representation": "frozen_vq",
+        "optimizer": cfg.train.optimizer,
+        "scheduler": cfg.train.scheduler,
     }
     if (
         not isinstance(components, dict)
-        or required_components - components.keys()
+        or any(
+            components.get(key) != value for key, value in required_components.items()
+        )
         or any(not isinstance(value, str) or not value for value in components.values())
     ):
-        raise ValueError("Incomplete component manifest")
+        raise ValueError("Incomplete or inconsistent component/representation manifest")
+    identity = runtime["mdlm_identity"]
+    codebook = payload["model"].get("structure_codebook")
+    if not isinstance(codebook, torch.Tensor) or codebook.ndim != 2:
+        raise ValueError("Checkpoint structure codebook is missing or invalid")
+    digest = state_sha256({"codebook": codebook})
+    if digest != saved["codebook"] or digest != identity.get("codebook_sha256"):
+        raise ValueError("Checkpoint structure codebook disagrees with resume identity")
+    if identity.get("vocabulary") != mdlm_vocabulary(codebook):
+        raise ValueError("Checkpoint vocabulary identity is incompatible")
+    try:
+        training_signature = mdlm_training_signature(identity)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("Incomplete MDLM training identity") from exc
     if (
         any(
             runtime.get(key) != saved[key]
             for key in ("software", "execution", "source")
         )
-        or runtime["mdlm_identity"]["training_signature"] != saved["mdlm_identity"]
+        or training_signature != identity.get("training_signature")
+        or training_signature != saved["mdlm_identity"]
+        or runtime["effective_precision"] != saved["execution"]["precision"]
+        or (
+            cfg.train.mixed_precision is not None
+            and cfg.train.mixed_precision != runtime["effective_precision"]
+        )
     ):
         raise ValueError("Checkpoint runtime manifest disagrees with resume identity")
     ranks = payload["rank_states"]
@@ -249,6 +291,20 @@ def validate_resume_signature(payload: dict, expected: dict) -> None:
     ):
         raise ValueError("Missing or invalid per-rank resume state")
     execution = expected["execution"]
+    sdpa = execution.get("sdpa")
+    if (
+        not isinstance(sdpa, dict)
+        or set(sdpa)
+        != {
+            "flash",
+            "math",
+            "memory_efficient",
+            "cudnn",
+            "math_low_precision_reduction",
+        }
+        or any(type(value) is not bool for value in sdpa.values())
+    ):
+        raise ValueError("Incomplete SDPA execution policy in resume identity")
     sizes = execution.get("cuda_rng_state_sizes")
     if (
         not isinstance(sizes, list)

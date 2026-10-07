@@ -31,7 +31,7 @@ max_grad_norm: 1.0
 
 # IO paths
 output_dir: null
-resume_from: null  # complete version-2 continuation with the original budget
+resume_from: null  # complete version-3 continuation with the original budget
 
 # logging
 wandb:

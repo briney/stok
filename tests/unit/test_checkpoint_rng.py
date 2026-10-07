@@ -26,17 +26,25 @@ def test_resume_signature_rejects_nonmapping_configuration():
 
 def test_resume_rejects_changed_current_budget(cuda_resume):
     payload, _ = cuda_resume
-    payload["signature"]["config"] = {"train": {"max_steps": 10}}
     expected = copy.deepcopy(payload["signature"])
     ck.validate_resume_signature(payload, expected)
-    expected["config"]["train"]["max_steps"] = 11
+    expected["config"]["train"]["max_steps"] += 1
     with pytest.raises(ValueError, match="signature mismatch"):
         ck.validate_resume_signature(payload, expected)
 
 
 @pytest.fixture
-def cuda_resume():
+def cuda_resume(tmp_path):
+    from stok.data.mdlm import validate_mdlm_sources
+
+    source, artifact = training_fixture(tmp_path)
+    codebook = torch.load(artifact, weights_only=True)["codebook"]
+    cfg = mdlm_config(tmp_path / "run", source, artifact)
+    identity = validate_mdlm_sources(
+        {"local": {"path": str(source)}}, {}, codebook=codebook, split_manifest=None
+    )
     model = torch.nn.Linear(2, 1)
+    model.register_buffer("structure_codebook", codebook)
     optimizer = torch.optim.AdamW(model.parameters())
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _: 1)
     rng = ck.collect_rng_state()
@@ -62,16 +70,12 @@ def cuda_resume():
         loader_generator_state=torch.Generator().get_state(),
         logging=logging,
     )
-    signature = {
-        "source": {},
-        "software": {},
-        "mdlm_identity": "test",
-        "execution": {
-            "device": "cuda",
-            "world_size": 2,
-            "cuda_rng_state_sizes": [16, 16],
-        },
-    }
+    signature = ck.resume_signature(
+        cfg, sources=[], codebook=codebook, accelerator=None, identity=identity
+    )
+    signature["execution"].update(
+        device="cuda", world_size=2, cuda_rng_state_sizes=[16, 16]
+    )
     payload = dict(
         runtime={
             "components": {
@@ -84,9 +88,9 @@ def cuda_resume():
             },
             "effective_precision": "no",
             "execution": signature["execution"],
-            "source": {},
-            "software": {},
-            "mdlm_identity": {"training_signature": "test"},
+            "source": signature["source"],
+            "software": signature["software"],
+            "mdlm_identity": identity,
         },
         signature=signature,
         rank_states=[copy.deepcopy(rank), {**rank, "rank": 1}],
@@ -94,12 +98,7 @@ def cuda_resume():
         optimizer=optimizer.state_dict(),
         optimizer_initialized=[],
         scheduler=scheduler.state_dict(),
-        config={
-            "train": {
-                "objective": "mdlm",
-                "mdlm": {"regime_weights": {"joint_independent": 1}},
-            }
-        },
+        config=OmegaConf.to_container(cfg, resolve=True),
         global_step=0,
         micro_step=0,
         residues_seen=0,
@@ -284,3 +283,44 @@ def test_package_source_identity_is_location_independent_and_content_sensitive(
     (wheel / "configs/config.yaml").write_text("x: 1\n")
     (wheel / "model.py").rename(wheel / "other.py")
     assert digest != ck.package_source_sha256(wheel)
+
+
+@pytest.mark.parametrize(
+    "getter,setter",
+    [
+        ("flash_sdp_enabled", "enable_flash_sdp"),
+        ("math_sdp_enabled", "enable_math_sdp"),
+        ("mem_efficient_sdp_enabled", "enable_mem_efficient_sdp"),
+        ("cudnn_sdp_enabled", "enable_cudnn_sdp"),
+        ("fp16_bf16_reduction_math_sdp_allowed", "allow_fp16_bf16_reduction_math_sdp"),
+    ],
+)
+def test_attention_policy_changes_resume_identity_without_cuda(
+    tmp_path, monkeypatch, getter, setter
+):
+    source, codebook = training_fixture(tmp_path)
+    cfg = mdlm_config(tmp_path / "run", source, codebook)
+    monkeypatch.setattr(
+        torch.cuda, "_lazy_init", lambda: pytest.fail("CUDA initialized")
+    )
+    read, toggle = (
+        getattr(torch.backends.cuda, getter),
+        getattr(torch.backends.cuda, setter),
+    )
+    original = read()
+    kwargs = dict(
+        sources=[],
+        codebook=None,
+        accelerator=None,
+        identity={"training_signature": "unused"},
+    )
+    try:
+        before = ck.resume_signature(cfg, **kwargs)
+        toggle(not original)
+        after = ck.resume_signature(cfg, **kwargs)
+        assert before != after
+        with pytest.raises(ValueError, match="signature mismatch.*execution"):
+            ck.validate_resume_signature({"signature": before}, after)
+    finally:
+        toggle(original)
+    assert read() == original

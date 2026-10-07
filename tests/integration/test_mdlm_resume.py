@@ -670,9 +670,25 @@ def test_resume_cursor_keeps_task_logging_separate(tmp_path):
 
 def test_optimizer_coverage_preserves_unused_and_frozen_parameters(tmp_path):
     from stok.training.engine import _save_checkpoint
-    from stok.utils.checkpoint import read_training_checkpoint, restore_training_state
+    from stok.utils.checkpoint import (
+        read_training_checkpoint,
+        restore_training_state,
+        resume_signature,
+    )
+    from stok.data.mdlm import validate_mdlm_sources
+
+    source, artifact = training_fixture(tmp_path)
+    codebook = torch.load(artifact, weights_only=True)["codebook"]
+    cfg = mdlm_config(tmp_path / "run", source, artifact)
+    identity = validate_mdlm_sources(
+        {"local": {"path": str(source)}}, {}, codebook=codebook, split_manifest=None
+    )
+    signature = resume_signature(
+        cfg, sources=[], codebook=codebook, accelerator=None, identity=identity
+    )
 
     model = torch.nn.Module()
+    model.register_buffer("structure_codebook", codebook)
     model.unused = torch.nn.Parameter(torch.ones(1))
     model.frozen = torch.nn.Parameter(torch.ones(1), requires_grad=False)
     model.used = torch.nn.Linear(2, 1)
@@ -712,31 +728,13 @@ def test_optimizer_coverage_preserves_unused_and_frozen_parameters(tmp_path):
                 "scheduler": "warmup_linear",
             },
             "effective_precision": "no",
-            "source": {},
-            "software": {},
-            "execution": {"world_size": 1, "device": "cpu", "cuda_rng_state_sizes": []},
-            "mdlm_identity": {"training_signature": "test"},
+            **{key: signature[key] for key in ("source", "software", "execution")},
+            "mdlm_identity": identity,
         },
-        cfg=OmegaConf.create(
-            {
-                "train": {
-                    "objective": "mdlm",
-                    "mdlm": {"regime_weights": {"joint_independent": 1}},
-                }
-            }
-        ),
+        cfg=cfg,
         accelerator=None,
         training_state={
-            "signature": {
-                "source": {},
-                "software": {},
-                "execution": {
-                    "world_size": 1,
-                    "device": "cpu",
-                    "cuda_rng_state_sizes": [],
-                },
-                "mdlm_identity": "test",
-            },
+            "signature": signature,
             "wandb_run_id": None,
             "local": {
                 "epoch": 0,

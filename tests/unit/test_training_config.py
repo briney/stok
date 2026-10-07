@@ -513,3 +513,56 @@ def test_odd_rope_head_width_fails_before_side_effects(tmp_path, monkeypatch):
                 "model.encoder.n_layers=1",
             ]
         )
+
+
+@pytest.mark.parametrize(
+    "global_setting,source_setting,valid",
+    [
+        (None, False, False),
+        (False, True, True),
+        (False, None, True),
+        (False, "absent", False),
+        (True, False, False),
+        (None, "absent", True),
+    ],
+)
+def test_decoded_eval_coordinate_precedence_is_immutable_and_early(
+    tmp_path, monkeypatch, global_setting, source_setting, valid
+):
+    from stok.config import load_training_config, validate_training_config
+    from stok.training import engine
+
+    cfg = load_training_config([f"train.output_dir={tmp_path / 'run'}"])
+    OmegaConf.set_struct(cfg, False)
+    cfg.data.train = {"local": {"path": str(tmp_path / "train")}}
+    cfg.data.eval = {"heldout": {"path": str(tmp_path / "eval")}}
+    cfg.data.load_coords = global_setting
+    if source_setting != "absent":
+        cfg.data.eval.heldout.load_coords = source_setting
+    cfg.train.eval.mdlm.generation.enabled = True
+    cfg.train.eval.mdlm.generation.decode = True
+    before = OmegaConf.to_yaml(cfg, resolve=False)
+    OmegaConf.set_readonly(cfg, True)
+
+    class ReachedAccelerator(Exception):
+        pass
+
+    def allocation_sentinel(*args, **kwargs):
+        raise ReachedAccelerator
+
+    monkeypatch.setattr(engine, "_maybe_get_accelerator", allocation_sentinel)
+    monkeypatch.setattr(
+        engine, "load_codebook", lambda **kw: pytest.fail("artifact access")
+    )
+    if valid:
+        validate_training_config(cfg)
+        with pytest.raises(ReachedAccelerator):
+            engine.run_training(cfg)
+    else:
+        with pytest.raises(ValueError, match="load_coords=false.*decoded"):
+            validate_training_config(cfg)
+        with pytest.raises(ValueError, match="load_coords=false.*decoded"):
+            engine.run_training(cfg)
+    assert OmegaConf.to_yaml(cfg, resolve=False) == before
+    assert OmegaConf.is_readonly(cfg)
+    assert not (tmp_path / "run").exists()

@@ -45,6 +45,7 @@ def _check_fields(values, defaults, path="", *, required=False):
 def validate_training_config(cfg: DictConfig) -> None:
     """Reject unsupported choices before devices, artifacts, logging or outputs."""
     from stok.eval.mdlm import resolve_mdlm_eval_config
+    from stok.data.loaders import _parse_eval_configs
     from stok.utils.mdlm import validate_mdlm_config
     from stok.utils.tokenizer import Tokenizer
 
@@ -247,10 +248,13 @@ def validate_training_config(cfg: DictConfig) -> None:
     if (
         resolved_eval.generation.enabled
         and resolved_eval.generation.decode
-        and data.load_coords is False
+        and any(
+            source.get("load_coords", data.load_coords) is False
+            for source in _parse_eval_configs(cfg).values()
+        )
     ):
         raise ValueError(
-            "data.load_coords=false conflicts with decoded MDLM evaluation"
+            "Effective evaluation source load_coords=false conflicts with decoded MDLM evaluation"
         )
     validate_mdlm_config(cfg.train.mdlm)
 
