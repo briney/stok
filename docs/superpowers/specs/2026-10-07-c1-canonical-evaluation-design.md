@@ -1,6 +1,6 @@
 # C1: canonical data and frozen evaluation cases
 
-**Status:** Proposed written design; awaiting user review before implementation planning.
+**Status:** Written design approved October 7, 2026; implementation plan prepared and awaiting review.
 **Base:** `main` at `71f4524`, after merged C0 / PR #16.
 **Authority:** [Research design, section 5](../../design/REFACTOR.md#5-data-representations-and-identity) and [C1 deliverable](../plans/2026-10-06-baseline-extraction.md#companion-comparison-workstream).
 
@@ -18,10 +18,9 @@ weighted global MDLM normalization, successful-update accounting and coordinated
 rank failures. No old-key translation, old-export converter, checkpoint migration,
 registry, database, additional dependency, real training or GPU qualification.
 
-**Proposed identity policy:** require an explicit source namespace/accession;
+**Approved identity policy:** require an explicit source namespace/accession;
 use the verified source-file SHA-256 as the revision. Provider release labels may
-be annotations, but are not an additional identity mechanism in C1. This is the
-recommended default raised for clarification; it remains editable at this review.
+be annotations, but are not an additional identity mechanism in C1.
 Byte-only reformatting of a raw source therefore changes its revision and ID even
 if selected observations are numerically unchanged. This conservative rule avoids
 guessing provider revision semantics; provider-stable revisions need a deliberate
@@ -271,9 +270,9 @@ production-length/GPU/FP16 acceptance or scientific performance claim is include
 
 ## Review and handoff
 
-Review the source-revision policy and the canonical-inventory/case/measurement
-separation above. Once this written spec is approved, create the focused C1
-implementation plan. The existing serial subagent-driven execution and PR handoff
+The source-revision policy and canonical-inventory/case/measurement separation
+above were approved October 7. The [focused C1 implementation plan](../plans/2026-10-07-c1-canonical-evaluation.md)
+is prepared for review. The existing serial subagent-driven execution and PR handoff
 preferences carry forward; do not ask the user to choose them again absent a change.
 
 Design preparation checked the current exporter/parser/loader, identity/signature,
