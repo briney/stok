@@ -96,9 +96,12 @@ def canonical_fixture(row):
     coordinates = np.zeros((length, 4, 3), dtype=np.float32)
     if "coordinates" in row:
         coordinates[:, :3] = np.asarray(row["coordinates"], dtype=np.float32)
-    for position, token in enumerate(row["structure_tokens"]):
-        if token is None:
-            coordinates[position, 3] = np.nan
+    if "original_atom_mask" in row:
+        coordinates[~np.asarray(row["original_atom_mask"], dtype=bool)] = np.nan
+    else:
+        for position, token in enumerate(row["structure_tokens"]):
+            if token is None:
+                coordinates[position, 3] = np.nan
     residue_map = []
     for position, entry in enumerate(row["residue_map"]):
         residue_map.append(
@@ -123,6 +126,7 @@ def canonical_fixture(row):
         "model_index": 0,
         "model_serial_id": 1,
         "sequence_source": "supplied",
+        **row["source"],
     }
     structure = PolymerStructure(
         row["sequence_id"],
@@ -224,7 +228,7 @@ def write_dataset(path, rows, *, codebook=None, policy=None):
             "source_accession": record["identity"]["source_accession"],
             "source_revision_sha256": row["source"]["sha256"],
             "chain_id": "A",
-            "chain_namespace": "label",
+            "chain_namespace": record["identity"]["chain_namespace"],
             "model_index": 0,
             "parent_ids": [],
         }

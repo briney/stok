@@ -198,6 +198,64 @@ The installed command downloads the pinned tokenizer archive once into its local
 cache. Use `--checkpoint /weights/best_valid.pth` for offline encoding. Canonical
 validation precedes tokenizer/device setup.
 
+Freeze validation evaluation controls using all canonical inventories covered by
+the split manifest, including train/test and representation-rejected records:
+
+```bash
+stok freeze-eval-cases /data/evaluation.yaml /data/evaluation-cases \
+  --canonical-dir /data/train-canonical \
+  --canonical-dir /data/validation-canonical \
+  --canonical-dir /data/test-canonical \
+  --split-manifest /data/splits.jsonl
+```
+
+Split JSONL rows contain exactly `canonical_id`, `split` (`train`, `validation`,
+or `test`), and nonempty `cluster_id`. Every canonical record needs exactly one
+assignment. Cluster labels are supplied; source families, identical raw revisions
+and declared parent lineage cannot cross splits. Selected monitoring members must
+be validation records. Repeated references to one inventory are read once;
+overlapping records or raw-revision/model/chain selections in distinct inventories
+are rejected.
+
+```yaml
+schema_version: 1
+seed: 1729
+crop_residues: 128
+members: ["<validation canonical_id>"]
+replicates: 2
+denoising:
+  joint_token:
+    regime: joint_independent
+    placement: token
+    probability: 0.5
+generation:
+  folding:
+    regime: structure_only
+    placement: token
+```
+
+Omitting `denoising` freezes the 32 native regime/token-or-span/probability
+families (probabilities 0.15, 0.5, 0.85, 1.0; span mean 8.0). An empty map disables
+that kind; `generation` defaults to empty. At least one family is required. Family
+keys are unique across both kinds. Expansion preserves member order, then
+denoising/generation order, sorted family keys, and ascending replicate indices.
+The command reports exact denoising/generation case counts and unique biological
+sample counts; it does not apply the monitoring execution cap of 16 generation
+cases.
+
+The completed directory contains `manifest.json` and `cases.jsonl`. Cases retain
+explicit ordinals, canonical content/map digests, center crops, full-residue
+positions, original eligibility, group IDs and realized boolean masks. Case and
+shared-case identities exclude representation and filesystem paths; physical file
+hashes and per-inventory references separately verify integrity. Readers verify
+stored controls without redrawing them. `stok.eval.cases.project_case_controls`
+pairs one case with each batch row, keeps replicates distinct, applies the BOS
+offset, and intersects controls with available targets. Missing generation
+conditioning is reported explicitly. Protocol identity adds selected cases,
+resolved evaluator/sampler settings, representation, decoder and execution
+metadata; measurement identity also binds a checkpoint digest or training
+signature plus successful update count.
+
 The Python API uses the same two stages:
 
 ```python

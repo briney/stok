@@ -5,7 +5,7 @@ import click
 from stok.config import load_training_config
 from stok.cli.sample import sample_cmd
 from stok.cli.smoke_test import run_smoke_test
-from stok.cli.prepare import prepare_structures_cmd
+from stok.cli.prepare import freeze_eval_cases_cmd, prepare_structures_cmd
 from stok.cli.tokenize import tokenize_structures_cmd
 
 
@@ -129,6 +129,7 @@ def train_cmd(
 
 
 cli.add_command(prepare_structures_cmd)
+cli.add_command(freeze_eval_cases_cmd)
 cli.add_command(tokenize_structures_cmd)
 cli.add_command(sample_cmd)
 

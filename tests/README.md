@@ -16,6 +16,7 @@ HIP_VISIBLE_DEVICES='' ROCR_VISIBLE_DEVICES='' python -m pytest -q
 | Global weighted MDLM loss, partial/empty windows, AMP skips | `unit/test_mdlm_loss.py`, `integration/test_mdlm_training.py`, `integration/test_distributed_training.py` |
 | Crop/alignment/missingness and stream coverage | `unit/test_mdlm_data.py`, `unit/test_parquet_dataset.py`, `integration/test_distributed_training.py` |
 | Frozen cohorts, worker/rank tails, RNG/mode restoration, failures | `integration/test_mdlm_evaluation.py` |
+| Full canonical split/lineage audit, frozen cases/replicates and arm availability | `unit/test_eval_cases.py`, `unit/test_canonical_data.py`, `unit/test_mdlm_corruption.py` |
 | Exact continuation, stochastic dropout/workers, scaler/cursor/rank state | `integration/test_mdlm_resume.py` |
 | Current checkpoint-only sample and real matching decode | `integration/test_mdlm_cli.py` |
 | Reusable prototype comparison | `unit/test_model_builder.py` |
@@ -390,3 +391,13 @@ into admitted/representation-rejected rows, preserve original coordinates, audit
 corruption and publication failures, and verify canonical validation occurs before
 tokenizer setup. `make_mdlm_rows`/`write_dataset` produce complete local schema-2
 fixtures including original oxygen observations and explicit source identities.
+
+`unit/test_eval_cases.py` checks literal native token/span mask goldens (seed
+1729, `AXCDEF`, original oxygen absent at residue 2), record-order independence,
+replicate-safe row projection, missing representation codes/conditioning, and
+strict full-inventory split/parent/cluster/source checks. It also runs the actual
+preparation → freezing CLI without model setup or downloads, checks all 32 default
+denoising families, verifies stored reads do not draw RNG, and separates raw-file,
+shared-case, protocol and measurement identities. Synthetic `original_atom_mask`
+keeps canonical observations independent of a projection-only arm's missing
+codes; native export availability validation remains strict.
