@@ -13,7 +13,8 @@ The reference source is detached
 `/home/bryanbriney/git/stok/.worktrees/refactor-reference`. Tasks 1–5 implement the
 extraction through `068e5f38a15cddbd2474d3935bb9a9a9a1df7615`, followed by
 its justified sampling type-only fix
-`3599091db517522601d99ce92cc02cde2bfe4d5d`, on
+`3599091db517522601d99ce92cc02cde2bfe4d5d`, and final-review constructor fix
+`10e6db7508e642d3c8d5c1f9d005ac46c8688bf1`, on
 `refactor/baseline-extraction` at
 `/home/bryanbriney/git/stok/.worktrees/baseline-extraction`. The approved execution
 method used serial implementation with independent review. The complete CPU
@@ -22,8 +23,12 @@ source/tests. Only after they finished, `3599091` narrowed the MDLM sampling
 builder result with the existing `typing.cast`; its preceding objective check
 already requires MDLM. No model execution, initialization, schema, validation,
 training or data behavior changed. Final synthetic/sample-only decode and package
-checks use that fixed source; no extra real training was authorized or run.
-Documentation changed concurrently with read-only qualification.
+checks initially used that fixed source. Final review found that the extracted
+classification constructor had lost legacy objective normalization and optional
+FAPE startup defaults; `10e6db7` restores that seam, with a red/green regression
+and focused qualification recorded below. The full CPU suite remains the
+`068e5f3` run; it was not repeated after either fix. No extra real training was
+authorized or run. Documentation changed concurrently with read-only qualification.
 
 `stok train`, `python -m stok.train`, `stok sample`,
 `stok.config.load_training_config`, `stok.cli.train.run_training`, and the old
@@ -222,7 +227,7 @@ Continued final state/counters match fresh exactly; the continued denominator is
 34 (synthetic) and 512 (real). Original signature/source checks stayed enabled.
 The full-suite command included `-ra` to preserve skip reasons. It ran once,
 October 6 23:43:43 UTC through October 7 00:00:17 UTC; no full-suite rerun follows
-the sampling-only type cast. Log SHA-256:
+the sampling-only type cast or the later classification constructor fix. Log SHA-256:
 `f9f293df90b08b9ad21621cc3f9bfcff5b690378de89bfe869dd72d5be966434`.
 
 The nine inherited skips are two GCP published-weight stage-parity cases,
@@ -240,7 +245,8 @@ fork DeprecationWarning 4. No warnings were suppressed. The initial full-src ty
 check found one introduced builder-union typing diagnostic at sampling's
 codebook indexing; the isolated cast fix resolved it. Initial full-repo format
 found only plan fenced Python snippets, now formatted. Both initial failed logs
-remain separate from successful post-fix logs. No runtime regression was found.
+remain separate from successful post-fix logs. Those initial gates did not
+cover the startup-default regression subsequently found and fixed in final review.
 
 Initial installation setup hit the read-only default UV cache and never installed
 STok; the final offline install uses a writable `/tmp` cache and a fresh venv.
@@ -263,7 +269,7 @@ installing anything in the frozen environment:
   "$ARTIFACT_ROOT/validation-final-v1/dist-postcast-v1/stok-0.1.4-py3-none-any.whl"
 ```
 
-Actual built artifacts:
+Retained post-cast artifacts at `3599091` (final-review rebuild below):
 
 | Artifact | Bytes | SHA-256 |
 |---|---:|---|
@@ -295,6 +301,83 @@ env -u PYTHONPATH OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
   /tmp/stok-refactor-wheel-final-v2/bin/python \
   "$ARTIFACT_ROOT/validation-final-v1/docs-installed-wheel-smoke.py"
 ```
+
+## Final-review compatibility fix and qualification
+
+`10e6db7508e642d3c8d5c1f9d005ac46c8688bf1` restores the old classification
+startup behavior: `str(cfg.train.get("objective", "codebook")).lower()`,
+optional FAPE `enabled=False`, and the codebook-only diagnostic lookup with
+`log_pred_nan_frac=True`. This repairs uppercase `CODEBOOK` geometric eligibility,
+uppercase `MLM` metric selection, and omitted objective/FAPE startup settings.
+Authored configuration remains unchanged; the regression uses read-only OmegaConf
+and verifies its serialized content after eligibility preparation and logging.
+This is startup compatibility only: nonempty training still requires the legacy
+`fape.weight` field. No missing-weight fallback, signature/default/YAML change,
+model/MDLM/sampling change, or broader scientific behavior fix was introduced.
+
+One parameterized regression in the existing FAPE module had **7 failures and
+1 passing control** before the fix, then **8 passed, 2 inherited warnings** after
+it. Focused classification/progress, decoder FAPE, CLI MLM, end-to-end tagger,
+programmatic training and the existing single/two-rank exact FAPE continuation
+checks produced **33 passed, 2 unchanged GPU skips, 5 inherited warnings**, exit 0,
+78.80 s. Exact numerical/checkpoint assertions and tolerances were retained.
+Whole-repo Ruff lint/format, full-src ty with pinned Python and
+`--error-on-warning`, and compileall passed. Logs/scripts are under
+`ARTIFACT_ROOT/validation-review-final-v1`; `regression-{red,green}.log`,
+`focused-classification.log`, `docs-{ruff-lint,ruff-format,ty,compileall}.log`
+and `docs-static-build-results.json` retain the results.
+
+```bash
+/tmp/stok-config-env/bin/python -m pytest tests/integration/test_train_with_decoder_fape.py::test_classification_task_preserves_legacy_startup_defaults -q
+/tmp/stok-config-env/bin/python -m pytest tests/integration/test_training_progress.py tests/integration/test_train_with_decoder_fape.py tests/integration/test_cli_train_mlm.py tests/integration/test_e2e_tagger_training.py tests/integration/test_run_training_programmatic.py tests/integration/test_mdlm_resume.py::test_fape_resume_with_same_decoder_matches_uninterrupted -q -ra
+/tmp/stok-config-env/bin/python -m tests.utils.refactor_reference check \
+  --reference "$ARTIFACT_ROOT/synthetic-reference-v1" \
+  --output "$ARTIFACT_ROOT/synthetic-candidate-review-final"
+```
+
+After the source/tests-only commit, source/tests/index stayed fixed during final
+synthetic/package checks. `synthetic-candidate-review-final/result.json` reports
+`matched=true` at `10e6db7`, with exact old-source fresh/continued state and all
+three seeded sampling modes; SHA-256
+`17174b79ab67509c616aa6c0ad49bdaa1231c5feffc63de15dfbd85fb8d901a6`.
+The immutable synthetic reference was reused; no reference was recaptured.
+Real state/continuation evidence remains the `068e5f3` candidate, and final
+Large sample/decode evidence remains the `3599091` post-cast run. The constructor
+fix changes only classification startup: MDLM task methods, engine, model,
+sample and decoder code are unchanged. These retained real results are not a
+new real run at `10e6db7`; **six total approved real updates are consumed, zero
+remain**, and no real check/training or repeat Large decode was performed.
+The preservation inventory verified all **191** files in the old references,
+post-cast synthetic candidate, real candidate and initial validation directory
+against their saved SHA-256 values; prior artifacts remain intact.
+
+The unchanged `setuptools.build_meta` backend built actual sdist and wheel at
+`10e6db7`, exit 0 (`pep517-build.log`), with its inherited license deprecation.
+Fresh `/tmp/stok-refactor-wheel-review-final-v1` installed only the local wheel
+using offline uv `--no-deps` and writable
+`/tmp/stok-refactor-uv-cache-review-final-v1`; pinned dependencies were unchanged.
+`review-installed-wheel-smoke.py` adapts a copy of the retained smoke script,
+adding installed classification-default assertions. From `/tmp` with `PYTHONPATH`
+removed, all **55** loaded STok modules resolve inside the new venv; config
+groups/override precedence, CLI/module help, startup defaults and all three
+exact checkpoint-only historical samples passed. The audit guard denied reads
+and listings of original training/codebook artifacts. New smoke outputs,
+`wheel-{install,smoke}.log` and `docs-wheel-smoke-results.json` use fresh paths.
+
+| Final-review artifact under `validation-review-final-v1/dist-review-final-v1` | Bytes | SHA-256 |
+|---|---:|---|
+| `stok-0.1.4.tar.gz` | 6,191,001 | `5cb756bf4e391678042cf8d2b574b674b58a245492d56a01b3c84db6f130c4d3` |
+| `stok-0.1.4-py3-none-any.whl` | 6,183,021 | `090cfceafa43e417df43c3c40ce52d257095ab5c94b15d41ece002fbff43fb85` |
+
+`validation-review-final-v1/review-qualification-manifest.json` records source
+revision/module hashes, new synthetic/package/scripts/log hashes and the
+preserved-file count; SHA-256
+`d5e2beb024a57c3e0fd05ad67e293deb5427c2db8ba4199257d4834599d502a8`.
+Source tasks SHA-256 is
+`f628ecbfaa559a803f0a412c6539f727e0b3564a7eefb8ce1553d9b44a20db0b`;
+sample SHA-256 remains
+`60d736623b60c7277062477821f46a20676895c87856f29c3b4e246788f61f45`.
+No warning cleanup, C0–C6 work or new GPU/scientific qualification was added.
 
 ## Real-data interpretation and hardware limits
 
