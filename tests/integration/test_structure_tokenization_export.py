@@ -375,8 +375,7 @@ def test_export_forces_fp32_inside_outer_autocast(tmp_path, export_inputs):
 def test_generated_data_collation_decoder_and_training(tmp_path, export_inputs):
     from click.testing import CliRunner
     from stok.cli.cli import cli
-    from stok.cli.train import _tokenize_and_align
-    from stok.data.collate import mlm_collate
+    from stok.data.mdlm import prepare_mdlm_batch
     from stok.data.structure_export import write_structure_dataset
     from stok.models.decoder import GeometricDecoder
     from stok.utils.decoding import decode_structure_tokens
@@ -389,30 +388,42 @@ def test_generated_data_collation_decoder_and_training(tmp_path, export_inputs):
     )
     items = list(
         IterableTokenizedDataset(
-            str(output), max_length=44, shuffle_shards=False, shuffle_rows=False
+            str(output), max_length=None, shuffle_shards=False, shuffle_rows=False
         )
     )
     map_items = [
-        TokenizedDataset(str(output / shard["path"]), max_length=44)[i]
+        TokenizedDataset(str(output / shard["path"]), max_length=None)[i]
         for shard in summary["shards"]
         for i in range(shard["row_count"])
     ]
     tokenizer = Tokenizer()
-    input_ids, labels, coordinates = _tokenize_and_align(
-        items, tokenizer, max_len=44, ignore_index=-100, pad_id=tokenizer.pad_token_id
+    for item in items + map_items:
+        item["dataset"] = "export-fixture"
+    batch = prepare_mdlm_batch(
+        items,
+        tokenizer,
+        max_len=44,
+        codebook_size=len(model.quantizer.codebook),
+        crop="center",
+        seeds=[0] * len(items),
     )
-    _, other_labels, other_coordinates = _tokenize_and_align(
+    other = prepare_mdlm_batch(
         map_items,
         tokenizer,
         max_len=44,
-        ignore_index=-100,
-        pad_id=tokenizer.pad_token_id,
+        codebook_size=len(model.quantizer.codebook),
+        crop="center",
+        seeds=[0] * len(map_items),
     )
-    torch.testing.assert_close(coordinates, other_coordinates, equal_nan=True)
-    assert torch.equal(labels, other_labels)
-    assert labels[1, 5].item() == labels[1, 12].item() == -100
-    assert labels[2, 1].item() == -100
-    assert labels[:, 0].eq(-100).all() and labels[:, 41:].eq(-100).all()
+    coordinates = batch["coords"]
+    torch.testing.assert_close(coordinates, other["coords"], equal_nan=True)
+    assert torch.equal(batch["structure_tokens"], other["structure_tokens"])
+    assert not batch["structure_valid"][1, 5] and not batch["structure_valid"][1, 12]
+    assert not batch["structure_valid"][2, 1]
+    assert (
+        not batch["structure_valid"][:, 0].any()
+        and not batch["structure_valid"][:, 41:].any()
+    )
     assert (
         torch.isfinite(coordinates[1, 5]).all()
         and torch.isnan(coordinates[1, 12]).all()
@@ -420,14 +431,9 @@ def test_generated_data_collation_decoder_and_training(tmp_path, export_inputs):
     assert (
         torch.isnan(coordinates[:, 0]).all() and torch.isnan(coordinates[:, 41:]).all()
     )
-    mlm_ids, mlm_labels, mlm_coordinates = mlm_collate(
-        items, tokenizer, max_len=44, mask_prob=1, eval_seed=7
-    )
-    torch.testing.assert_close(mlm_coordinates, coordinates, equal_nan=True)
-    assert (
-        mlm_labels[1, 12] == input_ids[1, 12]
-    )  # Missing structure still has a sequence target.
-    assert mlm_ids.shape == labels.shape
+    assert batch["sequence_valid"][
+        1, 12
+    ]  # Missing structure keeps its sequence target.
     decoder = GeometricDecoder(
         d_model=32, n_heads=4, n_layers=1, ffn_mult=1, max_length=1280, d_code=16
     ).eval()
@@ -447,17 +453,18 @@ def test_generated_data_collation_decoder_and_training(tmp_path, export_inputs):
             residue_mask=torch.ones_like(indices, dtype=torch.bool),
         )
     torch.testing.assert_close(before, after, rtol=0, atol=0, equal_nan=True)
+    codebook_path = tmp_path / "export-codebook.pt"
+    torch.save({"codebook": model.quantizer.codebook}, codebook_path)
     result = CliRunner().invoke(
         cli,
         [
             "train",
             f"data.train={output}",
-            f"data.eval={output}",
             "model.encoder.d_model=32",
             "model.encoder.n_layers=1",
             "model.encoder.n_heads=4",
             "model.encoder.ffn_mult=1",
-            "model.codebook.preset=lite",
+            f"model.codebook.path={codebook_path}",
             "train.batch_size=2",
             "data.max_len=44",
             "data.num_workers=0",

@@ -4,15 +4,15 @@ from collections import Counter
 from collections.abc import Mapping
 from contextlib import ExitStack
 import math
-from typing import cast
+from typing import Any, cast
 
 from accelerate.utils import gather_object
-from omegaconf import DictConfig, OmegaConf, open_dict
+from omegaconf import DictConfig, OmegaConf
 import torch
 from torch.utils.data import DataLoader
 
 from stok.data.mdlm import CANONICAL_AA, MDLMBatch, _sample_key, prepare_mdlm_batch
-from stok.eval.evaluator import _get_model_device, _unwrap_model
+from stok.training.engine import _get_model_device, _unwrap_model
 from stok.eval.metrics.structure import LDDTMetric, RMSDMetric, TMScoreMetric
 from stok.utils.decoding import decode_token_aligned_coords
 from stok.utils.mdlm import (
@@ -28,8 +28,10 @@ from stok.utils.sampling import inference_context, sample_mdlm
 from stok.utils.tokenizer import Tokenizer
 
 
-def resolve_mdlm_eval_config(cfg: DictConfig) -> DictConfig:
-    """Resolve only MDLM defaults; write benchmark/policy metadata to run artifacts.
+def resolve_mdlm_eval_config(
+    cfg: DictConfig, *, identity: Mapping[str, Any] | None = None
+) -> DictConfig:
+    """Resolve scientific evaluation settings without changing authored choices.
 
     ``generation.steps`` is the successful-update cadence; ``sampling_steps``
     controls reverse transitions. Explicit case maps replace the default matrix.
@@ -37,12 +39,14 @@ def resolve_mdlm_eval_config(cfg: DictConfig) -> DictConfig:
     """
     defaults = {
         "enabled": False,
+        "cohort": None,
+        "generation_cohort": None,
         "cases": {
             f"{regime}_{placement}_p{p:g}": {
                 "regime": regime,
                 "placement": placement,
                 "probability": p,
-                "span_mean": 8,
+                **({"span_mean": 8.0} if placement == "span" else {}),
             }
             for regime in REGIMES
             for placement in ("token", "span")
@@ -54,28 +58,27 @@ def resolve_mdlm_eval_config(cfg: DictConfig) -> DictConfig:
             "sampling_steps": 64,
             "max_samples": 16,
             "decode": False,
-            "schedule": {"name": "linear", "power": 2},
+            "schedule": {"name": "linear"},
             "cases": {
                 "folding": {
                     "regime": "structure_only",
                     "placement": "token",
-                    "span_mean": 8,
                 },
                 "inverse_folding_like": {
                     "regime": "sequence_only",
                     "placement": "token",
-                    "span_mean": 8,
                 },
                 "joint": {
                     "regime": "joint_independent",
                     "placement": "token",
-                    "span_mean": 8,
                 },
             },
         },
         "conditioning_policy": "inverse_folding_like_native_sequence_tokenizer",
         "label_context": "native_full_chain",
     }
+    if not isinstance(cfg.train.get("eval"), DictConfig):
+        raise ValueError("train.eval must be a mapping")
     raw_config = cfg.train.eval.get("mdlm")
     provided = (
         OmegaConf.to_container(raw_config, resolve=True)
@@ -84,6 +87,25 @@ def resolve_mdlm_eval_config(cfg: DictConfig) -> DictConfig:
     )
     if not isinstance(provided, dict):
         raise ValueError("MDLM evaluation config must be a mapping")
+    from stok.config import _check_fields
+
+    contract = OmegaConf.create(defaults)
+    contract.cases = None
+    contract.generation.cases = None
+    contract.generation.steps = None
+    generation_config = provided.get("generation", {})
+    if not isinstance(generation_config, dict):
+        raise ValueError("train.eval.mdlm.generation must be a mapping")
+    schedule_config = generation_config.get("schedule", {})
+    if not isinstance(schedule_config, dict):
+        raise ValueError("train.eval.mdlm.generation.schedule must be a mapping")
+    if schedule_config.get("name") == "power":
+        contract.generation.schedule.power = 2.0
+    _check_fields(OmegaConf.create(provided), contract, "train.eval.mdlm")
+    for key in ("cohort", "generation_cohort"):
+        value = provided.get(key)
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise ValueError(f"train.eval.mdlm.{key} must be a nonempty path or null")
     resolved = cast(DictConfig, OmegaConf.merge(defaults, provided))
     # Case maps are whole benchmark definitions, rather than incremental overrides.
     for section in (resolved, resolved.generation):
@@ -94,14 +116,32 @@ def resolve_mdlm_eval_config(cfg: DictConfig) -> DictConfig:
         if not isinstance(section.cases, DictConfig):
             raise ValueError("MDLM evaluation cases must be a named mapping")
         for name, case in section.cases.items():
-            if not name or "/" in name or case.get("regime") not in REGIMES:
+            case_path = (
+                f"train.eval.mdlm.{'generation.' if not denoising else ''}cases.{name}"
+            )
+            contract = {"regime": "", "placement": ""}
+            if (
+                isinstance(case, DictConfig)
+                and case.get("placement", "token") == "span"
+            ):
+                contract["span_mean"] = 8.0
+            if denoising:
+                contract["probability"] = 0.5
+            _check_fields(case, contract, case_path)
+            if (
+                not isinstance(name, str)
+                or not name
+                or "/" in name
+                or case.get("regime") not in REGIMES
+            ):
                 raise ValueError("MDLM evaluation case name/regime is invalid")
             case.setdefault("placement", "token")
-            case.setdefault("span_mean", 8)
+            if case.placement == "span":
+                case.setdefault("span_mean", 8.0)
             if (
                 case.placement not in {"token", "span"}
-                or not math.isfinite(float(case.span_mean))
-                or float(case.span_mean) < 1
+                or not math.isfinite(float(case.get("span_mean", 8)))
+                or float(case.get("span_mean", 8)) < 1
             ):
                 raise ValueError("MDLM evaluation placement/span_mean is invalid")
             if denoising and (
@@ -122,19 +162,17 @@ def resolve_mdlm_eval_config(cfg: DictConfig) -> DictConfig:
             raise ValueError(f"MDLM generation {name} must be a positive integer")
     if generation.max_samples > 16:
         raise ValueError("MDLM frozen generation cohort has a maximum of 16 samples")
+    if generation.schedule.name == "power":
+        generation.schedule.setdefault("power", 2.0)
     mask_schedule(
         torch.tensor([0.0, 0.5, 1.0], dtype=torch.float64),
         name=generation.schedule.name,
-        power=float(generation.schedule.power),
+        power=float(generation.schedule.get("power", 2)),
     )
     seed = cfg.train.eval.get("seed", 1729)
     if type(seed) is not int or seed < 0:
         raise ValueError("MDLM evaluation seed must be a nonnegative integer")
-    with open_dict(cfg.train.eval):
-        cfg.train.eval.seed = seed
-        cfg.train.eval.mdlm = resolved
-    if resolved.enabled or generation.enabled:
-        identity = cfg.train.get("mdlm_identity", {})
+    if identity is not None and (resolved.enabled or generation.enabled):
         for name, enabled in (
             ("eval_cohort", resolved.enabled),
             ("generation_cohort", generation.enabled),
@@ -144,13 +182,14 @@ def resolve_mdlm_eval_config(cfg: DictConfig) -> DictConfig:
             cohort = identity.get(name)
             if not cohort or not cohort.get("sha256") or not cohort.get("sample_keys"):
                 raise ValueError(f"MDLM evaluation requires a nonempty frozen {name}")
-            keys = cohort.sample_keys
+            keys = cohort["sample_keys"]
             if len(set(keys)) != len(keys):
                 raise ValueError(f"MDLM {name} has duplicate cohort membership")
             if name == "generation_cohort" and len(keys) > generation.max_samples:
                 raise ValueError(
                     "MDLM frozen generation cohort exceeds its maximum (at most 16)"
                 )
+    OmegaConf.set_readonly(resolved, True)
     return resolved
 
 
@@ -203,6 +242,7 @@ def evaluate_mdlm(
     cfg: DictConfig,
     *,
     accelerator,
+    identity: Mapping[str, Any],
     decoder=None,
     run_denoising: bool = True,
     run_generation: bool = True,
@@ -214,7 +254,7 @@ def evaluate_mdlm(
     """
     error = None
     try:
-        settings = resolve_mdlm_eval_config(cfg)
+        settings = resolve_mdlm_eval_config(cfg, identity=identity)
         run_denoising = run_denoising and settings.enabled
         run_generation = run_generation and settings.generation.enabled
         eval_model = _unwrap_model(model, accelerator)
@@ -230,17 +270,16 @@ def evaluate_mdlm(
             validate_mdlm_decoder(
                 decoder,
                 eval_model.structure_codebook,
-                cfg.train.mdlm_identity.codebook_sha256,
+                identity["codebook_sha256"],
             )
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
     _raise_errors(error, accelerator, "configuration")
     if not run_denoising and not run_generation:
         return {}
-    identity = cfg.train.mdlm_identity
-    eval_keys = set(identity.eval_cohort.sample_keys) if run_denoising else set()
+    eval_keys = set(identity["eval_cohort"]["sample_keys"]) if run_denoising else set()
     generation_keys = (
-        set(identity.generation_cohort.sample_keys) if run_generation else set()
+        set(identity["generation_cohort"]["sample_keys"]) if run_generation else set()
     )
     requested = eval_keys | generation_keys
     seen = Counter()
@@ -309,7 +348,7 @@ def evaluate_mdlm(
                                 {
                                     "regime_weights": {case.regime: 1},
                                     "placement": case.placement,
-                                    "span_mean": case.span_mean,
+                                    "span_mean": case.get("span_mean", 8),
                                     "noise": {
                                         "name": "linear",
                                         "power": 2,
@@ -322,7 +361,12 @@ def evaluate_mdlm(
                                 corruption_cfg,
                                 seeds=[
                                     stable_seed(
-                                        [cfg.train.eval.seed, key, name, "denoising"]
+                                        [
+                                            cfg.train.eval.get("seed", 1729),
+                                            key,
+                                            name,
+                                            "denoising",
+                                        ]
                                     )
                                     for key in batch["sample_keys"]
                                 ],
@@ -382,14 +426,19 @@ def evaluate_mdlm(
                             elif case.regime == "sequence_only":
                                 generate[..., 1] = False
                             seed = stable_seed(
-                                [cfg.train.eval.seed, key, name, "generation"]
+                                [
+                                    cfg.train.eval.get("seed", 1729),
+                                    key,
+                                    name,
+                                    "generation",
+                                ]
                             )
                             groups = build_mask_groups(
                                 generate[0],
                                 batch["residue_mask"][0],
                                 placement=case.placement,
                                 tied=case.regime == "joint_tied",
-                                span_mean=float(case.span_mean),
+                                span_mean=float(case.get("span_mean", 8)),
                                 generator=torch.Generator().manual_seed(seed),
                             )[None]
                             sampled = sample_mdlm(

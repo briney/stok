@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "stok"
 version = "0.1.4"
-description = "Encoder-only protein tagger (SDPA + RoPE + SwiGLU)"
+description = "Paired sequence–structure masked diffusion with frozen protein structure tokens"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
@@ -25,7 +25,6 @@ dependencies = [
   "pandas",
   "pyarrow>=12",
   "biopython",
-  "scikit-learn",
   "transformers",
   "x-transformers==2.8.0",
   "vector-quantize-pytorch==1.25.2",

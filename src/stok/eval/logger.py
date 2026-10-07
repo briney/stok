@@ -20,7 +20,6 @@ class MetricLogger:
         wandb,
         log_file: IO[str] | None,
         is_main: bool,
-        objective: str = "codebook",
     ):
         """Initialize the metric logger.
 
@@ -29,63 +28,11 @@ class MetricLogger:
             wandb: W&B run object (or None if disabled).
             log_file: File handle for log file (or None).
             is_main: Whether this is the main process (for distributed training).
-            objective: Training objective ("codebook" or "mlm").
         """
         self.console = console
         self.wandb = wandb
         self.log_file = log_file
         self.is_main = is_main
-        self.objective = objective
-
-    def _format_train_message(
-        self,
-        metrics: dict[str, float],
-        step: int,
-        max_steps: int,
-        epoch: float | None,
-    ) -> str:
-        """Format a training log message.
-
-        Args:
-            metrics: Dictionary of metric values.
-            step: Current training step.
-            max_steps: Total number of training steps.
-            epoch: Current epoch (or None).
-
-        Returns:
-            Formatted log message string.
-        """
-        msg = f"step {step}/{max_steps}"
-        if epoch is not None:
-            msg += f" | epoch {epoch:.3f}"
-
-        # Loss
-        if "loss" in metrics:
-            msg += f" | loss {metrics['loss']:.4f}"
-
-        # Objective-specific metrics
-        if self.objective == "mlm":
-            if "mask_acc" in metrics:
-                msg += f" | acc {metrics['mask_acc']:.4f}"
-            if "ppl" in metrics:
-                msg += f" | ppl {metrics['ppl']:.2f}"
-        else:
-            if "acc" in metrics:
-                msg += f" | acc {metrics['acc']:.4f}"
-            if "cls_loss" in metrics:
-                msg += f" | cls {metrics['cls_loss']:.4f}"
-            if "ppl" in metrics:
-                msg += f" | ppl {metrics['ppl']:.2f}"
-            if "fape_loss" in metrics:
-                msg += f" | FAPE {metrics['fape_loss']:.4f}"
-            if "pred_nan_frac" in metrics:
-                msg += f" | pnan {metrics['pred_nan_frac']:.3f}"
-
-        # Learning rate
-        if "lr" in metrics:
-            msg += f" | lr {metrics['lr']:.2e}"
-
-        return msg
 
     def _format_eval_message(
         self,
@@ -161,42 +108,6 @@ class MetricLogger:
                 msg += f" | {key} {value:.4f}"
 
         return msg
-
-    def log_train(
-        self,
-        metrics: dict[str, float],
-        step: int,
-        max_steps: int,
-        epoch: float | None = None,
-    ) -> None:
-        """Log training metrics.
-
-        Args:
-            metrics: Dictionary of metric values.
-            step: Current training step.
-            max_steps: Total number of training steps.
-            epoch: Current epoch (or None).
-        """
-        if not self.is_main:
-            return
-
-        # Console output
-        msg = self._format_train_message(metrics, step, max_steps, epoch)
-        if self.console is not None:
-            self.console.train(msg)
-
-        # File output
-        if self.log_file is not None:
-            print(msg, file=self.log_file, flush=True)
-
-        # W&B output
-        if self.wandb is not None:
-            payload: dict[str, float] = {}
-            for key, value in metrics.items():
-                payload[f"train/{key}"] = float(value)
-            if epoch is not None:
-                payload["train/epoch"] = float(epoch)
-            self.wandb.log(payload, step=step)
 
     def log_eval(
         self,

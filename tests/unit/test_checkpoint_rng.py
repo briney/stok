@@ -16,58 +16,19 @@ def test_resume_signature_rejects_nonmapping_configuration():
         ValueError, match="Resume configuration must resolve to a mapping"
     ):
         ck.resume_signature(
-            OmegaConf.create([]), sources=[], codebook=None, accelerator=None
+            OmegaConf.create([]),
+            sources=[],
+            codebook=None,
+            accelerator=None,
+            identity={},
         )
 
 
-def test_resume_accepts_renamed_config_but_rejects_changed_budget(cuda_resume):
+def test_resume_rejects_changed_current_budget(cuda_resume):
     payload, _ = cuda_resume
-    payload["signature"]["config"] = {
-        "data": {"batch_size": 2},
-        "train": {
-            "num_steps": 10,
-            "epochs": None,
-            "grad_accum_steps": 4,
-            "precision": "bf16",
-            "grad_clip_norm": 1.0,
-            "optimizer": {
-                "name": "adamw",
-                "lr": 0.001,
-                "betas": [0.9, 0.95],
-                "weight_decay": 0.01,
-            },
-            "scheduler": {
-                "decay": "linear",
-                "warmup_steps": 2,
-                "stable_steps": 0,
-                "decay_steps": None,
-            },
-        },
-    }
+    payload["signature"]["config"] = {"train": {"max_steps": 10}}
     expected = copy.deepcopy(payload["signature"])
-    expected["config"] = {
-        "data": {},
-        "train": {
-            "batch_size": 2,
-            "max_steps": 10,
-            "max_epochs": None,
-            "gradient_accumulation_steps": 4,
-            "mixed_precision": "bf16",
-            "max_grad_norm": 1.0,
-            "optimizer": "adamw",
-            "lr": 0.001,
-            "adam_beta1": 0.9,
-            "adam_beta2": 0.95,
-            "adam_eps": 1e-8,
-            "weight_decay": 0.01,
-            "scheduler": "warmup_linear",
-            "warmup_steps": 2,
-            "stable_steps": 0,
-            "decay_steps": None,
-        },
-    }
     ck.validate_resume_signature(payload, expected)
-    assert "num_steps" in payload["signature"]["config"]["train"]
     expected["config"]["train"]["max_steps"] = 11
     with pytest.raises(ValueError, match="signature mismatch"):
         ck.validate_resume_signature(payload, expected)
@@ -123,7 +84,12 @@ def cuda_resume():
         optimizer=optimizer.state_dict(),
         optimizer_initialized=[],
         scheduler=scheduler.state_dict(),
-        config={"train": {"objective": "codebook"}},
+        config={
+            "train": {
+                "objective": "mdlm",
+                "mdlm": {"regime_weights": {"joint_independent": 1}},
+            }
+        },
         global_step=0,
         micro_step=0,
         residues_seen=0,
@@ -264,7 +230,11 @@ def test_cpu_record_does_not_initialize_unused_cuda(
         else None
     )
     signature = ck.resume_signature(
-        cfg, sources=[], codebook=None, accelerator=accelerator
+        cfg,
+        sources=[],
+        codebook=None,
+        accelerator=accelerator,
+        identity={"training_signature": {}},
     )
     assert "cuda" not in rng
     assert signature["execution"]["cuda_rng_state_sizes"] == []

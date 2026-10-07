@@ -1,6 +1,6 @@
 # @package _global_
 defaults:
-  - model: arch
+  - model: mdlm_150m
   - data: base
   - train: base
   - _self_

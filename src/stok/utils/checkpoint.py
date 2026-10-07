@@ -15,7 +15,6 @@ import torch
 from accelerate.utils import gather_object
 from omegaconf import OmegaConf
 
-from stok.config import normalize_training_config
 from stok.data.dataset import set_dataset_epoch
 from stok.utils.pretrained import file_sha256, state_sha256
 
@@ -67,11 +66,10 @@ def rank_errors(error, accelerator, context):
         raise RuntimeError(f"{context}: {errors}")
 
 
-def resume_signature(cfg, *, sources, codebook, accelerator, training_decoder=None):
+def resume_signature(cfg, *, sources, codebook, accelerator, identity):
     config = OmegaConf.to_container(cfg, resolve=True)
     if not isinstance(config, dict):
         raise ValueError("Resume configuration must resolve to a mapping")
-    config = normalize_training_config(config, checkpoint=True)
     train, data = config["train"], config["data"]
     for key in (
         "output_dir",
@@ -87,17 +85,7 @@ def resume_signature(cfg, *, sources, codebook, accelerator, training_decoder=No
     ):
         train.pop(key, None)
     data.pop("eval", None)
-    # Decoder settings affect training only when geometry supervision is active.
-    uses_decoder = bool(train.get("fape", {}).get("enabled"))
-    decoder_identity = None
-    if uses_decoder:
-        if training_decoder is None:
-            raise ValueError(
-                "FAPE resume identity requires the loaded training decoder"
-            )
-        decoder_identity = state_sha256(training_decoder.state_dict())
-    else:
-        config["model"].pop("decoder", None)
+    config["model"].pop("decoder", None)
     config.pop("print_model_summary", None)
     identities = []
     for source in sources:
@@ -117,10 +105,7 @@ def resume_signature(cfg, *, sources, codebook, accelerator, training_decoder=No
         "config": config,
         "sources": identities,
         "source_order": sources,
-        "training_decoder": decoder_identity,
-        "mdlm_identity": OmegaConf.select(
-            cfg, "train.mdlm_identity.training_signature"
-        ),
+        "mdlm_identity": identity["training_signature"],
         "codebook": state_sha256({"codebook": codebook})
         if codebook is not None
         else None,
@@ -168,6 +153,7 @@ def read_training_checkpoint(path: Path) -> dict:
         "signature",
         "rank_states",
         "config",
+        "runtime",
         "global_step",
         "micro_step",
         "residues_seen",
@@ -183,8 +169,6 @@ def read_training_checkpoint(path: Path) -> dict:
 
 def validate_resume_signature(payload: dict, expected: dict) -> None:
     saved = dict(payload["signature"])
-    if "config" in saved:
-        saved["config"] = normalize_training_config(saved["config"], checkpoint=True)
     if saved != expected:
         changed = [key for key in expected if saved.get(key) != expected[key]]
         raise ValueError(

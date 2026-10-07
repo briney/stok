@@ -1,41 +1,6 @@
 import torch
-import torch.nn.functional as F
 
 from .geometry import frames_from_ncac, sanitize_coordinates, fp32_autocast_context
-
-
-def token_ce_loss(
-    logits: torch.Tensor,
-    labels: torch.Tensor,
-    ignore_index: int = -100,
-    *,
-    reduction: str = "mean",
-) -> torch.Tensor:
-    """Compute cross-entropy loss over structure tokens.
-
-    Args:
-        logits: Logits tensor of shape [B, L, C].
-        labels: Target labels of shape [B, L].
-        ignore_index: Index to ignore in loss computation. Defaults to -100.
-
-    Returns:
-        Scalar loss tensor.
-    """
-    if reduction not in {"mean", "sum"}:
-        raise ValueError("reduction must be mean or sum")
-    C = int(logits.size(-1))
-    labels_flat = labels.reshape(-1)
-    supervised = labels_flat != ignore_index
-    if (supervised & ((labels_flat < 0) | (labels_flat >= C))).any():
-        raise ValueError(f"Target class IDs must be in [0, {C}) or ignore_index")
-    if not supervised.any():
-        return (logits * 0.0).sum()
-    return F.cross_entropy(
-        logits.reshape(-1, C),
-        labels_flat,
-        ignore_index=ignore_index,
-        reduction=reduction,
-    )
 
 
 def fape_loss(

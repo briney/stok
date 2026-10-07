@@ -10,10 +10,8 @@ train:
   save_every: 500
   batch_size: 2
   gradient_accumulation_steps: 1
-  mlm: null
   mdlm:
     placement: token
-    span_mean: 8.0
     regime_weights:
       joint_independent: 1.0
       structure_only: 0.0
@@ -21,7 +19,6 @@ train:
       joint_tied: 0.0
     noise:
       name: linear
-      power: 2.0
       min_mask_probability: 0.0001
     sequence_loss_weight: 1.0
     structure_loss_weight: 1.0
@@ -39,7 +36,7 @@ train:
         sampling_steps: 64
         max_samples: 16
         decode: false
-        schedule: {name: linear, power: 2.0}
+        schedule: {name: linear}
 
 data:
   max_len: 514

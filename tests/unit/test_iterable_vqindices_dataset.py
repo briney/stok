@@ -55,7 +55,7 @@ def test_iterable_epoch_shuffle_changes_order(tmp_path):
 
 
 def test_mixed_optional_columns_and_required_schema(tmp_path):
-    from stok.cli.train import _tokenize_and_align
+    from stok.data.mdlm import prepare_mdlm_batch
     from stok.utils.tokenizer import Tokenizer
     import torch
 
@@ -73,15 +73,17 @@ def test_mixed_optional_columns_and_required_schema(tmp_path):
     df.to_parquet(tmp_path / "b.parquet", index=False)
     ds = IterableTokenizedDataset(
         str(tmp_path),
-        max_length=8,
+        max_length=None,
         shuffle_shards=False,
         shuffle_rows=False,
         load_coords=True,
     )
     batch = list(ds)
-    _, _, coords = _tokenize_and_align(
-        batch, Tokenizer(), max_len=8, ignore_index=-100, pad_id=1
-    )
+    for row in batch:
+        row["dataset"] = "mixed-columns"
+    coords = prepare_mdlm_batch(
+        batch, Tokenizer(), max_len=8, codebook_size=32, crop="center", seeds=[0, 0]
+    )["coords"]
     assert coords.shape == (2, 8, 3, 3)
     assert torch.isnan(coords[0]).all()
     assert torch.isfinite(coords[1, 1:3]).all()

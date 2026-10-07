@@ -13,7 +13,8 @@ decay_steps: null    # if null, derived from max_steps minus warmup and stable s
 seed: 1337
 
 # All step budgets/cadences count successful optimizer updates.
-# max_epochs, when set, governs passes; final partial accumulation windows are flushed.
+# Choose exactly one budget; epoch runs set max_steps=null.
+# Final partial accumulation windows are flushed.
 # step/epoch governance
 max_steps: 10000
 max_epochs: null
@@ -40,106 +41,39 @@ wandb:
   group: null
   name: null
   tags: []
+  mode: null
 
 # console output
 console:
   enabled: true
 
-# training objective
-objective: "codebook"  # "codebook" (structure token prediction) or "mlm" (masked language modeling)
+# Supported paired absorbing masked diffusion recipe.
+objective: mdlm
+mdlm:
+  placement: token
+  regime_weights:
+    joint_independent: 1.0
+    structure_only: 0.0
+    sequence_only: 0.0
+    joint_tied: 0.0
+  noise:
+    name: linear
+    min_mask_probability: 0.0001
+  sequence_loss_weight: 1.0
+  structure_loss_weight: 1.0
 
-# MLM-specific settings (only used when objective="mlm")
-mlm:
-  mask_prob: 0.15 
-  mask_token_prob: 0.8  # of selected tokens, prob of replacing with <mask>
-  random_token_prob: 0.1  # of selected tokens, prob of replacing with random token
-  tie_word_embeddings: true # whether to tie LM head weights to input embeddings
-
-# pre-trained encoder checkpoint for initializing codebook training from MLM pre-training
-pretrained_encoder: null
-
-fape:
-  enabled: false
-  start_step: 0
-  weight: 0.1
-  log_pred_nan_frac: true
-
-gumbel:
-  tau_start: 1.0
-  tau_end: 0.5
-  anneal_steps: 20000
-  hard: false
-
-decoding:
-  eval_enabled: false
-  eval_method: "argmax"  # "argmax" | "top_p"
-  top_p: 0.9
-  temperature: 1.0
-
-# Evaluation metrics configuration
-# Each metric can be enabled/disabled and configured with specific parameters.
-# Metrics are automatically filtered by objective compatibility and resource availability.
-#
-# These settings define the DEFAULTS for all eval datasets. Per-dataset metric
-# configuration can be specified in data.eval.{dataset_name}.metrics to override
-# these defaults. See configs/data/base.yaml for per-dataset configuration examples.
-#
-# Metric categories:
-#   - Classification metrics: Work with sequence-only data (no coordinates needed)
-#   - Structure metrics: Require coordinates (load_coords: true) and decoder
-#   - Contact metrics: Require coordinates but not decoder
-#
-# Per-dataset metric selection (in data config):
-#   - Use 'metrics.only: [list]' to whitelist specific metrics for a dataset
-#   - Use 'metrics.{metric}.enabled: true/false' to enable/disable specific metrics
-#   - Use 'load_coords: true/false' to control per-dataset coordinate loading
-#   - Structure metrics auto-skip datasets without coordinates
 eval:
+  seed: 1729
   steps: 1000
-  metrics:
-    # classification metrics (sequence-only, no coordinates needed)
-    accuracy:
-      enabled: true
-      # objectives: [codebook]  # Auto-filtered by objective
-    masked_accuracy:
-      enabled: true
-      # objectives: [mlm]  # Auto-filtered by objective
-    perplexity:
-      enabled: true
-      # objectives: null  # Works for all objectives
-
-    # structure metrics (require decoder and coordinates)
-    lddt:
-      enabled: null  # Auto-enable with decoding.eval_enabled; explicit bool wins
-      # objectives: [codebook]
-      # requires_decoder: true
-      # requires_coords: true
-    tm_score:
-      enabled: null
-    rmsd:
-      enabled: null
-    fape:
+  mdlm:
+    enabled: false
+    cohort: null
+    generation_cohort: null
+    # Omitted cases resolve to the fixed 32-case denoising matrix.
+    generation:
       enabled: false
-
-    # Diagnostic metrics
-    pred_nan_frac:
-      enabled: false
-
-    # Contact prediction (MLM only, requires coordinates)
-    # Supports two modes:
-    #   1. Standard mode: Uses mean attention weights (with APC) to predict contacts
-    #   2. Logistic regression mode: Trains LogReg on attention from all layers/heads (see Rao et al. 2020, doi: 10.1101/2020.12.15.422761)
-    p_at_l:
-      enabled: true
-      contact_threshold: 8.0
-      min_seq_sep: 6
-      use_attention: true
-      num_layers: null  # null = 10% of encoder layers (rounded up); or set explicit int
-      # logistic regression mode
-      use_logistic_regression: false
-      logreg_max_feature_bytes: 1073741824  # retained features+labels across ranks, not attention peak
-      logreg_n_train: 20       # number of structures for training per iteration
-      logreg_lambda: 0.15      # L1 regularization strength (sklearn C = 1/lambda)
-      logreg_n_iterations: 5   # number of random train/test sampling iterations
-      # objectives: [mlm]
-      # requires_coords: true
+      steps: 10000
+      sampling_steps: 64
+      max_samples: 16
+      decode: false
+      schedule: {name: linear}

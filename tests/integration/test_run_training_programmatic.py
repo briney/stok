@@ -1,41 +1,26 @@
-from importlib.resources import as_file, files
+"""Programmatic execution freezes choices and records authored/runtime artifacts."""
 
-from hydra import compose, initialize_config_dir
+from omegaconf import OmegaConf
 
-from stok.cli.train import run_training
+from stok.training.engine import run_training
+from tests.integration.test_mdlm_training import mdlm_config, training_fixture
 
 
-def test_run_training_programmatic_smoke(capsys, tmp_path):
-    overrides = [
-        # tiny model for speed
-        "model.encoder.d_model=64",
-        "model.encoder.n_layers=2",
-        "model.encoder.n_heads=4",
-        "model.encoder.ffn_mult=1.0",
-        "model.encoder.dropout=0.0",
-        "model.encoder.attn_dropout=0.0",
-        # small codebook preset
-        "model.codebook.preset=lite",
-        # small data loader
-        "train.batch_size=2",
-        "data.max_len=64",
-        "data.num_workers=0",
-        "data.pin_memory=false",
-        # fast training
-        "train.max_steps=3",
-        "train.log_every=1",
-        "train.eval.steps=100000",
-        "train.gradient_accumulation_steps=1",
-        # disable external logging
-        "train.wandb.enabled=false",
-        # write artifacts to temp dir
-        f"train.output_dir={tmp_path.as_posix()}",
-    ]
-
-    with as_file(files("stok").joinpath("configs")) as cfg_dir:
-        with initialize_config_dir(version_base=None, config_dir=str(cfg_dir)):
-            cfg = compose(config_name="config", overrides=overrides)
+def test_readonly_training_preserves_authored_config_and_records_runtime(tmp_path):
+    source, codebook = training_fixture(tmp_path)
+    cfg = mdlm_config(tmp_path / "run", source, codebook)
+    cfg.train.warmup_steps = "${train.max_steps}"
+    before = OmegaConf.to_yaml(cfg, resolve=False)
+    OmegaConf.set_readonly(cfg, True)
     run_training(cfg)
-
-    out = capsys.readouterr().out
-    assert "Training complete." in out
+    assert OmegaConf.is_readonly(cfg)
+    assert OmegaConf.to_yaml(cfg, resolve=False) == before
+    authored = OmegaConf.load(tmp_path / "run/configs/authored.yaml")
+    scientific = OmegaConf.load(tmp_path / "run/configs/run.yaml")
+    runtime = OmegaConf.load(tmp_path / "run/configs/runtime.yaml")
+    assert OmegaConf.to_yaml(authored, resolve=False) == before
+    assert scientific.train.warmup_steps == 2
+    assert "mdlm_identity" not in scientific.train
+    assert "effective_precision" not in scientific.train
+    assert runtime.effective_precision == "no"
+    assert runtime.mdlm_identity.training_signature

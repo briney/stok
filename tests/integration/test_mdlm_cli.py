@@ -13,7 +13,7 @@ import pytest
 import torch
 
 from stok.cli.cli import cli
-from stok.cli.train import run_training
+from stok.training.engine import run_training
 from stok.eval.mdlm import resolve_mdlm_eval_config
 from stok.models.mdlm import STokMDLM
 from stok.utils.mdlm import REGIMES, validate_mdlm_config
@@ -83,7 +83,7 @@ def test_pilot_composes_pinned_values_and_parameter_count():
         1,
     }
     assert {case.regime for case in resolved.cases.values()} == set(REGIMES)
-    assert all(case.span_mean == 8 for case in resolved.cases.values())
+    assert all(case.get("span_mean", 8) == 8 for case in resolved.cases.values())
     assert not any(
         key in cfg.train.eval.mdlm
         for key in ("mask_probabilities", "regimes", "placements", "generation_steps")
@@ -98,9 +98,9 @@ def test_hydra_overrides_remain_authoritative(regime):
     cfg = pilot(
         *weights,
         "train.mdlm.placement=span",
-        "train.mdlm.span_mean=5",
+        "+train.mdlm.span_mean=5",
         "train.mdlm.noise.name=power",
-        "train.mdlm.noise.power=3",
+        "+train.mdlm.noise.power=3",
         "train.batch_size=1",
         "train.mixed_precision=no",
     )
@@ -170,13 +170,13 @@ def test_startup_fails_before_artifacts_or_wandb(tmp_path, monkeypatch, kind):
     elif kind == "precision":
         cfg.train.mixed_precision = "fp16"
     else:
-        cfg.train.gumbel.hard = True
+        cfg.train.gumbel = {"hard": True}
     monkeypatch.setattr(
         "stok.training.engine._maybe_init_wandb",
         lambda *a, **kw: pytest.fail("W&B reached before preflight"),
     )
     with pytest.raises(
-        (ValueError, RuntimeError), match="MDLM|precision|project_path|populated"
+        (ValueError, RuntimeError), match="MDLM|precision|output_dir|populated|gumbel"
     ):
         run_training(cfg)
     assert not project.exists() or sorted(p.name for p in project.iterdir()) == ["keep"]
@@ -226,7 +226,7 @@ def row_for(payload, mode):
     if mode == "folding":
         row["sequence"] = "AXG"
     elif mode == "inverse_folding":
-        identity = payload["config"]["train"]["mdlm_identity"]
+        identity = payload["runtime"]["mdlm_identity"]
         row.update(
             structure_tokens=[2, None, 7],
             tokenizer_sha256=identity["tokenizer_sha256"],
@@ -490,7 +490,7 @@ def test_supplied_target_tokens_never_reach_first_forward(
     tmp_path, trained, monkeypatch, mode
 ):
     checkpoint, payload = trained
-    identity = payload["config"]["train"]["mdlm_identity"]
+    identity = payload["runtime"]["mdlm_identity"]
     row = {
         "sequence_id": "sample",
         "length": 3,

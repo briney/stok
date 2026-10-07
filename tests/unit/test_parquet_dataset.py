@@ -2,11 +2,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 import torch
-from omegaconf import OmegaConf
 
-from stok.cli.train import _build_dataloaders, _tokenize_and_align
+from stok.data.mdlm import prepare_mdlm_batch
 from stok.data.dataset import IterableTokenizedDataset, TokenizedDataset
-from stok.utils.losses import token_ce_loss
 from stok.utils.tokenizer import Tokenizer
 
 
@@ -38,27 +36,22 @@ def test_null_tokens_preserve_residue_alignment(tmp_path, sharded, token_type):
     assert item["sequence_id"] == "p1"
     assert item["sequence"] == "ACDE"
     assert item["structure_tokens"].tolist() == [4, -1, 7, -1]
-    _, labels = _tokenize_and_align(
-        [item],
-        Tokenizer(),
-        max_len=8,
-        ignore_index=-100,
-        pad_id=1,
+    item["dataset"] = "alignment-fixture"
+    batch = prepare_mdlm_batch(
+        [item], Tokenizer(), max_len=8, codebook_size=8, crop="center", seeds=[0]
     )
-    assert labels.tolist() == [[-100, 4, -100, 7, -100, -100, -100, -100]]
-
-    _, truncated = _tokenize_and_align(
-        [item],
-        Tokenizer(),
-        max_len=4,
-        ignore_index=-100,
-        pad_id=1,
+    assert batch["structure_tokens"].tolist() == [[8, 4, 10, 7, 10, 8, 8, 8]]
+    assert batch["structure_valid"].tolist() == [
+        [False, True, False, True, False, False, False, False]
+    ]
+    truncated = prepare_mdlm_batch(
+        [item], Tokenizer(), max_len=4, codebook_size=8, crop="center", seeds=[0]
     )
-    assert truncated.tolist() == [[-100, 4, -100, -100]]
+    assert truncated["structure_tokens"].tolist() == [[8, 10, 7, 8]]
 
 
 @pytest.mark.parametrize("sharded", [False, True])
-def test_sequence_only_parquet_for_mlm(tmp_path, sharded):
+def test_sequence_only_parquet_for_diagnostics(tmp_path, sharded):
     path = tmp_path / "data.parquet"
     pq.write_table(pa.table({"sequence_id": ["p1"], "sequence": ["ACDE"]}), path)
     cls = IterableTokenizedDataset if sharded else TokenizedDataset
@@ -136,44 +129,6 @@ def test_rejects_csv(tmp_path):
     path.write_text("sequence_id,sequence,structure_tokens\np1,ACDE,1 2 3 4\n")
     with pytest.raises(ValueError, match="Parquet"):
         TokenizedDataset(str(path), max_length=8)
-
-
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
-def test_all_null_tokens_have_zero_loss_and_gradients(tmp_path, dtype):
-    path = tmp_path / "data.parquet"
-    write_parquet(path, tokens=[None] * 4)
-    item = TokenizedDataset(str(path), max_length=8)[0]
-    _, labels = _tokenize_and_align(
-        [item],
-        Tokenizer(),
-        max_len=8,
-        ignore_index=-100,
-        pad_id=1,
-    )
-    logits = torch.ones(1, 8, 10, dtype=dtype, requires_grad=True)
-    loss = token_ce_loss(logits, labels)
-    assert loss.item() == 0.0
-    loss.backward()
-    assert torch.count_nonzero(logits.grad) == 0
-
-
-@pytest.mark.parametrize("is_mlm", [False, True])
-def test_training_rejects_structure_folders(tmp_path, is_mlm):
-    (tmp_path / "protein.pdb").write_text("END\n")
-    cfg = OmegaConf.create(
-        {
-            "data": {
-                "train": str(tmp_path),
-                "max_len": 8,
-                "num_workers": 0,
-                "pin_memory": False,
-            },
-            "model": {"classifier": {"ignore_index": -100}},
-            "train": {"batch_size": 1},
-        }
-    )
-    with pytest.raises(ValueError, match="Parquet"):
-        _build_dataloaders(cfg, codebook_size=8, pad_id=1, is_mlm=is_mlm)
 
 
 @pytest.mark.parametrize("load_coords", [False, True])

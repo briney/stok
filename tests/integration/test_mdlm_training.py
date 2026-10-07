@@ -8,7 +8,8 @@ import torch
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
-from stok.cli.train import _build_dataloaders, run_training
+from stok.data.loaders import _build_dataloaders
+from stok.training.engine import run_training
 from stok.data.mdlm import CANONICAL_AA, prepare_mdlm_batch
 from stok.models.mdlm import STokMDLM
 from stok.utils.mdlm import corrupt_mdlm_batch
@@ -48,9 +49,8 @@ def mdlm_config(project, source, codebook_path, **options):
     cfg.train.output_dir = str(project)
     cfg.train.mdlm = {
         "placement": "token",
-        "span_mean": 8,
         "regime_weights": {"joint_independent": 1},
-        "noise": {"name": "linear", "power": 2, "min_mask_probability": 1e-4},
+        "noise": {"name": "linear", "min_mask_probability": 1e-4},
         "sequence_loss_weight": 1,
         "structure_loss_weight": 1,
     }
@@ -135,8 +135,8 @@ def test_paired_parquet_update_both_heads_and_compute_accounting(tmp_path):
         assert torch.count_nonzero(states[head]["exp_avg"]) > 0
     assert state["executed_positions"] == 2 * 2 * 8
     assert state["residues_seen"] == 2 * (6 + 3)
-    assert state["config"]["train"]["effective_precision"] == "no"
-    assert state["config"]["train"]["mdlm_identity"]["training_signature"]
+    assert state["runtime"]["effective_precision"] == "no"
+    assert state["runtime"]["mdlm_identity"]["training_signature"]
     log = (tmp_path / "run/logs/train.log").read_text()
     assert "diffusion_loss" in log and "sequence_ce" in log and "structure_ce" in log
     assert "ppl" not in log
@@ -154,34 +154,21 @@ def test_raw_loader_defers_crop_and_reads_full_coordinates_when_requested(tmp_pa
     cfg = mdlm_config(tmp_path / "run", source, codebook, **{"data.load_coords": True})
     from stok.data.mdlm import validate_mdlm_sources
 
-    cfg.train.mdlm_identity = validate_mdlm_sources(
+    identity = validate_mdlm_sources(
         {"local": str(source)},
         {},
         codebook=torch.load(codebook, weights_only=True)["codebook"],
         split_manifest=None,
     )
-    loader, _ = _build_dataloaders(cfg, codebook_size=32, pad_id=1, objective="mdlm")
+    loader, _ = _build_dataloaders(cfg, identity=identity)
     batch = next(iter(loader))
     assert isinstance(batch, list) and isinstance(batch[0], dict)
     assert loader.collate_fn is list
     assert batch[0]["coords"].shape[0] == len(batch[0]["sequence"])
-    assert batch[0]["dataset"] == cfg.train.mdlm_identity.sample_key_namespaces.local
+    assert batch[0]["dataset"] == identity["sample_key_namespaces"]["local"]
     cfg.data.load_coords = False
-    loader, _ = _build_dataloaders(cfg, codebook_size=32, pad_id=1, objective="mdlm")
+    loader, _ = _build_dataloaders(cfg, identity=identity)
     assert "coords" not in next(iter(loader))[0]
-    with pytest.raises(ValueError, match="[Cc]onflict"):
-        _build_dataloaders(
-            cfg, codebook_size=32, pad_id=1, objective="mdlm", is_mlm=True
-        )
-
-
-def test_explicit_non_mlm_flag_conflicts_with_mlm_objective(tmp_path):
-    source, codebook = training_fixture(tmp_path)
-    cfg = mdlm_config(tmp_path / "run", source, codebook)
-    with pytest.raises(ValueError, match="[Cc]onflict"):
-        _build_dataloaders(
-            cfg, codebook_size=32, pad_id=1, objective="mlm", is_mlm=False
-        )
 
 
 def test_mdlm_partial_window_flushes(tmp_path):
@@ -190,7 +177,11 @@ def test_mdlm_partial_window_flushes(tmp_path):
         tmp_path / "run",
         source,
         codebook,
-        **{"train.max_epochs": 1, "train.gradient_accumulation_steps": 4},
+        **{
+            "train.max_epochs": 1,
+            "train.max_steps": None,
+            "train.gradient_accumulation_steps": 4,
+        },
     )
     state = checkpoint(cfg)
     assert state["global_step"] == state["scheduler"]["last_epoch"] == 2
@@ -305,7 +296,7 @@ def test_invalid_loss_weights_fail_before_artifacts(tmp_path, weights):
             "train.mdlm.structure_loss_weight": weights[1],
         },
     )
-    with pytest.raises(RuntimeError, match="weight"):
+    with pytest.raises(ValueError, match="weight"):
         run_training(cfg)
     assert not (tmp_path / "run").exists()
 
@@ -325,7 +316,7 @@ def test_enabled_regime_needs_positively_weighted_modality(tmp_path, regime, wei
             "train.mdlm.structure_loss_weight": weights[1],
         },
     )
-    with pytest.raises(RuntimeError, match="regime"):
+    with pytest.raises(ValueError, match="regime"):
         run_training(cfg)
     assert not (tmp_path / "run").exists()
 
@@ -344,7 +335,7 @@ def test_enabled_regime_needs_positively_weighted_modality(tmp_path, regime, wei
 def test_unsupported_config_fails_before_artifacts(tmp_path, key, value):
     source, codebook = training_fixture(tmp_path)
     cfg = mdlm_config(tmp_path / "run", source, codebook, **{key: value})
-    with pytest.raises(RuntimeError):
+    with pytest.raises(ValueError):
         run_training(cfg)
     assert not (tmp_path / "run").exists()
 
@@ -536,7 +527,7 @@ def test_invalid_mdlm_model_configuration_leaves_no_artifacts(tmp_path, key, val
 def test_mdlm_has_no_legacy_classifier_configuration_dependency(tmp_path):
     source, codebook = training_fixture(tmp_path)
     cfg = mdlm_config(tmp_path / "run", source, codebook, **{"train.max_steps": 1})
-    del cfg.model.classifier
+    assert "classifier" not in cfg.model
     state = checkpoint(cfg)
     assert state["global_step"] == 1
 
@@ -553,7 +544,12 @@ def test_training_attaches_saved_regime_weights_for_sampling(tmp_path, monkeypat
 
     monkeypatch.setattr(STokMDLM, "forward", forward)
     state = checkpoint(cfg)
-    assert seen and all(weights == {"joint_independent": 1} for weights in seen)
-    assert state["config"]["train"]["mdlm"]["regime_weights"] == {
-        "joint_independent": 1
+    expected = {
+        "joint_independent": 1,
+        "structure_only": 0,
+        "sequence_only": 0,
+        "joint_tied": 0,
     }
+    assert seen and all(weights == expected for weights in seen)
+    assert state["config"]["train"]["mdlm"]["regime_weights"] == expected
+    assert dict(cfg.train.mdlm.regime_weights) == {"joint_independent": 1}

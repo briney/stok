@@ -6,21 +6,10 @@ import torch
 import torch.nn.functional as F
 
 from stok.models.mdlm import STokMDLM
-from stok.models.stok import STokModel
 from tests.integration.test_mdlm_resume import equal
 
 
-@pytest.mark.parametrize(
-    "objective,tied,cosine",
-    [
-        ("mdlm", True, False),
-        ("mlm", True, False),
-        ("mlm", False, False),
-        ("codebook", True, False),
-        ("codebook", True, True),
-    ],
-)
-def test_builder_matches_existing_constructors(objective, tied, cosine):
+def test_builder_matches_existing_mdlm_constructor():
     from stok.models.build import build_model
 
     cfg = OmegaConf.create(
@@ -37,16 +26,9 @@ def test_builder_matches_existing_constructors(objective, tied, cosine):
                     "attn_dropout": 0.1,
                     "norm": "layernorm",
                 },
-                "classifier": {
-                    "use_cosine": cosine,
-                    "learnable_temperature": True,
-                    "bias_from_code_norm": True,
-                    "projector_dim": 6,
-                },
             },
             "train": {
-                "objective": objective,
-                "mlm": {"tie_word_embeddings": tied},
+                "objective": "mdlm",
                 "mdlm": {"regime_weights": {"joint_independent": 1}},
             },
         }
@@ -66,21 +48,10 @@ def test_builder_matches_existing_constructors(objective, tied, cosine):
         norm_type="layernorm",
     )
     torch.manual_seed(1729)
-    if objective == "mdlm":
-        existing = STokMDLM(**kwargs, codebook=codebook)
-    else:
-        existing = STokModel(
-            **kwargs,
-            codebook=codebook if objective == "codebook" else None,
-            classifier_kwargs=dict(cfg.model.classifier)
-            if objective == "codebook"
-            else None,
-            head_type=objective,
-            tie_word_embeddings=tied,
-        )
+    existing = STokMDLM(**kwargs, codebook=codebook)
     existing_rng = torch.get_rng_state().clone()
     torch.manual_seed(1729)
-    built = build_model(cfg, codebook=codebook if objective != "mlm" else None)
+    built = build_model(cfg, codebook=codebook)
     assert type(built) is type(existing)
     assert torch.equal(existing_rng, torch.get_rng_state())
     assert list(existing.state_dict()) == list(built.state_dict())
@@ -95,18 +66,8 @@ def test_builder_matches_existing_constructors(objective, tied, cosine):
     gradients = []
     for model in (existing, built):
         torch.manual_seed(42)
-        result = (
-            model(sequence, structure)
-            if objective == "mdlm"
-            else model(
-                sequence, labels=sequence % (8 if objective == "codebook" else 32)
-            )
-        )
-        loss = (
-            sum(value.square().mean() for value in result.values())
-            if objective == "mdlm"
-            else result["loss"]
-        )
+        result = model(sequence, structure)
+        loss = sum(value.square().mean() for value in result.values())
         loss.backward()
         outputs.append(result)
         gradients.append([parameter.grad for parameter in model.parameters()])
@@ -117,29 +78,27 @@ def test_builder_matches_existing_constructors(objective, tied, cosine):
         assert any(gradient.abs().sum() > 0 for gradient in gradients[-1])
     equal(outputs[0], outputs[1])
     equal(gradients[0], gradients[1])
-    if objective == "mlm":
-        assert (built.lm_head.decoder.weight is built.embed.weight) == tied
-    else:
-        frozen = built.structure_codebook if objective == "mdlm" else built.classifier.E
-        assert torch.equal(frozen, codebook)
-        assert not frozen.requires_grad and frozen.grad is None
-        assert codebook.grad is None
-    if objective == "mdlm":
-        assert built.mdlm_regime_weights == {"joint_independent": 1}
-        built.eval()
-        hidden = built.encoder(
-            built.embed(sequence) + built.structure_embed(structure),
-            key_padding_mask=sequence.eq(1),
-        )
-        result = built(sequence, structure)
-        equal(
-            result["sequence_logits"],
-            F.linear(hidden, built.embed.weight, built.sequence_bias),
-        )
-        equal(
-            result["structure_logits"],
-            F.linear(hidden, built.structure_embed.weight[:8], built.structure_bias),
-        )
+    assert torch.equal(built.structure_codebook, codebook)
+    assert (
+        not built.structure_codebook.requires_grad
+        and built.structure_codebook.grad is None
+    )
+    assert codebook.grad is None
+    assert built.mdlm_regime_weights == {"joint_independent": 1}
+    built.eval()
+    hidden = built.encoder(
+        built.embed(sequence) + built.structure_embed(structure),
+        key_padding_mask=sequence.eq(1),
+    )
+    result = built(sequence, structure)
+    equal(
+        result["sequence_logits"],
+        F.linear(hidden, built.embed.weight, built.sequence_bias),
+    )
+    equal(
+        result["structure_logits"],
+        F.linear(hidden, built.structure_embed.weight[:8], built.structure_bias),
+    )
 
 
 @pytest.mark.parametrize("weights", [None, {}])
@@ -168,3 +127,28 @@ def test_missing_or_empty_regime_weights_stay_unqualified(weights):
         cfg.train.mdlm.regime_weights = weights
     model = build_model(cfg, codebook=torch.zeros(8, 4))
     assert model.mdlm_regime_weights == {}
+
+
+@pytest.mark.parametrize("cosine", [False, True])
+def test_frozen_prototype_head_matches_declared_geometry_and_backpropagates(cosine):
+    from stok.models.head import CodebookClassifier
+
+    codebook = torch.tensor([[1.0, 0.0], [0.0, 2.0], [-1.0, -1.0]], requires_grad=True)
+    head = CodebookClassifier(
+        d_in=4, codebook=codebook, use_cosine=cosine, projector_dim=3
+    )
+    hidden = torch.arange(16.0).reshape(1, 4, 4).requires_grad_()
+    codes = head.to_code(head.ln(head.project(hidden)))
+    expected = (
+        F.normalize(codes, dim=-1) @ F.normalize(codebook.detach(), dim=-1).T
+        if cosine
+        else 2 * codes @ codebook.detach().T - codebook.detach().square().sum(-1)
+    )
+    torch.testing.assert_close(head(hidden), expected)
+    head(hidden).square().sum().backward()
+    assert torch.isfinite(hidden.grad).all() and hidden.grad.abs().sum() > 0
+    assert all(
+        parameter.grad is not None and torch.isfinite(parameter.grad).all()
+        for parameter in head.parameters()
+    )
+    assert head.E.grad is None and codebook.grad is None and not head.E.requires_grad

@@ -4,23 +4,7 @@ import torch
 from stok.utils.decoding import (
     decode_coords,
     indices_to_codes,
-    logits_to_soft_codes_gumbel,
-    sample_indices_top_p,
 )
-
-
-def test_logits_to_soft_codes_gumbel_identity_codebook_shapes_and_consistency():
-    torch.manual_seed(0)
-    B, L, C = 2, 5, 7
-    d_code = C
-    logits = torch.randn(B, L, C)
-    E = torch.eye(C)  # identity -> codes == gumbel weights
-    codes = logits_to_soft_codes_gumbel(logits, E, tau=1.0, hard=False)
-    assert codes.shape == (B, L, d_code)
-    # rows should be non-negative and sum to ~1 since E is identity and weights are prob-like
-    row_sums = codes.sum(dim=-1)
-    assert torch.isfinite(codes).all()
-    assert torch.all(row_sums > 0.0)
 
 
 def test_indices_to_codes_gathers_correct_rows():
@@ -32,17 +16,6 @@ def test_indices_to_codes_gathers_correct_rows():
     for b in range(2):
         for position in range(3):
             assert torch.allclose(gathered[b, position], E[idx[b, position]])
-
-
-def test_sample_indices_top_p_deterministic_mass_one():
-    torch.manual_seed(0)
-    B, L, C = 2, 4, 6
-    probs = torch.full((B, L, C), 1e-6)
-    probs[..., 0] = 1.0  # all mass on index 0
-    probs = probs / probs.sum(dim=-1, keepdim=True)
-    idx = sample_indices_top_p(probs, top_p=0.5, temperature=1.0)
-    assert idx.shape == (B, L)
-    assert torch.all(idx == 0)
 
 
 def test_decode_coords_runs_when_decoder_available(monkeypatch):

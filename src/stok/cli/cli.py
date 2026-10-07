@@ -122,7 +122,7 @@ def train_cmd(
         data_config=data_config,
     )
 
-    from .train import run_training
+    from stok.training.engine import run_training
 
     run_training(cfg)
 
