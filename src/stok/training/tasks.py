@@ -270,11 +270,14 @@ class ClassificationTask:
         self.cfg = cfg
         self.decoder = decoder
         self.codebook = codebook
-        self.is_mlm = cfg.train.objective == "mlm"
-        self.want_fape = cfg.train.objective == "codebook" and bool(
-            cfg.train.fape.enabled
+        objective = str(cfg.train.get("objective", "codebook")).lower()
+        self.is_mlm = objective == "mlm"
+        self.want_fape = objective == "codebook" and bool(
+            getattr(cfg.train, "fape", {}).get("enabled", False)
         )
-        self.log_pred_nan_frac = bool(cfg.train.fape.get("log_pred_nan_frac", True))
+        self.log_pred_nan_frac = objective == "codebook" and bool(
+            getattr(cfg.train, "fape", {}).get("log_pred_nan_frac", True)
+        )
         self.ignore_index = int(cfg.model.classifier.ignore_index)
         self._logging = _initial_logging_state()
 
