@@ -266,7 +266,9 @@ from stok.models.gcp_vqvae import load_pretrained_tokenizer
 prepare_canonical_dataset("/data/inputs.jsonl", "/data/canonical")
 tokenizer = load_pretrained_tokenizer("large", device="cuda:0")
 summary = write_structure_dataset(
-    "/data/canonical", "/data/stok-mdlm/train", tokenizer=tokenizer,
+    "/data/canonical",
+    "/data/stok-mdlm/train",
+    tokenizer=tokenizer,
     rows_per_shard=2000,
 )
 ```

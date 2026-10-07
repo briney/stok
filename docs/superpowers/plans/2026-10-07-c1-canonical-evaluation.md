@@ -105,6 +105,7 @@ def test_canonical_identity_is_not_path_alias_or_representation(canonical_exampl
     assert a["canonical_id"] != other_observations["canonical_id"]
     assert a["sequence"] == other_observations["sequence"]
 
+
 def test_original_four_atom_roundtrip_with_missing_oxygen(record_with_missing_oxygen):
     record = record_with_missing_oxygen
     assert record["coordinates"][2][3] == [None, None, None]
@@ -163,12 +164,15 @@ Projection consumes one ordered case per batch row, checking canonical ID and re
 - [x] **Step 1: Add failing split/frozen-control tests.** Define small canonical fixtures with insertion-code/missing-atom/unknown-AA cases and explicit assignments, reusing Task 1 builders. The core assertions in `test_eval_cases.py`:
 
 ```python
-def test_frozen_cases_ignore_representation_and_physical_order(two_reordered_inventories):
+def test_frozen_cases_ignore_representation_and_physical_order(
+    two_reordered_inventories,
+):
     a, b = two_reordered_inventories
     assert a["shared_cases_sha256"] == b["shared_cases_sha256"]
-    assert [(c["case_id"], c["seed"], c["crop"], c["masked"])
-            for c in a["cases"]] == [(c["case_id"], c["seed"], c["crop"], c["masked"])
-                                      for c in b["cases"]]
+    assert [(c["case_id"], c["seed"], c["crop"], c["masked"]) for c in a["cases"]] == [
+        (c["case_id"], c["seed"], c["crop"], c["masked"]) for c in b["cases"]
+    ]
+
 
 def test_replicates_are_cases_not_additional_proteins(two_replicate_cases):
     cases = two_replicate_cases
@@ -248,6 +252,7 @@ def test_case_controls_survive_batch_workers_and_missing_codes(evaluation_arms):
     assert a["requested_case_ids"] == b["requested_case_ids"]
     assert a["canonical_controls"] == b["canonical_controls"]
     assert b["unavailable_targets"] > a["unavailable_targets"]
+
 
 def test_generation_cap_counts_families_and_replicates(capped_evaluation):
     assert capped_evaluation["declared_case_count"] == 17
