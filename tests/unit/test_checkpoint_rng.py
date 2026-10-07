@@ -503,6 +503,7 @@ def test_format4_reader_and_sampler_reject_saved_case_wrapper_offline(
 
     monkeypatch.setattr(builtins, "open", guarded_open)
     monkeypatch.setattr(io, "open", guarded_open)
+    monkeypatch.setattr(Path, "open", guarded_open)
     monkeypatch.setattr(
         torch.cuda,
         "_lazy_init",
