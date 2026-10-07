@@ -21,6 +21,7 @@ def test_build_scheduler_warmup_then_cosine_decay():
 
     lrs: list[float] = []
     for _ in range(total_steps):
+        opt.step()
         sched.step()
         lrs.append(sched.get_last_lr()[0])
 
@@ -49,6 +50,7 @@ def test_build_scheduler_linear_with_stable_and_auto_decay_steps():
 
     lrs: list[float] = []
     for _ in range(total_steps):
+        opt.step()
         sched.step()
         lrs.append(sched.get_last_lr()[0])
 
@@ -81,6 +83,7 @@ def test_build_scheduler_warmup_then_stable_only_when_zero_decay_steps():
 
     lrs: list[float] = []
     for _ in range(total_steps):
+        opt.step()
         sched.step()
         lrs.append(sched.get_last_lr()[0])
 

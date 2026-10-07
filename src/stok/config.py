@@ -110,7 +110,7 @@ def validate_training_config(cfg: DictConfig) -> None:
             ):
                 raise ValueError(f"{path}.fraction must be finite and nonnegative")
             batch_size = source.get("batch_size")
-            if batch_size is not None and (
+            if "batch_size" in source and (
                 type(batch_size) is not int or batch_size < 1
             ):
                 raise ValueError(f"{path}.batch_size must be a positive integer")
@@ -211,6 +211,8 @@ def validate_training_config(cfg: DictConfig) -> None:
         raise ValueError("data.split_manifest must be a path or null")
     if enc.d_model % enc.n_heads or enc.norm not in {"layernorm", "rmsnorm"}:
         raise ValueError("model.encoder heads/d_model/norm are unsupported")
+    if (enc.d_model // enc.n_heads) % 2:
+        raise ValueError("model.encoder head width must be even for RoPE")
     for key in ("dropout", "attn_dropout"):
         if not 0 <= enc[key] < 1:
             raise ValueError(f"model.encoder.{key} must be in [0,1)")

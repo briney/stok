@@ -452,3 +452,64 @@ def test_run_requires_training_sources_before_side_effects(tmp_path, monkeypatch
     with pytest.raises(ValueError, match="training source"):
         engine.run_training(cfg)
     assert not (tmp_path / "run").exists()
+
+
+def test_null_evaluation_batch_size_fails_before_side_effects(tmp_path, monkeypatch):
+    from stok.config import load_training_config
+    from stok.training import engine
+
+    cfg = load_training_config([f"train.output_dir={tmp_path / 'run'}"])
+    cfg.data.train = {"local": {"path": str(tmp_path / "source")}}
+    cfg.data.eval = {
+        "validation": {"path": str(tmp_path / "source"), "batch_size": None}
+    }
+    OmegaConf.set_readonly(cfg, True)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("invalid evaluation batch size reached devices/artifacts/logging")
+
+    monkeypatch.setattr(engine, "_maybe_get_accelerator", forbidden)
+    monkeypatch.setattr(engine, "load_codebook", forbidden)
+    monkeypatch.setattr(engine, "_maybe_init_wandb", forbidden)
+    with pytest.raises(ValueError, match=r"data\.eval\.validation\.batch_size"):
+        engine.run_training(cfg)
+    assert not (tmp_path / "run").exists()
+    assert not (tmp_path / "source").exists()
+    with pytest.raises(ValueError, match=r"data\.eval\.validation\.batch_size"):
+        load_training_config(
+            [
+                "+data.eval.validation.path=/unused",
+                "+data.eval.validation.batch_size=null",
+            ]
+        )
+
+
+def test_odd_rope_head_width_fails_before_side_effects(tmp_path, monkeypatch):
+    from stok.config import load_training_config
+    from stok.training import engine
+
+    cfg = load_training_config([f"train.output_dir={tmp_path / 'run'}"])
+    cfg.data.train = {"local": {"path": str(tmp_path / "source")}}
+    cfg.model.encoder.d_model = 18
+    cfg.model.encoder.n_heads = 2
+    cfg.model.encoder.n_layers = 1
+    OmegaConf.set_readonly(cfg, True)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("odd RoPE head width reached devices/artifacts/logging")
+
+    monkeypatch.setattr(engine, "_maybe_get_accelerator", forbidden)
+    monkeypatch.setattr(engine, "load_codebook", forbidden)
+    monkeypatch.setattr(engine, "_maybe_init_wandb", forbidden)
+    with pytest.raises(ValueError, match="model.encoder.*even.*RoPE"):
+        engine.run_training(cfg)
+    assert not (tmp_path / "run").exists()
+    assert not (tmp_path / "source").exists()
+    with pytest.raises(ValueError, match="model.encoder.*even.*RoPE"):
+        load_training_config(
+            [
+                "model.encoder.d_model=18",
+                "model.encoder.n_heads=2",
+                "model.encoder.n_layers=1",
+            ]
+        )

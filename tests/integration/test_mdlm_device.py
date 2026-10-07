@@ -270,7 +270,7 @@ def test_real_device_rng_inventory_continuation(tmp_path, monkeypatch):
     assert [state.numel() for state in rng["cuda"]] == sizes
     assert rng["cuda_device"] == torch.cuda.current_device()
     assert resumed["signature"]["execution"]["device"] == "cuda"
-    assert resumed["config"]["train"]["effective_precision"] == "bf16"
+    assert resumed["runtime"]["effective_precision"] == "bf16"
 
     def forbidden(*args, **kwargs):
         pytest.fail("CPU sampler touched CUDA RNG")
