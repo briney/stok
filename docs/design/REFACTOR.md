@@ -1,10 +1,11 @@
 # STok research refactor
 
-**Status:** Proposed design for review; implementation has not started.
+**Status:** Baseline/extraction merged in PR #15 at `404a2c4`. Forward plan revised for the
+user's clean-break research policy on October 6, 2026; comparison work remains planned.
 
 **Date:** 2026-10-06
 
-**Code reviewed:** `cd89de13ec0167d4679b76933f15cb81d16b572d`
+**Original code reviewed:** `cd89de13ec0167d4679b76933f15cb81d16b572d`
 
 **Primary objective:** Joint sequence–structure generation. Folding and inverse folding are
 conditional diagnostics.
@@ -24,8 +25,14 @@ Accepted decisions:
 
 - Keep **OmegaConf**, existing Hydra composition, YAML, and the Click CLI. Extend the current
   configuration loader rather than introduce another configuration system.
-- Refactor incrementally. Preserve working parsing, alignment, provenance, distributed
-  training, checkpoint, and evaluation behavior.
+- Refactor in reviewable increments. Reuse useful parsing, alignment, provenance, distributed
+  training, checkpoint, and evaluation code; simplify interfaces wherever it helps research.
+- Backward compatibility is not a requirement. Old configuration keys, import paths, CLI
+  contracts, parameter names, and STok checkpoint formats may break. Do not build migration
+  utilities, compatibility loaders, aliases, or deprecation periods for them.
+- Retain existing components only when they serve a named baseline, planned comparison, or
+  required correctness property. Remove unused objectives, wrappers, configuration branches,
+  and compatibility-only tests with their callers. Git history retains the old implementation.
 - Use composition, ordinary functions, and small concrete components. Introduce a selector
   with its first working alternative, rather than scaffold every possible experiment.
 - Judge joint generation by pair consistency, structural validity, diversity, novelty, and
@@ -38,6 +45,13 @@ Accepted decisions:
 This document defines the architecture and migration criteria. It does not authorize training
 runs, specify a compute budget, or claim that any proposed model improves on DPLM.
 
+The named baseline preserves its scientific recipe, source revision, and recorded evidence.
+It does not require the new code to load historical STok checkpoints or reproduce accidental
+implementation details. New runs still need reliable save/load, sampling, and exact continuation
+within their declared code/configuration/environment contract. Qualified pretrained tokenizer
+and decoder artifacts remain useful inputs; dropping STok checkpoint compatibility does not
+remove their identity and consistency checks.
+
 ## 2. Current foundation and constraints
 
 | Area | Preserve | Change |
@@ -45,7 +59,7 @@ runs, specify a compute budget, or claim that any proposed model improves on DPL
 | Data | Original observations, residue correspondence, aligned crops, exclusions, provenance | Separate biological sample identity from representation/export identity |
 | Tokenization | Qualified GCP encoder/quantizer/decoder and matching artifact checks | Encapsulate GCP assumptions so another representation can use the same data and benchmarks |
 | Model | Native transformer and current paired MDLM behavior | Separate construction and the components needed by real comparisons |
-| Training | Accumulation, global normalization, precision, distributed errors, exact continuation | Extract scientific task logic from the large CLI training function |
+| Training | Accumulation, global normalization, precision, distributed errors, exact continuation of new runs | Simplify task/engine state and remove compatibility-only branches |
 | Configuration | OmegaConf interpolation, Hydra groups, overlays, command-line precedence | Add validated recipes and explicit component selections as implementations arrive |
 | Evaluation | Frozen cohorts/masks, true-token controls, valid/skipped counts | Add an offline joint-generation benchmark and reusable per-sample results |
 | Experiments | Existing GCP comparison scripts and W&B logging | Generalize recipe expansion and comparison reporting without a new orchestration service |
@@ -57,7 +71,7 @@ Relevant implementation anchors:
   [MDLM data validation](../../src/stok/data/mdlm.py).
 - [Paired MDLM](../../src/stok/models/mdlm.py),
   [codebook head](../../src/stok/models/head.py), and
-  [training function](../../src/stok/cli/train.py).
+  [training engine](../../src/stok/training/engine.py).
 - [Configuration composition](../../src/stok/config.py),
   [checkpoint contracts](../../src/stok/utils/checkpoint.py), and
   [MDLM evaluation](../../src/stok/eval/mdlm.py).
@@ -88,15 +102,19 @@ Keep existing files where practical; extract cohesive modules when code needs a 
 | Sampler | Inference trajectory, conditioning preservation, random streams, generated outputs | Training configuration mutation or metric aggregation |
 | Benchmark/experiment code | Protocols, per-sample scoring, comparison, recipe expansion | Model-specific internals or a cluster scheduler |
 
-### Minimum initial extraction
+### Completed extraction and next boundaries
 
-- Add one ordinary model-building function shared by training and checkpoint sampling. Explicit
-  dispatch is enough for the existing model families; no dynamic plugin discovery is needed.
-- Extract a shared execution loop from `cli/train.py`, leaving CLI parsing in the CLI and
-  retaining `stok.train` as the distributed-launch entry point.
-- Extract two concrete task implementations: paired MDLM and token classification, with the
-  existing MLM/codebook modes retained in token classification.
-- Encapsulate current GCP loading/export/decode calls behind a concrete adapter. Generalize
+- The merged extraction provides one ordinary model builder, a shared execution loop, data
+  loaders, and concrete MDLM/classification tasks. Keep these boundaries where they help;
+  their current signatures and two-task split are not permanent requirements.
+- Make paired MDLM the initial supported research recipe. Inventory MLM, standalone codebook
+  training, and FAPE paths against named studies; remove paths without a current use. Keep
+  reusable numerical code needed by a planned comparison, such as the frozen-prototype head,
+  without retaining its old training workflow solely to make that code available.
+- Remove compatibility reexports and forwarding-only modules after updating repository callers.
+  Keep Click parsing and the useful distributed-launch function; consolidate duplicated entry
+  points where appropriate. No dynamic plugin discovery or task hierarchy is needed.
+- Later, encapsulate GCP loading/export/decode calls behind a concrete adapter. Generalize
   its calling convention when the second representation is implemented.
 - Reuse `models/`, `data/`, `eval/`, `utils/checkpoint.py`, and the existing experiment scripts.
   Do not move unrelated files solely to make a new directory tree look uniform.
@@ -110,8 +128,10 @@ Keep state specific to a model family inside that family.
 ### Composition and validation
 
 Keep the existing precedence: packaged defaults and group selections, full-file/section YAML
-overlays, then command-line overrides. Reuse the existing normalization of legacy field names.
-Preserve `train.*`, `train.mdlm`, `model.encoder`, and data-source keys during extraction.
+overlays, then command-line overrides. Define one canonical set of fields for supported recipes.
+Remove legacy field translation, interpolation rewriting, and old scheduler/default inference;
+update packaged YAML, callers, and examples together. Rename or relocate fields when it
+clarifies ownership, without retaining aliases or duplicating values.
 
 Add named experiment recipes using the existing composition machinery. A recipe should choose
 implemented components and their defaults; a study should vary a small set of overrides.
@@ -121,13 +141,12 @@ semantics. External config-directory support can use native Hydra composition if
 
 Validation happens on the composed OmegaConf tree, before artifacts, W&B, or GPU allocations:
 
-1. Normalize legacy input and reject conflicting old/new keys.
-2. Resolve required interpolations and reject missing values.
-3. Validate the selected components' fields, ranges, and cross-component compatibility.
-4. Reject unknown scientific keys and explicitly requested settings unsupported by the selected
-   components. Preserve known inactive defaults in legacy configurations, label them inactive,
-   and reject attempts to vary them as experimental factors. Record compatibility translations.
-5. Freeze the resolved configuration used by the run. Derived runtime state belongs elsewhere.
+1. Resolve required interpolations and reject missing values.
+2. Validate the selected components' fields, ranges, and cross-component compatibility.
+3. Reject unknown, obsolete, inactive, or unsupported scientific settings. Packaged recipes
+   contain only settings relevant to their selected components; inherited inactive defaults
+   receive no exception.
+4. Freeze the resolved configuration used by the run. Derived runtime state belongs elsewhere.
 
 Use component-owned validation functions and OmegaConf's native facilities. Do not mirror the
 entire configuration in a second Pydantic/dataclass hierarchy. Structured OmegaConf schemas
@@ -141,8 +160,8 @@ name of a run as its identity.
 ### Selectors introduced by actual experiments
 
 The first head comparison adds `model.structure_head.name` with `tied_linear` and
-`codebook_distance`. Omission in a legacy MDLM configuration resolves to `tied_linear` and is
-recorded in the normalized recipe. Keep current structure input embeddings fixed in this
+`codebook_distance`. The baseline recipe explicitly selects `tied_linear`; saved configuration
+records that resolved choice. Keep current structure input embeddings fixed in this
 comparison; changing both input grounding and output geometry is a separate experiment.
 
 This illustrative YAML is a **proposed value overlay**, not a currently supported recipe:
@@ -166,9 +185,9 @@ train:
 
 Follow the same pattern when adding a second fusion, backbone, optimizer, representation, or
 sampler. Keep ownership clear: a representation adapter consumes tokenizer/decoder settings;
-a head consumes its own settings; a sampler consumes generation settings. For GCP, reuse
-`model.codebook` and `model.decoder` initially rather than duplicate their values in a new tree.
-Any later field relocation needs one explicit migration and conflict detection.
+a head consumes its own settings; a sampler consumes generation settings. For GCP, keep one
+owner for codebook and decoder settings. Their existing paths may remain if useful; moving
+them requires updating current consumers and recipes, without a legacy translation layer.
 
 Incompatible combinations fail early with a useful explanation. Examples include a prototype
 head without a compatible codebook, an LFQ bit head with arbitrary VQ indices, geometry scoring
@@ -212,9 +231,10 @@ Freeze a shared evaluation-case manifest containing canonical sample IDs, case s
 replicates; derive paired masks/crops from that manifest. Keep it independent of tokenizer,
 shard, sampler, and evaluator identities so varying an arm does not change the common random
 controls. The full evaluation identity still records the varied measurement settings.
-Training occurrence seeds additionally identify visits to a sample, preserving current replay
-semantics. For representations with a different alignment, map the residue-level protocol
-explicitly or label the comparison as a different protocol; do not claim identical token masking.
+Training occurrence seeds additionally identify visits to a sample and reproduce replay within
+the new run contract; historical occurrence-key encodings need not survive. For representations
+with a different alignment, map the residue-level protocol explicitly or label the comparison
+as a different protocol; do not claim identical token masking.
 
 ### Representation adapters and caches
 
@@ -273,17 +293,21 @@ They own task-specific metric accumulators and checkpoint state. The engine perf
 reductions, backward/accumulation, AMP/DDP coordination, optimization, scheduling, logging,
 and checkpoint transport.
 
-Preserve these invariants during extraction:
+Preserve these scientific and execution invariants in supported tasks:
 
 - MDLM uses its existing single weighted eligible-token denominator across modalities and the
   entire global accumulation window. Averaging modality or minibatch means is not equivalent.
-- Legacy CE and FAPE retain their separate token/protein normalization rules.
+- If retained for a named study, CE and FAPE use their separate token/protein normalization rules.
 - DDP scaling, partially filled windows, missing modalities, and empty supervision retain
   their existing semantics. Do not retain all forward graphs just to compute denominators.
 - Occurrence seeds and loader state reproduce the same batches/crops/corruptions on resume.
 - Schedules and checkpoint/evaluation cadences count successful optimizer updates. AMP-skipped
   updates do not advance those counters.
 - Rank failures are coordinated; no worker waits indefinitely after another rank fails.
+
+Task state contains only active metrics and stochastic state. Remove inactive checkpoint
+placeholders and historical logging/reset quirks; define consumed residues, executed positions,
+and successful updates consistently and test those definitions directly.
 
 An agreed calling convention between the concrete tasks and engine is sufficient. Avoid a
 large abstract task base class. A task that introduces new stochastic state must serialize it.
@@ -298,19 +322,20 @@ Keep three distinct operations:
 2. **Warm-start:** explicitly load compatible components, recording weights/revision, vocabulary
    mapping, loaded/skipped keys, and freeze/fine-tune policy. Reset optimizer and run state.
 3. **Exact resume:** restore model, optimizer, scheduler, scaler, task/loader/RNG state and all
-   required execution identities under the original continuation contract.
+   required execution identities under the new run's declared continuation contract.
 
 The current MDLM path skips the legacy pretrained encoder option. Replace this with an explicit
 supported adapter or an early error; never silently ignore a requested initialization.
 
-Keep AdamW and existing schedules during extraction. Add another optimizer with a real study
+Keep AdamW and useful existing schedules. Add another optimizer with a real study
 and its state validation; do not impose AdamW-specific checkpoint assumptions on all optimizers.
-Keep old checkpoint loading behavior intact. Prefer unchanged parameter names for the baseline;
-if names, checkpoint schema, or materialized configuration defaults change, provide an explicit
-versioned conversion or retain the legacy loader. Adding `structure_head.name=tied_linear`
-must not invalidate an otherwise equivalent legacy resume signature. Verify continuation from
-an actual pre-refactor v2 checkpoint. A warm-start is not an exact resume, and conversion must
-never silently weaken data/codebook/execution validation.
+Use one checkpoint format for the new research implementation. Parameter names, state layout,
+and resolved defaults may change; remove old STok loaders, signature normalization, and
+conversion paths. Mark the format explicitly and reject unsupported versions clearly.
+Acceptance covers a new-format train–save–load–sample path and exact interrupted continuation
+under matching data/codebook/execution identities. Loading pre-refactor v2 checkpoints is no
+longer an acceptance gate. Warm-start support is added only for a selected pretrained adapter;
+it must remain distinct from exact resume and must not weaken artifact validation.
 
 ## 7. Sampling and evaluation
 
@@ -442,14 +467,14 @@ Background motivating these choices:
 
 | Stage | Deliverable | Acceptance gate |
 |---|---|---|
-| 1. Preserve baseline | Named current recipe, source/artifact identity, bounded real-data reference run | Recorded losses, parameter updates, seeded sampling and continuation behavior; existing scientific limitations retained |
-| 2. Stabilize comparisons | Canonical IDs and protocol identities; primary offline generation scoring | Retokenization/resharding preserves biological cohorts and paired masks; failures and coverage are counted |
-| 3. Extract execution | Shared builder, concrete tasks, training engine; unchanged CLI wrappers | Baseline output/loss/gradient and accumulation/DDP/resume equivalence on the same environment |
-| 4. Prove composition | Both real structure heads and a qualified second representation | Components can be changed without rewriting engine/reporting; incompatible combinations fail early |
-| 5. Run controlled studies | Validated recipe expansion, seed handling, sampler sweeps, comparison reports | Reproduce a small multi-arm study from artifacts; costs and populations are comparable |
-| 6. Extend where justified | Selected geometry, recurrence, pretrained adapters or hybrid tasks | Family-specific end-to-end and benchmark requirements pass before scientific promotion |
+| Completed: baseline/extraction | Named recipe, retained source/artifact evidence, shared builder/tasks/engine/loaders; PR #15 | Historical software and bounded real-data qualification recorded in the baseline report |
+| Next: clean research contract (C0) | Supported recipes, canonical frozen config, separate runtime state, current checkpoint format; remove unused legacy surfaces | Invalid settings fail early; current save/load/sample/resume and scientific/distributed invariants pass without compatibility shims |
+| Stabilize comparisons (C1–C3) | Canonical IDs and protocol identities; durable attempts and primary offline generation scoring | Retokenization/resharding preserves biological cohorts and paired masks; failures and coverage are counted |
+| Prove composition (C5) | Both real structure heads and a qualified second representation | Components can be changed without rewriting engine/reporting; incompatible combinations fail early |
+| Run controlled studies (C4) | Validated recipe expansion, seed handling, sampler sweeps, comparison reports | Reproduce a small multi-arm study from artifacts; costs and populations are comparable |
+| Extend where justified (C6) | Selected geometry, recurrence, pretrained adapters or hybrid tasks | Family-specific end-to-end and benchmark requirements pass before scientific promotion |
 
-Stages are reviewable increments. Benchmark infrastructure can develop alongside extraction,
+Stages are reviewable increments. C1 identity/protocol design can proceed alongside C0,
 but broad model sweeps should wait for trustworthy sample identity and primary metrics.
 
 Reuse and extend meaningful existing tests, particularly accumulation/global-batch equivalence,
@@ -457,10 +482,13 @@ both-modality updates, deterministic resume, coordinated rank failure, condition
 and real structure export/decode. Add one bounded real-data train–save–load–sample–decode path
 for each supported family. A successful forward pass or finite coordinates alone is insufficient.
 
-Document-only work needs link/config-example checks. Mechanical extraction needs numerical
-equivalence checks, not thousands of new tests mirroring functions. Scientific changes need
-controlled experiments after software checks pass. Preserve legacy import/CLI wrappers while
-callers migrate; remove them only through a documented compatibility decision.
+Document-only work needs link/config-example checks. Mechanical moves within the new code
+still need appropriate numerical checks. Keep meaningful algorithm, accumulation/DDP, failure,
+and current-format resume tests; remove tests whose only purpose is old names, formats, or
+accidental behavior. The frozen extraction reference is historical evidence, not a permanent
+cross-version gate. Scientific changes need controlled experiments after software checks pass.
+The clean-break policy in section 1 is the documented decision to remove legacy interfaces;
+update repository callers, tests, and usage documentation in the same change.
 
 ## 11. Defaults, deferred work, and remaining inputs
 
@@ -477,7 +505,6 @@ configuration branches.
 No further scientific preference is required to write this design. Before implementation or
 experiments reach their relevant acceptance gates, supply:
 
-- the bounded real-data fixture and accessible baseline artifacts for migration checks;
 - operational train/validation/test exports, lineage/splits, and benchmark populations;
 - the initial folding evaluator and exact metric definitions/thresholds;
 - intended accelerator/topology, resource limits, and explicit experiment budgets; and
@@ -485,3 +512,5 @@ experiments reach their relevant acceptance gates, supply:
 
 These are experiment inputs, not reasons to replace existing infrastructure or invent defaults
 that would make an unqualified benchmark appear complete.
+The bounded real-data extraction fixture and historical artifacts have already been supplied;
+their recorded qualification and spent budget do not authorize additional training runs.
