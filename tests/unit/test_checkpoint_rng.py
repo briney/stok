@@ -468,3 +468,81 @@ def test_format4_reader_binds_saved_representation_coverage(
     torch.save(payload, checkpoint)
     with pytest.raises(ValueError):
         ck.read_training_checkpoint(checkpoint)
+
+
+@pytest.mark.parametrize("damage", ["unsupported", "missing", "bool", "nonmapping"])
+def test_format4_reader_and_sampler_reject_saved_case_wrapper_offline(
+    tmp_path, canonical_checkpoint, monkeypatch, damage
+):
+    import builtins
+    import io
+    import os
+    from pathlib import Path
+    from click.testing import CliRunner
+    from stok.cli.cli import cli
+
+    payload = copy.deepcopy(canonical_checkpoint)
+    identity = payload["runtime"]["mdlm_identity"]
+    shared = identity["shared_cases"]
+    blocked = [Path(source["path"]) for source in identity["sources"].values()]
+    blocked += [Path(ref["directory"]) for ref in shared["canonical_inventories"]]
+    blocked += [
+        Path(payload["config"]["train"]["eval"]["mdlm"]["case_manifest"]),
+        Path(payload["config"]["data"]["split_manifest"]),
+        Path(payload["config"]["model"]["codebook"]["path"]),
+    ]
+    assert all(not path.exists() for path in blocked)
+    original_open = io.open
+
+    def guarded_open(file, *args, **kwargs):
+        if isinstance(file, (str, bytes, os.PathLike)):
+            path = Path(os.fsdecode(file)).resolve()
+            if any(path == root or path.is_relative_to(root) for root in blocked):
+                raise AssertionError("checkpoint reader reopened an original artifact")
+        return original_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", guarded_open)
+    monkeypatch.setattr(io, "open", guarded_open)
+    monkeypatch.setattr(
+        torch.cuda,
+        "_lazy_init",
+        lambda: pytest.fail("saved metadata validation initialized CUDA"),
+    )
+    for path in blocked:
+        with pytest.raises(AssertionError, match="original artifact"):
+            path.open("rb")
+    checkpoint = tmp_path / "checkpoint.pt"
+    torch.save(payload, checkpoint)
+    assert ck.read_training_checkpoint(checkpoint)["global_step"] == 1
+    if damage == "unsupported":
+        shared["schema_version"] = 99
+    elif damage == "missing":
+        del shared["schema_version"]
+    elif damage == "bool":
+        shared["schema_version"] = True
+    else:
+        identity["shared_cases"] = []
+    torch.save(payload, checkpoint)
+    with pytest.raises(ValueError, match="case artifact"):
+        ck.read_training_checkpoint(checkpoint)
+    inputs, output = tmp_path / "input.jsonl", tmp_path / "output.jsonl"
+    inputs.write_text('{"sequence_id":"request","length":3}\n')
+    result = CliRunner().invoke(
+        cli,
+        [
+            "sample",
+            "--checkpoint",
+            str(checkpoint),
+            "--input",
+            str(inputs),
+            "--output",
+            str(output),
+            "--mode",
+            "joint",
+            "--device",
+            "cuda",
+        ],
+    )
+    assert result.exit_code != 0 and "case artifact" in result.output
+    assert not output.exists()
+    assert "CUDA" not in result.output

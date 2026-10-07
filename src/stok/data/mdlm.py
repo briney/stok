@@ -536,6 +536,12 @@ def validate_mdlm_identity(identity: Mapping[str, Any]) -> None:
             raise ValueError("Saved source coverage membership mismatch")
         shared = identity["shared_cases"]
         if shared is not None:
+            if (
+                not isinstance(shared, Mapping)
+                or type(shared.get("schema_version")) is not int
+                or shared["schema_version"] != 1
+            ):
+                raise ValueError("Unsupported saved case artifact wrapper")
             request, cases = _request(shared["request"]), shared["cases"]
             if (
                 shared["population_sha256"] != digest

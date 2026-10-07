@@ -201,6 +201,13 @@ Mask table 0/1 denotes boolean false/true; serialized masks must be booleans. Th
 
 **Files:** modify `src/stok/data/mdlm.py`, `src/stok/data/loaders.py`, `src/stok/training/tasks.py`, `src/stok/eval/mdlm.py`, `src/stok/eval/cases.py`, `src/stok/training/engine.py`, `src/stok/utils/checkpoint.py`, `src/stok/cli/sample.py`, `src/stok/config.py`, `src/stok/configs/train/base.yaml`, `tests/utils/synthetic.py`, `tests/utils/distributed_probe.py`, `tests/unit/test_mdlm_data.py`, `tests/unit/test_training_config.py`, `tests/unit/test_checkpoint_rng.py`, `tests/integration/test_mdlm_evaluation.py`, `tests/integration/test_mdlm_resume.py`, `tests/integration/test_mdlm_training.py`, `tests/integration/test_mdlm_cli.py`, `tests/integration/test_mdlm_device.py`, `tests/integration/test_run_training_programmatic.py`, `README.md`, `tests/README.md`, approved design/parent plan status. Create `docs/experiments/refactor/c1.md`. Update additional direct current-fixture consumers identified by search; do not retire substantive checks just because their payload changed.
 
+**Direct-consumer checklist (M3):** `tests/integration/test_mdlm_device.py` and
+`tests/integration/test_run_training_programmatic.py` need no direct edits: they
+already use the updated shared validation/loader APIs and amended native fixtures.
+Programmatic consumers were covered by the 271-test focused run and frozen full
+suite; the two real-device gates remain explicitly skipped/unqualified. Retain
+those assertions without meaningless file-list edits.
+
 **Interfaces — consumes:** Task 1 schema-2 records and inventory/reference; Task 2 audit, validated case manifest, projection and identity helpers.
 
 **Interfaces — produces:**
