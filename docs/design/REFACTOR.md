@@ -1,8 +1,8 @@
 # STok research refactor
 
 **Status:** Baseline/extraction merged in PR #15 at `404a2c4`. Forward plan revised for the
-user's clean-break research policy on October 6, 2026. C0 implementation and task reviews
-passed; final branch review is pending. [C0 qualification](../experiments/refactor/c0.md) records
+user's clean-break research policy on October 6, 2026. C0 implementation, task reviews
+and final correction re-review passed; C0 is complete on the implementation branch. [C0 qualification](../experiments/refactor/c0.md) records
 the source boundaries and limits. C1–C6 comparison work remains planned.
 
 **Date:** 2026-10-06
@@ -470,7 +470,7 @@ Background motivating these choices:
 | Stage | Deliverable | Acceptance gate |
 |---|---|---|
 | Completed: baseline/extraction | Named recipe, retained source/artifact evidence, shared builder/tasks/engine/loaders; PR #15 | Historical software and bounded real-data qualification recorded in the baseline report |
-| Implemented; branch review pending: clean research contract (C0) | Supported recipes, canonical frozen config, separate runtime state, current checkpoint format; remove unused legacy surfaces | Invalid settings fail early; current save/load/sample/resume and scientific/distributed invariants pass without compatibility shims |
+| Complete: clean research contract (C0) | Supported recipes, canonical frozen config, separate runtime state, current checkpoint format; remove unused legacy surfaces | Invalid settings fail early; current save/load/sample/resume and scientific/distributed invariants pass without compatibility shims |
 | Stabilize comparisons (C1–C3) | Canonical IDs and protocol identities; durable attempts and primary offline generation scoring | Retokenization/resharding preserves biological cohorts and paired masks; failures and coverage are counted |
 | Prove composition (C5) | Both real structure heads and a qualified second representation | Components can be changed without rewriting engine/reporting; incompatible combinations fail early |
 | Run controlled studies (C4) | Validated recipe expansion, seed handling, sampler sweeps, comparison reports | Reproduce a small multi-arm study from artifacts; costs and populations are comparable |
