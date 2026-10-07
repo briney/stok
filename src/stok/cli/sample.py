@@ -71,7 +71,7 @@ def sample_cmd(
     decoder_path,
     decoder_preset,
 ):
-    """Generate aligned sequence/structure tokens from a version-3 MDLM checkpoint."""
+    """Generate aligned sequence/structure tokens from a version-4 MDLM checkpoint."""
     if output.exists():
         raise click.ClickException(f"Refusing to overwrite output: {output}")
     try:
@@ -152,6 +152,7 @@ def sample_cmd(
                 [
                     {
                         "dataset": "cli",
+                        "canonical_id": json_sha256({"sampling_input": row}),
                         "sequence_id": sequence_id,
                         "sequence": sequence if sequence is not None else "A" * length,
                         "structure_tokens": structure

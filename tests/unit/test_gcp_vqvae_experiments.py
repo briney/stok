@@ -61,6 +61,8 @@ def test_experiment_matrix_accounting_and_original_targets(tmp_path, monkeypatch
             json.dumps(
                 {
                     "sequence_id": name,
+                    "source_namespace": "test-gcp-experiment",
+                    "source_accession": name,
                     "path": str(FIXTURES / "inputs" / f"{name}.pdb"),
                     "chain_id": "A",
                     "sequence": sequence if name == "incomplete_pdb" else None,

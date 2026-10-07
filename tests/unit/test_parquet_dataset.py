@@ -37,6 +37,7 @@ def test_null_tokens_preserve_residue_alignment(tmp_path, sharded, token_type):
     assert item["sequence"] == "ACDE"
     assert item["structure_tokens"].tolist() == [4, -1, 7, -1]
     item["dataset"] = "alignment-fixture"
+    item["canonical_id"] = "a" * 64
     batch = prepare_mdlm_batch(
         [item], Tokenizer(), max_len=8, codebook_size=8, crop="center", seeds=[0]
     )
@@ -312,3 +313,35 @@ def test_standalone_alias_shards_remain_readable(tmp_path, suffix):
     pq.write_table(pa.Table.from_pylist(make_mdlm_rows()), path)
     assert len(TokenizedDataset(str(path), max_length=None)) == 2
     assert len(list(IterableTokenizedDataset(str(tmp_path), max_length=None))) == 2
+
+
+def test_schema_two_rows_retain_canonical_identity(tmp_path):
+    from tests.utils.synthetic import make_mdlm_rows, write_dataset
+
+    originals = make_mdlm_rows()
+    directory = write_dataset(tmp_path / "current", originals)
+    item = TokenizedDataset(str(directory / "part-000000.parquet"), max_length=None)[0]
+    for key in (
+        "canonical_id",
+        "canonical_content_sha256",
+        "residue_map_sha256",
+        "canonical_identity",
+        "parent_ids",
+    ):
+        assert item[key] == originals[0][key]
+
+
+def test_schema_one_representation_provenance_is_rejected(tmp_path):
+    import json
+    from tests.utils.synthetic import make_mdlm_rows, write_dataset
+
+    directory = write_dataset(tmp_path / "old", make_mdlm_rows())
+    shard = directory / "part-000000.parquet"
+    table = pq.read_table(shard)
+    metadata = dict(table.schema.metadata)
+    provenance = json.loads(metadata[b"stok.provenance"])
+    provenance["schema_version"] = 1
+    metadata[b"stok.provenance"] = json.dumps(provenance).encode()
+    pq.write_table(table.replace_schema_metadata(metadata), shard)
+    with pytest.raises(ValueError, match="provenance"):
+        TokenizedDataset(str(shard), max_length=None)

@@ -508,7 +508,6 @@ def tokenize_structures(
 def iter_structure_manifest(path: str | Path) -> Iterator[dict[str, Any]]:
     """Validate JSONL rows; resolve paths relative to the manifest, never the cwd."""
     path = Path(path).resolve()
-    seen = set()
     fields = {
         "sequence_id",
         "path",
@@ -516,6 +515,9 @@ def iter_structure_manifest(path: str | Path) -> Iterator[dict[str, Any]]:
         "chain_namespace",
         "model_index",
         "sequence",
+        "source_namespace",
+        "source_accession",
+        "parent_ids",
     }
     with path.open() as handle:
         for line_number, line in enumerate(handle, start=1):
@@ -528,14 +530,31 @@ def iter_structure_manifest(path: str | Path) -> Iterator[dict[str, Any]]:
                 raise ValueError(
                     f"{context}: expected an object with known manifest fields"
                 )
-            for field in ("sequence_id", "path"):
-                if not isinstance(row.get(field), str) or not row[field].strip():
+            for field in (
+                "sequence_id",
+                "path",
+                "source_namespace",
+                "source_accession",
+            ):
+                if (
+                    not isinstance(row.get(field), str)
+                    or not row[field].strip()
+                    or row[field] != row[field].strip()
+                ):
                     raise ValueError(f"{context}: {field} must be a nonempty string")
-            if row["sequence_id"] in seen:
-                raise ValueError(
-                    f"{context}: duplicate sequence_id {row['sequence_id']}"
+            parents = row.setdefault("parent_ids", [])
+            if (
+                not isinstance(parents, list)
+                or any(
+                    not isinstance(parent, str)
+                    or len(parent) != 64
+                    or any(c not in "0123456789abcdef" for c in parent)
+                    for parent in parents
                 )
-            seen.add(row["sequence_id"])
+                or len(parents) != len(set(parents))
+            ):
+                raise ValueError(f"{context}: invalid parent_ids")
+            row["parent_ids"] = sorted(parents)
             row.setdefault("chain_namespace", "author")
             row.setdefault("model_index", 0)
             if not isinstance(row["chain_namespace"], str) or row[

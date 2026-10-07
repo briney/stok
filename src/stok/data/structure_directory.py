@@ -1,9 +1,7 @@
-"""Create polymer-aligned training datasets directly from structure directories."""
+"""Discover structure selections; callers supply explicit source identities."""
 
 from collections.abc import Iterator
-import json
 from pathlib import Path
-import tempfile
 from typing import Any
 from urllib.parse import quote
 
@@ -11,8 +9,6 @@ from Bio.PDB.MMCIF2Dict import MMCIF2Dict
 from Bio.PDB.Polypeptide import is_aa
 
 from .structure_dataset import STRUCTURE_EXTENSIONS
-from .structure_export import write_structure_dataset
-from ..models.gcp_vqvae import GCPVQTokenizer
 from ..utils.structure_parser import _cif_rows, _read_structure
 
 
@@ -77,39 +73,3 @@ def iter_structure_directory(
             }
     if not count:
         raise ValueError(f"No protein chains found in directory: {directory}")
-
-
-def write_structure_folder_dataset(
-    directory: str | Path,
-    output_dir: str | Path,
-    *,
-    tokenizer: GCPVQTokenizer,
-    recursive: bool = False,
-    batch_size: int = 1,
-    rows_per_shard: int = 1000,
-    include_coordinates: bool = False,
-) -> dict[str, Any]:
-    """Discover chains and invoke the internal encoder and existing Parquet writer.
-
-    Uses the fixed training-native-reference policy. Missing deposited sequence
-    metadata is rejected; a manifest may supply a construct sequence instead.
-    Original sequence slots and null structure labels are preserved; no cropping,
-    chain concatenation or deduplication is performed. The output's inputs.jsonl
-    retains the discovered chains and source paths for replay.
-    """
-    destination = Path(output_dir)
-    if destination.exists() or destination.is_symlink():
-        raise FileExistsError(destination)
-    with tempfile.TemporaryDirectory(prefix="stok-structure-inputs-") as temporary:
-        manifest = Path(temporary) / "inputs.jsonl"
-        with manifest.open("w") as handle:
-            for row in iter_structure_directory(directory, recursive=recursive):
-                handle.write(json.dumps(row, allow_nan=False) + "\n")
-        return write_structure_dataset(
-            manifest,
-            output_dir,
-            tokenizer=tokenizer,
-            batch_size=batch_size,
-            rows_per_shard=rows_per_shard,
-            include_coordinates=include_coordinates,
-        )

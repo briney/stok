@@ -2,10 +2,7 @@
 
 from collections import Counter
 from collections.abc import Mapping
-import ctypes
-from dataclasses import replace
 import json
-import os
 import resource
 from pathlib import Path
 import tempfile
@@ -16,10 +13,15 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
 
+from .canonical import (
+    iter_canonical_records,
+    record_to_polymer,
+    validate_canonical_dataset,
+    publish_directory,
+)
 from .dataset import TokenizedDataset, _structure_provenance, parquet_shards
 from .structure_encoding import (
     StructureExclusion,
-    iter_structure_manifest,
     prepare_structure,
     tokenize_structures,
 )
@@ -30,7 +32,6 @@ from ..utils.pretrained import (
     json_sha256,
     state_sha256,
 )
-from ..utils.structure_parser import StructureMappingError, parse_polymer_structure
 
 
 def structure_export_schema(
@@ -76,7 +77,34 @@ def structure_export_schema(
             )
         ]
     )
+    identity = pa.struct(
+        [
+            (
+                name,
+                pa.int64()
+                if name
+                in {"canonical_identity_version", "model_index", "model_serial_id"}
+                else pa.string(),
+            )
+            for name in (
+                "canonical_identity_version",
+                "record_kind",
+                "source_namespace",
+                "source_accession",
+                "source_revision_sha256",
+                "model_index",
+                "model_serial_id",
+                "chain_namespace",
+                "chain_id",
+            )
+        ]
+    )
     fields = [
+        pa.field("canonical_id", pa.string(), nullable=False),
+        pa.field("canonical_content_sha256", pa.string(), nullable=False),
+        pa.field("residue_map_sha256", pa.string(), nullable=False),
+        pa.field("canonical_identity", identity, nullable=False),
+        pa.field("parent_ids", pa.list_(pa.string()), nullable=False),
         pa.field("sequence_id", pa.string(), nullable=False),
         pa.field("sequence", pa.string(), nullable=False),
         pa.field("structure_tokens", pa.list_(pa.int64()), nullable=False),
@@ -112,26 +140,21 @@ def _tokenizer_identity(tokenizer):
     }
 
 
-def _publish_directory(staging: Path, destination: Path) -> None:
-    """Publish without replacing even an empty directory created concurrently."""
-    if os.name == "nt":
-        os.rename(staging, destination)  # Windows rename refuses an existing target.
-        return
-    libc = ctypes.CDLL(None, use_errno=True)
-    rename = getattr(libc, "renameat2", None)
-    if rename is None:
-        raise RuntimeError("Atomic no-replace directory publication requires renameat2")
-    rename.argtypes = [
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_uint,
-    ]
-    rename.restype = ctypes.c_int
-    if rename(-100, os.fsencode(staging), -100, os.fsencode(destination), 1):
-        error = ctypes.get_errno()
-        raise OSError(error, os.strerror(error), str(destination))
+def representation_sha256(provenance: Mapping[str, Any]) -> str:
+    """Logical representation identity excludes paths, layout and runtime audit."""
+    return json_sha256(
+        {
+            "schema_version": 2,
+            "canonical_population_sha256": provenance["canonical_population_sha256"],
+            "tokenizer": provenance["tokenizer"],
+            "policy": provenance["policy"],
+            "numerical": {
+                key: value
+                for key, value in provenance["execution"].items()
+                if key not in {"stok_revision", "source_files"}
+            },
+        }
+    )
 
 
 def _validate_shard(path, expected, provenance):
@@ -144,6 +167,14 @@ def _validate_shard(path, expected, provenance):
     metadata = parquet.schema_arrow.metadata or {}
     if metadata.get(b"stok.provenance") != provenance:
         raise ValueError(f"Incompatible shard provenance: {path}")
+    if not parquet.schema_arrow.equals(
+        structure_export_schema(
+            include_coordinates="coordinates" in parquet.schema_arrow.names,
+            metadata=metadata,
+        ),
+        check_metadata=False,
+    ):
+        raise ValueError(f"Invalid schema-2 representation fields: {path}")
     _structure_provenance(path, parquet.schema_arrow)
     reader = TokenizedDataset(str(path), max_length=1280)
     for i in range(len(reader)):
@@ -177,7 +208,8 @@ def validate_structure_dataset(directory: str | Path) -> dict[str, Any]:
     if (
         not isinstance(summary, dict)
         or summary.get("status") != "complete"
-        or summary.get("schema_version") != 1
+        or type(summary.get("schema_version")) is not int
+        or summary.get("schema_version") != 2
         or not summary.get("shards")
     ):
         raise ValueError("Dataset has no valid completion manifest")
@@ -198,20 +230,136 @@ def validate_structure_dataset(directory: str | Path) -> dict[str, Any]:
     for shard in summary["shards"]:
         _validate_shard(directory / shard["path"], shard, encoded)
     for name in ("row_count", "residue_count", "null_count"):
-        if summary[name] != sum(shard[name] for shard in summary["shards"]):
+        if (
+            type(summary.get(name)) is not int
+            or any(
+                type(shard.get(name)) is not int or shard[name] < 0
+                for shard in summary["shards"]
+            )
+            or summary[name] != sum(shard[name] for shard in summary["shards"])
+        ):
             raise ValueError("Dataset counts disagree")
     if file_sha256(directory / "rejections.jsonl") != summary["rejections_sha256"]:
         raise ValueError("Corrupt rejection report")
-    if "inputs_sha256" in summary and (
-        file_sha256(directory / "inputs.jsonl") != summary["inputs_sha256"]
+    canonical_dir = Path(summary["canonical_directory"])
+    if not canonical_dir.is_absolute():
+        canonical_dir = directory / canonical_dir
+    canonical_summary = validate_canonical_dataset(canonical_dir)
+    if (
+        file_sha256(canonical_dir / "manifest.json")
+        != summary["canonical_manifest_sha256"]
+        or canonical_summary["population_sha256"]
+        != summary["canonical_population_sha256"]
+        or provenance["canonical_population_sha256"]
+        != summary["canonical_population_sha256"]
     ):
-        raise ValueError("Corrupt input inventory")
+        raise ValueError("Canonical inventory reference disagrees")
+    if representation_sha256(provenance) != summary["representation_sha256"]:
+        raise ValueError("Representation digest mismatch")
+    # ponytail: compact inventory metadata stays in RAM; index JSONL for larger corpora.
+    records: dict[str, dict[str, Any]] = {
+        record["canonical_id"]: {
+            **{
+                key: record[key]
+                for key in (
+                    "identity",
+                    "sequence",
+                    "content_sha256",
+                    "residue_map_sha256",
+                    "parent_ids",
+                    "provenance",
+                )
+            },
+            "coordinates_sha256": json_sha256(
+                [residue[:3] for residue in record["coordinates"]]
+            ),
+            "token_mask_sha256": json_sha256(
+                [all(mask) for mask in record["atom_mask"]]
+            ),
+        }
+        for record in iter_canonical_records(canonical_dir)
+    }
+    admitted = set()
+    for shard in summary["shards"]:
+        for row in pq.read_table(directory / shard["path"]).to_pylist():
+            canonical_id = row["canonical_id"]
+            if canonical_id not in records or canonical_id in admitted:
+                raise ValueError("Unknown or duplicate admitted canonical ID")
+            admitted.add(canonical_id)
+            if (
+                provenance["policy"].get("allow_observed_sequence") is False
+                and row["source"]["sequence_source"] == "observed"
+            ):
+                raise ValueError(
+                    "Observed sequence source is forbidden by representation policy"
+                )
+            record = records[canonical_id]
+            expected = {
+                "canonical_content_sha256": record["content_sha256"],
+                "residue_map_sha256": record["residue_map_sha256"],
+                "canonical_identity": record["identity"],
+                "parent_ids": record["parent_ids"],
+                "sequence": record["sequence"],
+                "source": record["provenance"]["source"],
+                "sequence_id": record["provenance"]["sequence_id"],
+            }
+            if any(row[key] != value for key, value in expected.items()):
+                raise ValueError("Export row disagrees with canonical originals")
+            if json_sha256(row["residue_map"]) != record["residue_map_sha256"]:
+                raise ValueError(
+                    "Export residue map disagrees with canonical originals"
+                )
+            if (
+                "coordinates" in row
+                and json_sha256(row["coordinates"]) != record["coordinates_sha256"]
+            ):
+                raise ValueError("Export coordinates disagree with canonical originals")
+            if (
+                json_sha256([value is not None for value in row["structure_tokens"]])
+                != record["token_mask_sha256"]
+            ):
+                raise ValueError(
+                    "Export null tokens disagree with original observations"
+                )
+    rejections = [
+        json.loads(line)
+        for line in (directory / "rejections.jsonl").read_text().splitlines()
+    ]
+    rejected = {row.get("canonical_id") for row in rejections}
+    if (
+        len(rejected) != len(rejections)
+        or any(
+            not isinstance(row.get("reason"), str) or not row["reason"]
+            for row in rejections
+        )
+        or admitted & rejected
+        or admitted | rejected != records.keys()
+    ):
+        raise ValueError("Representation admission/rejection correspondence disagrees")
+    for key in (
+        "requested_input_count",
+        "canonical_record_count",
+        "parser_rejection_count",
+    ):
+        if type(summary.get(key)) is not int or summary[key] != canonical_summary[key]:
+            raise ValueError("Canonical request counts disagree")
+    if (
+        any(
+            type(summary.get(key)) is not int
+            for key in ("representation_rejection_count", "rejection_count")
+        )
+        or summary["row_count"] != len(admitted)
+        or summary["representation_rejection_count"] != len(rejections)
+        or summary["rejection_count"] != len(rejections)
+        or summary["exclusions"] != dict(Counter(row["reason"] for row in rejections))
+    ):
+        raise ValueError("Representation counts disagree")
     return summary
 
 
 @torch.inference_mode()
 def write_structure_dataset(
-    manifest: str | Path,
+    canonical_dir: str | Path,
     output_dir: str | Path,
     *,
     tokenizer: GCPVQTokenizer,
@@ -225,6 +373,10 @@ def write_structure_dataset(
             raise ValueError(f"{name} must be a positive integer")
     if type(include_coordinates) is not bool:
         raise ValueError("include_coordinates must be boolean")
+    canonical_dir = Path(canonical_dir).resolve()
+    canonical_summary = validate_canonical_dataset(canonical_dir)
+    if not canonical_summary["canonical_record_count"]:
+        raise ValueError("Cannot export an empty canonical population")
     device = next(tokenizer.parameters()).device
     policy: dict[str, Any] = {
         "schema_version": 1,
@@ -257,15 +409,14 @@ def write_structure_dataset(
     destination = Path(output_dir).absolute()
     if destination.exists() or destination.is_symlink():
         raise FileExistsError(destination)
-    manifest = Path(manifest).resolve()
-    manifest_hash = file_sha256(manifest)
     environment = inference_metadata(device)
     identity = _tokenizer_identity(tokenizer)
     provenance = {
-        "schema_version": 1,
+        "schema_version": 2,
         "tokenizer": identity,
         "policy": policy,
         "execution": environment,
+        "canonical_population_sha256": canonical_summary["population_sha256"],
     }
     metadata = {
         b"stok.provenance": json.dumps(
@@ -282,12 +433,14 @@ def write_structure_dataset(
         tempfile.mkdtemp(prefix=f".{destination.name}.staging-", dir=destination.parent)
     )
     (staging / "INCOMPLETE.json").write_text(
-        json.dumps({"destination": str(destination), "input_manifest": str(manifest)})
+        json.dumps(
+            {"destination": str(destination), "canonical_directory": str(canonical_dir)}
+        )
         + "\n"
     )
     rows, pending, shards = [], [], []
     exclusions = Counter()
-    input_count = 0
+    pending_records = []
     start = time.perf_counter()
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
@@ -327,7 +480,7 @@ def write_structure_dataset(
         )
         if len(ids) != len(pending):
             raise RuntimeError("Tokenizer omitted input chains")
-        for structure, indices in zip(pending, ids):
+        for structure, record, indices in zip(pending, pending_records, ids):
             length = len(structure.sequence)
             if (
                 indices.shape != (length,)
@@ -342,6 +495,11 @@ def write_structure_dataset(
                     f"{structure.sequence_id}: invalid model token IDs or availability"
                 )
             row = {
+                "canonical_id": record["canonical_id"],
+                "canonical_content_sha256": record["content_sha256"],
+                "residue_map_sha256": record["residue_map_sha256"],
+                "canonical_identity": record["identity"],
+                "parent_ids": record["parent_ids"],
                 "sequence_id": structure.sequence_id,
                 "sequence": structure.sequence,
                 "structure_tokens": [
@@ -351,35 +509,22 @@ def write_structure_dataset(
                 "source": dict(structure.source),
             }
             if include_coordinates:
-                row["coordinates"] = structure.coordinates[:, :3].tolist()
+                row["coordinates"] = [residue[:3] for residue in record["coordinates"]]
             rows.append(row)
             if len(rows) == rows_per_shard:
                 flush_shard()
         pending.clear()
+        pending_records.clear()
 
     try:
-        with (
-            (staging / "rejections.jsonl").open("w") as rejected,
-            (staging / "inputs.jsonl").open("w") as inputs,
-        ):
-            for entry in iter_structure_manifest(manifest):
-                input_count += 1
-                inputs.write(json.dumps(entry, allow_nan=False) + "\n")
+        with (staging / "rejections.jsonl").open("w") as rejected:
+            for record in iter_canonical_records(canonical_dir):
+                structure = record_to_polymer(record)
                 try:
-                    before = file_sha256(entry["path"])
-                    structure = replace(
-                        parse_polymer_structure(
-                            **{
-                                key: value
-                                for key, value in entry.items()
-                                if key != "sequence_id"
-                            },
-                            allow_observed_sequence=policy["allow_observed_sequence"],
-                        ),
-                        sequence_id=entry["sequence_id"],
-                    )
-                    if before != structure.source["sha256"]:
-                        raise RuntimeError("Input structure changed during parsing")
+                    if structure.source["sequence_source"] == "observed":
+                        raise StructureExclusion(
+                            "sequence_metadata_missing", structure.sequence_id
+                        )
                     prepare_structure(
                         structure,
                         sequence_mode=policy["sequence_mode"],
@@ -389,37 +534,49 @@ def write_structure_dataset(
                         max_missing_ratio=None,
                         max_missing_block=None,
                     )
-                except (StructureMappingError, StructureExclusion) as error:
+                except StructureExclusion as error:
                     exclusions[error.reason] += 1
                     rejected.write(
                         json.dumps(
-                            {**entry, "reason": error.reason, "detail": str(error)},
+                            {
+                                "canonical_id": record["canonical_id"],
+                                "reason": error.reason,
+                                "detail": str(error),
+                            },
                             allow_nan=False,
                         )
                         + "\n"
                     )
                     continue
                 pending.append(structure)
+                pending_records.append(record)
                 if len(pending) == batch_size:
                     flush_batch()
             flush_batch()
             flush_shard()
         if not shards:
             raise ValueError("All input structures were rejected; no dataset produced")
-        if file_sha256(manifest) != manifest_hash or identity != _tokenizer_identity(
-            tokenizer
-        ):
-            raise RuntimeError("Manifest or tokenizer state changed during generation")
+        if validate_canonical_dataset(
+            canonical_dir
+        ) != canonical_summary or identity != _tokenizer_identity(tokenizer):
+            raise RuntimeError(
+                "Canonical inventory or tokenizer state changed during generation"
+            )
         summary = {
-            "schema_version": 1,
+            "schema_version": 2,
             "status": "complete",
             "provenance": provenance,
             "tokenizer_sha256": json_sha256(identity),
             "policy_sha256": json_sha256(policy),
-            "input_manifest_sha256": manifest_hash,
-            "inputs_sha256": file_sha256(staging / "inputs.jsonl"),
-            "input_count": input_count,
-            "row_order": "accepted_input_manifest_order",
+            "canonical_directory": str(canonical_dir),
+            "canonical_manifest_sha256": file_sha256(canonical_dir / "manifest.json"),
+            "canonical_population_sha256": canonical_summary["population_sha256"],
+            "requested_input_count": canonical_summary["requested_input_count"],
+            "canonical_record_count": canonical_summary["canonical_record_count"],
+            "parser_rejection_count": canonical_summary["parser_rejection_count"],
+            "representation_rejection_count": sum(exclusions.values()),
+            "representation_sha256": representation_sha256(provenance),
+            "row_order": "accepted_canonical_record_order",
             "shards": shards,
             **{
                 name: sum(shard[name] for shard in shards)
@@ -444,7 +601,7 @@ def write_structure_dataset(
         )
         validate_structure_dataset(staging)
         (staging / "INCOMPLETE.json").unlink()
-        _publish_directory(staging, destination)
+        publish_directory(staging, destination)
         return summary
     except BaseException as error:
         for partial in staging.glob("*.partial"):

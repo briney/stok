@@ -178,9 +178,13 @@ def test_obsolete_inactive_and_unknown_keys_are_rejected(tmp_path, key, value):
     OmegaConf.update(overlay, key, value, force_add=True)
     path = tmp_path / "invalid.yaml"
     OmegaConf.save(overlay, path)
-    with pytest.raises(ValueError, match=key):
+    with pytest.raises(
+        ValueError, match="families" if key.endswith("families") else key
+    ):
         load_training_config(base_config=path)
-    with pytest.raises(ValueError, match=key):
+    with pytest.raises(
+        ValueError, match="families" if key.endswith("families") else key
+    ):
         load_training_config([f"++{key}={str(value).lower()}"])
 
 
@@ -285,7 +289,7 @@ def test_custom_yaml_requires_an_overlay_mapping(tmp_path, monkeypatch, contents
         ("train.mdlm.span_mean", 8),
         ("train.mdlm.noise.power", 2),
         ("train.eval.mdlm.generation.schedule.power", 2),
-        ("train.eval.mdlm.cases.local.span_mean", 8),
+        ("train.eval.mdlm.families", 8),
     ],
 )
 def test_inactive_component_parameters_fail_before_execution(
@@ -296,21 +300,15 @@ def test_inactive_component_parameters_fail_before_execution(
 
     cfg = load_training_config([f"train.output_dir={tmp_path / 'run'}"])
     OmegaConf.set_struct(cfg, False)
-    if ".cases." in key:
-        cfg.train.eval.mdlm.cases = {
-            "local": {
-                "regime": "joint_independent",
-                "probability": 0.5,
-                "placement": "token",
-            }
-        }
     OmegaConf.update(cfg, key, value, force_add=True)
     monkeypatch.setattr(
         engine,
         "_maybe_get_accelerator",
         lambda *a, **k: pytest.fail("inactive config reached device initialization"),
     )
-    with pytest.raises(ValueError, match=key):
+    with pytest.raises(
+        ValueError, match="families" if key.endswith("families") else key
+    ):
         engine.run_training(cfg)
     assert not (tmp_path / "run").exists()
 
@@ -541,6 +539,10 @@ def test_decoded_eval_coordinate_precedence_is_immutable_and_early(
         cfg.data.eval.heldout.load_coords = source_setting
     cfg.train.eval.mdlm.generation.enabled = True
     cfg.train.eval.mdlm.generation.decode = True
+    from tests.integration.test_mdlm_evaluation import config, rows
+
+    case_cfg, _ = config(rows(1), generation=True)
+    cfg.train.eval.mdlm.case_manifest = case_cfg.train.eval.mdlm.case_manifest
     before = OmegaConf.to_yaml(cfg, resolve=False)
     OmegaConf.set_readonly(cfg, True)
 

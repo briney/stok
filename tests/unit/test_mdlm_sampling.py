@@ -47,6 +47,7 @@ def fixture(sequence="A", labels=None, count=1):
         [
             {
                 "dataset": "fixture",
+                "canonical_id": "a" * 64,
                 "sequence_id": str(i),
                 "sequence": sequence,
                 "structure_tokens": labels or [1] * len(sequence),
@@ -419,6 +420,7 @@ def test_tokenizer_mask_and_canonical_ids_are_authoritative(tmp_path):
         [
             {
                 "dataset": "fixture",
+                "canonical_id": "a" * 64,
                 "sequence_id": "one",
                 "sequence": "AC",
                 "structure_tokens": [0, None],
@@ -455,6 +457,7 @@ def test_rejects_observable_boundary_ids_in_clean_output_support(
         [
             {
                 "dataset": "fixture",
+                "canonical_id": "a" * 64,
                 "sequence_id": "one",
                 "sequence": "AC",
                 "structure_tokens": [0, 1],
