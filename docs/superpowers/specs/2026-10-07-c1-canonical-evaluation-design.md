@@ -1,6 +1,6 @@
 # C1: canonical data and frozen evaluation cases
 
-**Status:** Design and implementation approved October 7, 2026; worker implementation/checks finished, review-gated completion pending independent task/final branch review.
+**Status:** Design and implementation approved October 7, 2026; implementation, qualification and independent task/final reviews complete; consolidated final correction approved at `8167a0b`. Qualification limits and separate source boundaries remain explicit.
 **Evidence:** [C1 implementation and qualification record](../../experiments/refactor/c1.md).
 **Base:** `main` at `71f4524`, after merged C0 / PR #16.
 **Authority:** [Research design, section 5](../../design/REFACTOR.md#5-data-representations-and-identity) and [C1 deliverable](../plans/2026-10-06-baseline-extraction.md#companion-comparison-workstream).
