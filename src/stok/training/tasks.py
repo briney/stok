@@ -113,7 +113,7 @@ class MDLMTask:
                     + j * world_size
                     + rank,
                     row["dataset"],
-                    row["sequence_id"],
+                    row["canonical_id"],
                 ]
                 for j, row in enumerate(rows)
             ]

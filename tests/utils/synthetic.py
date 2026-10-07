@@ -312,6 +312,7 @@ def write_dataset(path, rows, *, codebook=None, policy=None):
         "rejection_count": 0,
         "exclusions": {},
         "representation_sha256": representation_sha256(provenance),
+        "row_order": "accepted_canonical_record_order",
         "shards": [{"path": shard.name, "sha256": file_sha256(shard), **counts}],
         "rejections_sha256": file_sha256(path / "rejections.jsonl"),
         **counts,

@@ -811,6 +811,7 @@ _OPERATIONAL = {
     "generation_cohort",
     "case_manifest",
     "max_samples",
+    "max_cases",
 }
 
 
@@ -902,3 +903,29 @@ def evaluation_measurement(
     }
     result["measurement_sha256"] = json_sha256(result)
     return result
+
+
+def publish_evaluation_summary(path: Path, summary: Mapping[str, Any]) -> None:
+    """Publish finite deterministic bytes once; replay must agree exactly."""
+    import os
+    import tempfile
+
+    content = (
+        json.dumps(
+            dict(summary), sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+        + "\n"
+    ).encode()
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".evaluation-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            if path.read_bytes() != content:
+                raise ValueError(f"Evaluation summary conflict: {path}")
+    finally:
+        Path(temporary).unlink(missing_ok=True)

@@ -48,15 +48,12 @@ def test_pilot_composes_pinned_values_and_parameter_count():
         cfg.data.prefetch_factor,
     ) == (514, 2, 2, 2)
     assert cfg.data.split_manifest is None and cfg.train.resume_from is None
-    assert cfg.train.eval.seed == 1729 and cfg.train.eval.steps == 250
+    assert cfg.train.eval.steps == 250
     assert cfg.train.eval.mdlm.enabled and cfg.train.eval.mdlm.generation.enabled
-    assert (
-        cfg.train.eval.mdlm.cohort is None
-        and cfg.train.eval.mdlm.generation_cohort is None
-    )
+    assert cfg.train.eval.mdlm.case_manifest is None
     assert cfg.train.eval.mdlm.generation.steps == 1000
     assert cfg.train.eval.mdlm.generation.sampling_steps == 64
-    assert cfg.train.eval.mdlm.generation.max_samples == 16
+    assert cfg.train.eval.mdlm.generation.max_cases == 16
     assert cfg.train.eval.mdlm.generation.decode is False
     with torch.device("meta"):
         enc = cfg.model.encoder
@@ -75,15 +72,7 @@ def test_pilot_composes_pinned_values_and_parameter_count():
     assert sum(p.numel() for p in model.parameters() if p.requires_grad) == 144797472
     cfg.train.eval.mdlm.enabled = cfg.train.eval.mdlm.generation.enabled = False
     resolved = resolve_mdlm_eval_config(cfg)
-    assert len(resolved.cases) == 32
-    assert {case.probability for case in resolved.cases.values()} == {
-        0.15,
-        0.5,
-        0.85,
-        1,
-    }
-    assert {case.regime for case in resolved.cases.values()} == set(REGIMES)
-    assert all(case.get("span_mean", 8) == 8 for case in resolved.cases.values())
+    assert resolved.families is None and resolved.generation.families is None
     assert not any(
         key in cfg.train.eval.mdlm
         for key in ("mask_probabilities", "regimes", "placements", "generation_steps")
@@ -418,14 +407,14 @@ def test_sampling_rejects_incomplete_saved_rank_state(tmp_path, trained):
     assert "per-rank" in result.output
 
 
-def test_custom_cases_replace_default_benchmark():
+def test_family_selection_is_an_explicit_evaluation_override():
     cfg = pilot(
         "train.eval.mdlm.enabled=false",
         "train.eval.mdlm.generation.enabled=false",
-        "+train.eval.mdlm.cases={diagnostic:{regime:joint_tied,probability:0.5,placement:span,span_mean:8}}",
+        "train.eval.mdlm.families=[diagnostic]",
     )
     resolved = resolve_mdlm_eval_config(cfg)
-    assert list(resolved.cases) == ["diagnostic"]
+    assert list(resolved.families) == ["diagnostic"]
 
 
 def test_cpu_launch_logs_device_precision_and_identity(tmp_path, capsys):
@@ -775,7 +764,6 @@ def test_reader_and_sampling_allow_operational_overrides_and_inference_backend(
         output_dir="/unused", resume_from="/absent", log_every=99, save_every=99
     )
     cfg["train"]["wandb"]["name"] = "changed"
-    cfg["train"]["eval"]["seed"] += 1
     cfg["data"]["eval"] = {"other": {"path": "/absent/eval"}}
     cfg["model"]["decoder"]["path"] = "/absent/decoder"
     cfg["print_model_summary"] = not cfg["print_model_summary"]

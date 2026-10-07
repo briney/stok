@@ -37,6 +37,7 @@ def test_null_tokens_preserve_residue_alignment(tmp_path, sharded, token_type):
     assert item["sequence"] == "ACDE"
     assert item["structure_tokens"].tolist() == [4, -1, 7, -1]
     item["dataset"] = "alignment-fixture"
+    item["canonical_id"] = "a" * 64
     batch = prepare_mdlm_batch(
         [item], Tokenizer(), max_len=8, codebook_size=8, crop="center", seeds=[0]
     )

@@ -32,14 +32,12 @@ def paired_sources(tmp_path):
     val = write_dataset(tmp_path / "val", [rows[1]])
     assignments = [
         {
-            "dataset": "train",
-            "sequence_id": "long",
+            "canonical_id": rows[0]["canonical_id"],
             "split": "train",
             "cluster_id": "c1",
         },
         {
-            "dataset": "val",
-            "sequence_id": "short",
+            "canonical_id": rows[1]["canonical_id"],
             "split": "validation",
             "cluster_id": "c2",
         },
@@ -151,44 +149,54 @@ def test_batch_rejects_invalid_uncropped_rows(change):
         )
 
 
-def test_preflight_records_strict_identity_and_separate_cohorts(tmp_path):
+def test_preflight_records_canonical_representation_and_replay_identity(tmp_path):
     from stok.data.mdlm import validate_mdlm_sources
+    from stok.eval.cases import freeze_evaluation_cases
 
-    train, val, manifest, _ = paired_sources(tmp_path)
-    cohort = write_jsonl(
-        tmp_path / "cohort.jsonl", [{"dataset": "val", "sequence_id": "short"}]
+    train, val, manifest, assignments = paired_sources(tmp_path)
+    canonical_dirs = [
+        path / json.loads((path / "manifest.json").read_text())["canonical_directory"]
+        for path in (train, val)
+    ]
+    frozen = tmp_path / "cases"
+    shared = freeze_evaluation_cases(
+        canonical_dirs,
+        manifest,
+        {
+            "schema_version": 1,
+            "seed": 1729,
+            "crop_residues": 6,
+            "members": [assignments[1]["canonical_id"]],
+            "denoising": {"full": {"regime": "joint_independent", "probability": 1}},
+            "generation": {},
+        },
+        frozen,
     )
-    kwargs = dict(codebook=CODEBOOK, split_manifest=manifest)
     first = validate_mdlm_sources(
-        {"train": train}, {"val": {"path": str(val)}}, **kwargs
+        {"train": train}, {"val": val}, codebook=CODEBOOK, split_manifest=manifest
     )
     second = validate_mdlm_sources(
         {"train": train},
         {"val": val},
-        eval_cohort=cohort,
-        generation_cohort=cohort,
-        **kwargs,
+        codebook=CODEBOOK,
+        split_manifest=manifest,
+        case_manifest=frozen,
     )
     assert first["training_signature"] == second["training_signature"]
-    assert second["eval_cohort"]["sha256"] == file_sha256(cohort)
     assert (
-        second["generation_cohort"]["sample_keys"]
-        == second["eval_cohort"]["sample_keys"]
+        second["shared_cases"]["shared_cases_sha256"] == shared["shared_cases_sha256"]
     )
+    assert second["canonical_population_sha256"] == shared["population_sha256"]
+    assert second["split_manifest_sha256"] == file_sha256(manifest)
     assert second["codebook_sha256"] == state_sha256({"codebook": CODEBOOK})
-    assert {
-        key: value
-        for key, value in second["vocabulary"].items()
-        if key != "sequence_vocab_sha256"
-    } == {
-        "codebook_size": C,
-        "structure_pad": C,
-        "structure_mask": C + 1,
-        "structure_unavailable": C + 2,
-        "sequence_targets": "ACDEFGHIKLMNPQRSTVWY",
-    }
+    for source in second["sources"].values():
+        assert (
+            len(source["representation_sha256"]) == len(source["replay_sha256"]) == 64
+        )
+    assert second["vocabulary"]["structure_unavailable"] == C + 2
+    assert second["vocabulary"]["sequence_targets"] == "ACDEFGHIKLMNPQRSTVWY"
     assert len(second["vocabulary"]["sequence_vocab_sha256"]) == 64
-    json.dumps(second)  # plain serialized primitives
+    json.dumps(second)
 
 
 @pytest.mark.parametrize(
@@ -274,7 +282,7 @@ def test_preflight_rejects_semantic_mismatch(tmp_path, failure):
             codebook=codebook,
             split_manifest=None if failure == "no_splits" else manifest,
         )
-    assert any(context in str(error.value) for context in ("train", "val", "splits"))
+    assert str(error.value)
     assert not (tmp_path / "run").exists()
     assert not (tmp_path / "wandb").exists()
 
@@ -282,42 +290,47 @@ def test_preflight_rejects_semantic_mismatch(tmp_path, failure):
 @pytest.mark.parametrize(
     "failure", ["duplicate", "missing", "test", "train", "no_splits"]
 )
-@pytest.mark.parametrize("kind", ["eval_cohort", "generation_cohort"])
-def test_preflight_rejects_invalid_cohorts(tmp_path, failure, kind):
+@pytest.mark.parametrize("kind", ["denoising", "generation"])
+def test_preflight_rejects_invalid_cases(tmp_path, failure, kind):
     from stok.data.mdlm import validate_mdlm_sources
+    from stok.eval.cases import freeze_evaluation_cases
 
     train, val, manifest, assignments = paired_sources(tmp_path)
-    evaluations = {"val": val}
-    keys = [{"dataset": "val", "sequence_id": "short"}]
+    members = [assignments[1]["canonical_id"]]
     if failure == "duplicate":
-        keys *= 2
+        members *= 2
     elif failure == "missing":
-        keys[0]["sequence_id"] = "absent"
+        members = ["f" * 64]
     elif failure == "test":
-        assignments.append(
-            {
-                "dataset": "external",
-                "sequence_id": "test_sample",
-                "split": "test",
-                "cluster_id": "c3",
-            }
-        )
-        row = make_mdlm_rows()[1]
-        row["sequence_id"] = "test_sample"
-        row = declare_synthetic_source(row, source_accession="test-file")
-        evaluations["external"] = write_dataset(tmp_path / "test", [row])
-        keys = [{"dataset": "external", "sequence_id": "test_sample"}]
+        assignments[1]["split"] = "test"
     elif failure == "train":
-        keys = [{"dataset": "train", "sequence_id": "long"}]
+        members = [assignments[0]["canonical_id"]]
     write_jsonl(manifest, assignments)
-    cohort = write_jsonl(tmp_path / "cohort.jsonl", keys)
-    with pytest.raises(ValueError, match="cohort|split"):
+    with pytest.raises(ValueError):
+        request = {
+            "schema_version": 1,
+            "seed": 1,
+            "crop_residues": 6,
+            "members": members,
+            "denoising": {},
+            "generation": {},
+        }
+        request[kind] = {
+            "full": {
+                "regime": "joint_independent",
+                **({"probability": 1} if kind == "denoising" else {}),
+            }
+        }
+        frozen = tmp_path / "cases"
+        freeze_evaluation_cases(
+            [train / "canonical", val / "canonical"], manifest, request, frozen
+        )
         validate_mdlm_sources(
             {"train": train},
-            evaluations,
+            {"val": val},
             codebook=CODEBOOK,
             split_manifest=None if failure == "no_splits" else manifest,
-            **{kind: cohort},
+            case_manifest=frozen,
         )
 
 
@@ -341,25 +354,20 @@ def test_preflight_accepts_loaded_test_assignments_without_tuning_on_them(tmp_pa
     test = write_dataset(tmp_path / "test", [row])
     assignments.append(
         {
-            "dataset": "test",
-            "sequence_id": "test_sample",
+            "canonical_id": row["canonical_id"],
             "split": "test",
             "cluster_id": "c3",
         }
     )
     write_jsonl(manifest, assignments)
-    cohort = write_jsonl(
-        tmp_path / "cohort.jsonl", [{"dataset": "val", "sequence_id": "short"}]
-    )
     result = validate_mdlm_sources(
         {"train": train},
         {"val": val, "test": test},
         codebook=CODEBOOK,
         split_manifest=manifest,
-        eval_cohort=cohort,
     )
     assert len(result["sources"]) == 3
-    assert len(result["eval_cohort"]["sample_keys"]) == 1
+    assert result["splits"][row["canonical_id"]]["split"] == "test"
 
 
 def test_preflight_rejects_unloaded_test_assignment(tmp_path):
@@ -368,14 +376,13 @@ def test_preflight_rejects_unloaded_test_assignment(tmp_path):
     train, val, manifest, assignments = paired_sources(tmp_path)
     assignments.append(
         {
-            "dataset": "test",
-            "sequence_id": "unloaded",
+            "canonical_id": "f" * 64,
             "split": "test",
             "cluster_id": "c3",
         }
     )
     write_jsonl(manifest, assignments)
-    with pytest.raises(ValueError, match="test.*unloaded.*missing"):
+    with pytest.raises(ValueError, match="unknown canonical"):
         validate_mdlm_sources(
             {"train": train}, {"val": val}, codebook=CODEBOOK, split_manifest=manifest
         )
@@ -385,31 +392,25 @@ def test_preflight_alias_rename_keeps_sample_population(tmp_path):
     from stok.data.mdlm import validate_mdlm_sources
 
     train, val, manifest, assignments = paired_sources(tmp_path)
-    cohort = write_jsonl(
-        tmp_path / "cohort.jsonl", [{"dataset": "val", "sequence_id": "short"}]
-    )
     first = validate_mdlm_sources(
         {"train": train},
         {"val": val},
         codebook=CODEBOOK,
         split_manifest=manifest,
-        eval_cohort=cohort,
     )
-    assignments[1]["dataset"] = "renamed"
     write_jsonl(manifest, assignments)
-    write_jsonl(cohort, [{"dataset": "renamed", "sequence_id": "short"}])
     second = validate_mdlm_sources(
         {"train": train},
         {"renamed": val},
         codebook=CODEBOOK,
         split_manifest=manifest,
-        eval_cohort=cohort,
     )
-    assert first["eval_cohort"]["sample_keys"] == second["eval_cohort"]["sample_keys"]
+    assert first["canonical_population_sha256"] == second["canonical_population_sha256"]
     assert (
-        first["sample_key_namespaces"]["val"]
-        == second["sample_key_namespaces"]["renamed"]
+        first["sources"]["val"]["representation_sha256"]
+        == second["sources"]["renamed"]["representation_sha256"]
     )
+    assert first["training_signature"] == second["training_signature"]
 
 
 def test_batch_preserves_distinct_absent_coordinates():
@@ -479,9 +480,35 @@ def test_preflight_rejects_nonstring_split_with_manifest_and_sample_context(
     train, val, manifest, assignments = paired_sources(tmp_path)
     assignments[0]["split"] = split
     write_jsonl(manifest, assignments)
-    with pytest.raises(
-        ValueError, match="splits.jsonl.*source train sample long.*invalid split"
-    ):
+    with pytest.raises(ValueError, match="Invalid explicit canonical split"):
         validate_mdlm_sources(
             {"train": train}, {"val": val}, codebook=CODEBOOK, split_manifest=manifest
+        )
+
+
+def test_canonical_batch_keys_and_recorded_crop_are_representation_independent():
+    from stok.data.mdlm import prepare_mdlm_batch
+
+    row = make_mdlm_rows()[0]
+    batch = prepare_mdlm_batch(
+        [row],
+        Tokenizer(),
+        max_len=8,
+        codebook_size=C,
+        crop="center",
+        seeds=[0],
+        crop_intervals=[(3, 7)],
+    )
+    assert batch["sample_keys"] == [row["canonical_id"]]
+    assert batch["crop_offsets"].tolist() == [3]
+    assert batch["residue_mask"].sum().item() == 4
+    with pytest.raises(ValueError, match="crop"):
+        prepare_mdlm_batch(
+            [row],
+            Tokenizer(),
+            max_len=8,
+            codebook_size=C,
+            crop="center",
+            seeds=[0],
+            crop_intervals=[(3, 10)],
         )

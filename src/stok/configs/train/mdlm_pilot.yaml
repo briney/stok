@@ -23,18 +23,17 @@ train:
     sequence_loss_weight: 1.0
     structure_loss_weight: 1.0
   eval:
-    seed: 1729
     steps: 250
     mdlm:
       enabled: true
-      cohort: null
-      generation_cohort: null
-      # Omitted cases resolve the fixed 32-case denoising matrix.
+      case_manifest: null
+      families: null
       generation:
         enabled: true
         steps: 1000
         sampling_steps: 64
-        max_samples: 16
+        max_cases: 16
+        families: null
         decode: false
         schedule: {name: linear}
 

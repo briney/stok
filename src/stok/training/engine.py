@@ -40,7 +40,7 @@ from stok.utils.checkpoint import (
     validate_resume_signature,
     ResumeWandb,
 )
-from stok.utils.pretrained import state_sha256
+from stok.utils.pretrained import state_sha256, json_sha256
 
 
 def _maybe_get_accelerator(precision=None):
@@ -195,7 +195,7 @@ def _save_checkpoint(
     _raise_rank_errors(error, accelerator, "Collecting checkpoint state failed")
     assert payload is not None
     payload.update(
-        format_version=3,
+        format_version=4,
         rank_states=gather_object([rank_state]) if accelerator else [rank_state],
         signature=training_state["signature"],
         wandb_run_id=training_state["wandb_run_id"],
@@ -286,6 +286,7 @@ def run_training(cfg: DictConfig) -> None:
     cfg = cast(DictConfig, OmegaConf.create(OmegaConf.to_container(cfg, resolve=True)))
     from stok.eval.mdlm import (
         evaluate_mdlm,
+        mdlm_evaluation_protocol,
         resolve_mdlm_eval_config,
         validate_mdlm_decoder,
     )
@@ -299,6 +300,14 @@ def run_training(cfg: DictConfig) -> None:
     if cfg.train.mdlm.noise.name == "power":
         cfg.train.mdlm.noise.setdefault("power", 2.0)
     cfg.train.eval.mdlm = resolve_mdlm_eval_config(cfg)
+    from stok.eval.cases import read_evaluation_cases, publish_evaluation_summary
+
+    shared = (
+        read_evaluation_cases(cfg.train.eval.mdlm.case_manifest)
+        if cfg.train.eval.mdlm.case_manifest
+        else None
+    )
+    resolve_mdlm_eval_config(cfg, identity={"shared_cases": shared})
     OmegaConf.set_readonly(cfg, True)
     objective = "mdlm"
     project = cfg.train.output_dir
@@ -364,10 +373,7 @@ def run_training(cfg: DictConfig) -> None:
             _parse_eval_configs(cfg),
             codebook=codebook,
             split_manifest=cfg.data.get("split_manifest"),
-            eval_cohort=OmegaConf.select(cfg, "train.eval.mdlm.cohort"),
-            generation_cohort=OmegaConf.select(
-                cfg, "train.eval.mdlm.generation_cohort"
-            ),
+            case_manifest=cfg.train.eval.mdlm.case_manifest,
         )
         runtime: dict[str, Any] = {
             "effective_precision": effective_precision,
@@ -503,6 +509,14 @@ def run_training(cfg: DictConfig) -> None:
                 "sha256": state_sha256(decoder.state_dict()),
                 "codebook_sha256": mdlm_identity["codebook_sha256"],
             }
+        runtime["evaluation_protocol"] = mdlm_evaluation_protocol(
+            cfg,
+            identity=mdlm_identity,
+            environment={
+                key: runtime[key] for key in ("software", "execution", "source")
+            },
+            decoder=runtime.get("decoder"),
+        )
         if cfg.train.get("resume_from"):
             resume_payload = read_training_checkpoint(Path(cfg.train.resume_from))
             validate_resume_signature(resume_payload, signature)
@@ -800,15 +814,34 @@ def run_training(cfg: DictConfig) -> None:
                 and current_step % mdlm_eval.generation.steps == 0
             )
             if denoising_due or generation_due:
-                all_eval_metrics = evaluate_mdlm(
+                all_eval_metrics, evaluation_summary = evaluate_mdlm(
                     model,
                     eval_loaders,
                     cfg,
                     accelerator=accelerator,
                     identity=mdlm_identity,
+                    protocol=runtime["evaluation_protocol"],
+                    model_identity={
+                        "training_signature": json_sha256(signature),
+                        "global_step": current_step,
+                    },
                     decoder=decoder,
                     run_denoising=denoising_due,
                     run_generation=generation_due,
+                )
+                summary_error = None
+                if is_main:
+                    try:
+                        publish_evaluation_summary(
+                            io_dirs["logs"]
+                            / "evaluations"
+                            / f"step-{current_step}-{evaluation_summary['measurement_sha256']}.json",
+                            evaluation_summary,
+                        )
+                    except Exception as exc:
+                        summary_error = f"{type(exc).__name__}: {exc}"
+                _raise_rank_errors(
+                    summary_error, accelerator, "Publishing evaluation summary failed"
                 )
                 metric_logger.log_eval_all(
                     all_eval_metrics,

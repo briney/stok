@@ -242,7 +242,9 @@ def _build_dataloaders(
         kwargs: dict[str, Any] = dict(
             dataset_path=path,
             max_length=None,
-            dataset_name=identity["sample_key_namespaces"][name],
+            dataset_name=identity["sources"][name]["replay_sha256"]
+            if training
+            else name,
             load_coords=load_coords,
             require_structure_tokens=training,
         )
@@ -352,7 +354,11 @@ def _build_dataloaders(
             sampler=eval_sampler,
             shuffle=False,
             drop_last=False,
-            generator=torch.Generator().manual_seed(cfg.train.eval.get("seed", 1729)),
+            generator=torch.Generator().manual_seed(
+                identity["shared_cases"]["request"]["seed"]
+                if identity.get("shared_cases")
+                else 0
+            ),
             **loader_kwargs(options.get("batch_size", batch_size)),
         )
     return train_loader, eval_loaders

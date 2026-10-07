@@ -15,7 +15,7 @@ HIP_VISIBLE_DEVICES='' ROCR_VISIBLE_DEVICES='' python -m pytest -q
 | Read-only authored settings and scientific/runtime artifacts | `integration/test_run_training_programmatic.py`, `integration/test_mdlm_evaluation.py` |
 | Global weighted MDLM loss, partial/empty windows, AMP skips | `unit/test_mdlm_loss.py`, `integration/test_mdlm_training.py`, `integration/test_distributed_training.py` |
 | Crop/alignment/missingness and stream coverage | `unit/test_mdlm_data.py`, `unit/test_parquet_dataset.py`, `integration/test_distributed_training.py` |
-| Frozen cohorts, worker/rank tails, RNG/mode restoration, failures | `integration/test_mdlm_evaluation.py` |
+| Frozen canonical cases, explicit coverage, worker/rank tails, RNG/mode restoration | `integration/test_mdlm_evaluation.py` |
 | Full canonical split/lineage audit, frozen cases/replicates and arm availability | `unit/test_eval_cases.py`, `unit/test_canonical_data.py`, `unit/test_mdlm_corruption.py` |
 | Exact continuation, stochastic dropout/workers, scaler/cursor/rank state | `integration/test_mdlm_resume.py` |
 | Current checkpoint-only sample and real matching decode | `integration/test_mdlm_cli.py` |
@@ -312,12 +312,12 @@ exact-ID stability on GPU.
 
 ### Paired MDLM qualification
 
-Unit tests cover aligned preparation, source/split/cohort identities, all four
+Unit tests cover aligned preparation, canonical population/split/case identities, all four
 corruption regimes, token/span grouping, schedules, absorbing reverse sampling,
 paired model heads and per-modality normalization. Integration tests cover the
 production optimizer lifecycle, denoising/generation filtering, decoder identity,
 CLI/package composition, successful-update counting, replicated CPU DDP and
-fresh-process version-3 continuation with workers/dropout/accumulation, all-rank
+fresh-process version-4 continuation with workers/dropout/accumulation, all-rank
 log reset, current source/software manifests, and active-state corruption rejection.
 
 Run the full suite with local IPC permitted and CPU selection:
@@ -363,7 +363,7 @@ and [bounded full-model probe](../docs/experiments/mdlm/qualify_device.py) retai
 actual Radeon evidence at context 514 and selected worker/precision continuation.
 They identify phase memory/timing, backend limits, versions and pending controls.
 The real production frozen-validation `evaluate_mdlm` boundary remains pending
-supplied validation-only cohorts; training-subset utility checks are distinct.
+frozen validation-only cases; training-subset utility checks are distinct.
 Actual GPU FP16 scaler overflow and multi-GPU launch are not qualified by BF16
 or CPU tests. Longer experiments require explicit identities/hardware/budgets.
 
@@ -401,3 +401,11 @@ denoising families, verifies stored reads do not draw RNG, and separates raw-fil
 shared-case, protocol and measurement identities. Synthetic `original_atom_mask`
 keeps canonical observations independent of a projection-only arm's missing
 codes; native export availability validation remains strict.
+
+Current C1 uses complete format-4 training checkpoints and schema-2 exports.
+The amended tests retain independent loss/gradient, successful-update, exact
+resume, RNG, mode and distributed-tail assertions. Case tests cover unavailable
+representation targets, rejected members, replicated controls and early caps;
+checkpoint-only tests remove original exports/canonical inventories/case files.
+See [C1 qualification](../docs/experiments/refactor/c1.md) for its recorded source
+boundary, commands, package checks, warnings and opt-in exclusions.

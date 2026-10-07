@@ -3,25 +3,21 @@
 from collections import Counter
 from collections.abc import Mapping
 from contextlib import ExitStack
-import math
 from typing import Any, cast
 
 from accelerate.utils import gather_object
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, ListConfig, OmegaConf
 import torch
 from torch.utils.data import DataLoader
 
-from stok.data.mdlm import CANONICAL_AA, MDLMBatch, _sample_key, prepare_mdlm_batch
+from stok.data.mdlm import CANONICAL_AA, MDLMBatch, prepare_mdlm_batch
 from stok.training.engine import _get_model_device, _unwrap_model
 from stok.eval.metrics.structure import LDDTMetric, RMSDMetric, TMScoreMetric
 from stok.utils.decoding import decode_token_aligned_coords
 from stok.utils.mdlm import (
-    REGIMES,
-    build_mask_groups,
-    corrupt_mdlm_batch,
+    MDLMCorruption,
     mask_schedule,
     mdlm_loss_terms,
-    stable_seed,
 )
 from stok.utils.pretrained import state_sha256
 from stok.utils.sampling import inference_context, sample_mdlm
@@ -34,137 +30,71 @@ def resolve_mdlm_eval_config(
     """Resolve scientific evaluation settings without changing authored choices.
 
     ``generation.steps`` is the successful-update cadence; ``sampling_steps``
-    controls reverse transitions. Explicit case maps replace the default matrix.
-    Cohort paths are validated by data preflight; its identities gate scoring.
+    controls reverse transitions. Family selections refer to the frozen artifact.
+    Data preflight validates its canonical bindings before scoring.
     """
     defaults = {
         "enabled": False,
-        "cohort": None,
-        "generation_cohort": None,
-        "cases": {
-            f"{regime}_{placement}_p{p:g}": {
-                "regime": regime,
-                "placement": placement,
-                "probability": p,
-                **({"span_mean": 8.0} if placement == "span" else {}),
-            }
-            for regime in REGIMES
-            for placement in ("token", "span")
-            for p in (0.15, 0.5, 0.85, 1.0)
-        },
+        "case_manifest": None,
+        "families": None,
         "generation": {
             "enabled": False,
             "steps": 10000,
             "sampling_steps": 64,
-            "max_samples": 16,
+            "max_cases": 16,
+            "families": None,
             "decode": False,
             "schedule": {"name": "linear"},
-            "cases": {
-                "folding": {
-                    "regime": "structure_only",
-                    "placement": "token",
-                },
-                "inverse_folding_like": {
-                    "regime": "sequence_only",
-                    "placement": "token",
-                },
-                "joint": {
-                    "regime": "joint_independent",
-                    "placement": "token",
-                },
-            },
         },
         "conditioning_policy": "inverse_folding_like_native_sequence_tokenizer",
         "label_context": "native_full_chain",
     }
     if not isinstance(cfg.train.get("eval"), DictConfig):
         raise ValueError("train.eval must be a mapping")
-    raw_config = cfg.train.eval.get("mdlm")
-    provided = (
-        OmegaConf.to_container(raw_config, resolve=True)
-        if raw_config is not None
-        else {}
-    )
+    if "seed" in cfg.train.eval:
+        raise ValueError("Unsupported configuration field: train.eval.seed")
+    provided = OmegaConf.to_container(cfg.train.eval.get("mdlm", {}), resolve=True)
     if not isinstance(provided, dict):
         raise ValueError("MDLM evaluation config must be a mapping")
     from stok.config import _check_fields
 
     contract = OmegaConf.create(defaults)
-    contract.cases = None
-    contract.generation.cases = None
     contract.generation.steps = None
-    generation_config = provided.get("generation", {})
-    if not isinstance(generation_config, dict):
+    generation = provided.get("generation", {})
+    if not isinstance(generation, dict):
         raise ValueError("train.eval.mdlm.generation must be a mapping")
-    schedule_config = generation_config.get("schedule", {})
-    if not isinstance(schedule_config, dict):
+    schedule = generation.get("schedule", {})
+    if not isinstance(schedule, dict):
         raise ValueError("train.eval.mdlm.generation.schedule must be a mapping")
-    if schedule_config.get("name") == "power":
+    if schedule.get("name") == "power":
         contract.generation.schedule.power = 2.0
     _check_fields(OmegaConf.create(provided), contract, "train.eval.mdlm")
-    for key in ("cohort", "generation_cohort"):
-        value = provided.get(key)
-        if value is not None and (not isinstance(value, str) or not value.strip()):
-            raise ValueError(f"train.eval.mdlm.{key} must be a nonempty path or null")
     for key in ("conditioning_policy", "label_context"):
         if key in provided and provided[key] != defaults[key]:
             raise ValueError(f"train.eval.mdlm.{key} must declare {defaults[key]}")
     resolved = cast(DictConfig, OmegaConf.merge(defaults, provided))
-    # Case maps are whole benchmark definitions, rather than incremental overrides.
+    path = resolved.case_manifest
+    if path is not None and (not isinstance(path, str) or not path.strip()):
+        raise ValueError("case_manifest must be a nonempty path or null")
     for section in (resolved, resolved.generation):
-        source = provided if section is resolved else provided.get("generation", {})
-        if "cases" in source:
-            section.cases = source["cases"]
-    for section, denoising in ((resolved, True), (resolved.generation, False)):
-        if not isinstance(section.cases, DictConfig):
-            raise ValueError("MDLM evaluation cases must be a named mapping")
-        for name, case in section.cases.items():
-            case_path = (
-                f"train.eval.mdlm.{'generation.' if not denoising else ''}cases.{name}"
-            )
-            contract = {"regime": "", "placement": ""}
-            if (
-                isinstance(case, DictConfig)
-                and case.get("placement", "token") == "span"
-            ):
-                contract["span_mean"] = 8.0
-            if denoising:
-                contract["probability"] = 0.5
-            _check_fields(case, contract, case_path)
-            if (
-                not isinstance(name, str)
-                or not name
-                or "/" in name
-                or case.get("regime") not in REGIMES
-            ):
-                raise ValueError("MDLM evaluation case name/regime is invalid")
-            case.setdefault("placement", "token")
-            if case.placement == "span":
-                case.setdefault("span_mean", 8.0)
-            if (
-                case.placement not in {"token", "span"}
-                or not math.isfinite(float(case.get("span_mean", 8)))
-                or float(case.get("span_mean", 8)) < 1
-            ):
-                raise ValueError("MDLM evaluation placement/span_mean is invalid")
-            if denoising and (
-                "probability" not in case
-                or not math.isfinite(float(case.probability))
-                or not 0 <= float(case.probability) <= 1
-            ):
-                raise ValueError(
-                    "MDLM evaluation probability must be explicit and in [0,1]"
-                )
+        families = section.families
+        if families is not None and (
+            not isinstance(families, ListConfig)
+            or not families
+            or any(not isinstance(name, str) or not name for name in families)
+            or len(set(families)) != len(families)
+        ):
+            raise ValueError("families must be a unique nonempty key list or null")
     generation = resolved.generation
     if generation.steps is None:
         generation.enabled = False
-    for name in ("steps", "sampling_steps", "max_samples"):
+    for name in ("steps", "sampling_steps", "max_cases"):
         if name == "steps" and generation.steps is None:
             continue
         if type(generation[name]) is not int or generation[name] < 1:
             raise ValueError(f"MDLM generation {name} must be a positive integer")
-    if generation.max_samples > 16:
-        raise ValueError("MDLM frozen generation cohort has a maximum of 16 samples")
+    if generation.max_cases > 16:
+        raise ValueError("MDLM generation has a maximum of 16 expanded cases")
     if generation.schedule.name == "power":
         generation.schedule.setdefault("power", 2.0)
     mask_schedule(
@@ -172,26 +102,27 @@ def resolve_mdlm_eval_config(
         name=generation.schedule.name,
         power=float(generation.schedule.get("power", 2)),
     )
-    seed = cfg.train.eval.get("seed", 1729)
-    if type(seed) is not int or seed < 0:
-        raise ValueError("MDLM evaluation seed must be a nonnegative integer")
-    if identity is not None and (resolved.enabled or generation.enabled):
-        for name, enabled in (
-            ("eval_cohort", resolved.enabled),
-            ("generation_cohort", generation.enabled),
-        ):
-            if not enabled:
+    if identity is not None:
+        shared = identity.get("shared_cases")
+        for kind, section in (("denoising", resolved), ("generation", generation)):
+            if not section.enabled:
                 continue
-            cohort = identity.get(name)
-            if not cohort or not cohort.get("sha256") or not cohort.get("sample_keys"):
-                raise ValueError(f"MDLM evaluation requires a nonempty frozen {name}")
-            keys = cohort["sample_keys"]
-            if len(set(keys)) != len(keys):
-                raise ValueError(f"MDLM {name} has duplicate cohort membership")
-            if name == "generation_cohort" and len(keys) > generation.max_samples:
-                raise ValueError(
-                    "MDLM frozen generation cohort exceeds its maximum (at most 16)"
-                )
+            if not shared:
+                raise ValueError("MDLM evaluation requires a frozen case_manifest")
+            available = shared["request"][kind]
+            selected = (
+                list(available) if section.families is None else list(section.families)
+            )
+            if not selected or set(selected) - available.keys():
+                raise ValueError(f"No matching or unknown {kind} families")
+            count = sum(
+                c["kind"] == kind and c["family_key"] in selected
+                for c in shared["cases"]
+            )
+            if not count:
+                raise ValueError(f"No matching {kind} cases")
+            if kind == "generation" and count > generation.max_cases:
+                raise ValueError("MDLM generation exceeds maximum of 16 expanded cases")
     OmegaConf.set_readonly(resolved, True)
     return resolved
 
@@ -222,7 +153,11 @@ def _geometry_scores(state, predicted, batch):
         score = (
             None
             if batch["coords"] is None
-            else metric.score(predicted, batch["coords"], batch["residue_mask"])
+            else metric.score(
+                predicted,
+                batch["coords"],
+                batch["residue_mask"] & batch["structure_valid"],
+            )
         )
         if score is None:
             state[index, 2] += 1
@@ -239,6 +174,53 @@ def _decode(decoder, codebook, tokens, batch):
     return decode_token_aligned_coords(decoder, codes, batch["residue_mask"])
 
 
+def selected_mdlm_cases(settings, shared):
+    if shared is None:
+        return []
+    selected = []
+    for case in shared["cases"]:
+        section = settings if case["kind"] == "denoising" else settings.generation
+        if section.enabled and (
+            section.families is None or case["family_key"] in section.families
+        ):
+            selected.append(case)
+    return selected
+
+
+def mdlm_evaluation_protocol(cfg, *, identity, environment, decoder):
+    from stok.eval.cases import evaluation_protocol
+
+    settings = resolve_mdlm_eval_config(cfg, identity=identity)
+    shared = identity.get("shared_cases")
+    if shared is None:
+        return None
+    cases = selected_mdlm_cases(settings, shared)
+    science = cast(dict[str, Any], OmegaConf.to_container(settings, resolve=True))
+    science["families"] = sorted(
+        {case["family_key"] for case in cases if case["kind"] == "denoising"}
+    )
+    science["generation"]["families"] = sorted(
+        {case["family_key"] for case in cases if case["kind"] == "generation"}
+    )
+    if not settings.generation.enabled:
+        science["generation"] = {"enabled": False}
+    return evaluation_protocol(
+        science,
+        shared_cases={**shared, "cases": cases},
+        representation={
+            "sources": sorted(
+                source["representation_sha256"]
+                for source in identity["sources"].values()
+                if source["kind"] == "eval"
+            )
+        },
+        decoder=decoder
+        if settings.generation.enabled and settings.generation.decode
+        else None,
+        environment=environment,
+    )
+
+
 def evaluate_mdlm(
     model,
     loaders: dict[str, DataLoader],
@@ -246,15 +228,15 @@ def evaluate_mdlm(
     *,
     accelerator,
     identity: Mapping[str, Any],
+    protocol: Mapping[str, Any],
+    model_identity: Mapping[str, Any],
     decoder=None,
     run_denoising: bool = True,
     run_generation: bool = True,
-) -> dict[str, dict[str, float]]:
-    """Filter frozen populations before scoring; uneven ranks never forward DDP.
+) -> tuple[dict[str, dict[str, float]], dict[str, Any]]:
+    """Execute frozen cases on their row owner, preserving controls and coverage."""
+    from stok.eval.cases import evaluation_measurement, project_case_controls
 
-    Optional internal cadence selectors let training run expensive generation
-    independently without mutating the benchmark configuration.
-    """
     error = None
     try:
         settings = resolve_mdlm_eval_config(cfg, identity=identity)
@@ -262,32 +244,71 @@ def evaluate_mdlm(
         run_generation = run_generation and settings.generation.enabled
         eval_model = _unwrap_model(model, accelerator)
         device = _get_model_device(model, accelerator)
-        if run_denoising or run_generation:
-            model_codebook_size = getattr(eval_model, "codebook_size", None)
-            if type(model_codebook_size) is not int or model_codebook_size < 1:
-                raise ValueError(
-                    "MDLM evaluation codebook_size must be a positive integer"
-                )
-            codebook_size = cast(int, model_codebook_size)
+        model_codebook_size = getattr(eval_model, "codebook_size", None)
+        if type(model_codebook_size) is not int or model_codebook_size < 1:
+            raise ValueError("MDLM evaluation codebook_size must be a positive integer")
+        codebook_size = cast(int, model_codebook_size)
+        selected = selected_mdlm_cases(settings, identity.get("shared_cases"))
+        if protocol is None or protocol["selected_case_ids"] != [
+            case["case_id"] for case in selected
+        ]:
+            raise ValueError("Evaluation protocol disagrees with selected frozen cases")
+        evaluation_measurement(
+            protocol, model_identity=model_identity, coverage={}, metrics={}
+        )
+        from stok.utils.checkpoint import execution_identity
+
+        decoder_identity = (
+            {
+                "sha256": state_sha256(decoder.state_dict()),
+                "codebook_sha256": identity["codebook_sha256"],
+            }
+            if decoder is not None
+            else None
+        )
+        environment = execution_identity(accelerator)
+        if environment["execution"]["device"] != device.type:
+            raise ValueError("Evaluation accelerator/device identity mismatch")
+        actual_protocol = mdlm_evaluation_protocol(
+            cfg,
+            identity=identity,
+            environment=environment,
+            decoder=decoder_identity,
+        )
+        if protocol != actual_protocol:
+            raise ValueError(
+                "Evaluation protocol disagrees with actual settings/decoder/execution"
+            )
+
         if run_generation and settings.generation.decode:
             validate_mdlm_decoder(
-                decoder,
-                eval_model.structure_codebook,
-                identity["codebook_sha256"],
+                decoder, eval_model.structure_codebook, identity["codebook_sha256"]
             )
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
     _raise_errors(error, accelerator, "configuration")
-    if not run_denoising and not run_generation:
-        return {}
-    eval_keys = set(identity["eval_cohort"]["sample_keys"]) if run_denoising else set()
-    generation_keys = (
-        set(identity["generation_cohort"]["sample_keys"]) if run_generation else set()
-    )
-    requested = eval_keys | generation_keys
-    seen = Counter()
-    denoising_cases = list(settings.cases.items()) if run_denoising else []
-    generation_cases = list(settings.generation.cases.items()) if run_generation else []
+    cases = [
+        case
+        for case in selected
+        if run_denoising
+        and case["kind"] == "denoising"
+        or run_generation
+        and case["kind"] == "generation"
+    ]
+    by_member = {}
+    for case in cases:
+        by_member.setdefault(case["canonical_id"], []).append(case)
+    requested = set(by_member)
+    denoising_cases = [
+        (key, definition)
+        for key, definition in identity["shared_cases"]["request"]["denoising"].items()
+        if any(c["kind"] == "denoising" and c["family_key"] == key for c in cases)
+    ]
+    generation_cases = [
+        (key, definition)
+        for key, definition in identity["shared_cases"]["request"]["generation"].items()
+        if any(c["kind"] == "generation" and c["family_key"] == key for c in cases)
+    ]
     weights = getattr(eval_model, "mdlm_regime_weights", {})
     joint_qualified = isinstance(weights, Mapping) and any(
         float(weights.get(name, 0)) > 0 for name in ("joint_independent", "joint_tied")
@@ -296,13 +317,28 @@ def evaluate_mdlm(
     canonical = torch.tensor(
         tokenizer.convert_tokens_to_ids(list(CANONICAL_AA)), device=device
     )
-    results = {}
+    results, seen, records = {}, Counter(), []
+    rank = accelerator.process_index if accelerator else 0
+    size = accelerator.num_processes if accelerator else 1
+    for case in cases:
+        entry = identity["coverage"][case["canonical_id"]]
+        if entry["status"] == "rejected" and case["ordinal"] % size == rank:
+            records.append(
+                {
+                    "case_id": case["case_id"],
+                    "status": "rejected",
+                    "reason": entry["reason"],
+                    "unavailable_targets": sum(sum(row) for row in case["eligible"]),
+                    "unavailable_conditioning": sum(
+                        sum(row) for row in case["conditioning"]
+                    ),
+                }
+            )
     with ExitStack() as contexts:
         contexts.enter_context(inference_context(model))
         if decoder is not None:
             contexts.enter_context(inference_context(decoder))
         for dataset, loader in loaders.items():
-            # Sums are reduced once after loader/forward error agreement, including empty ranks.
             denoising = torch.zeros(
                 (len(denoising_cases), 4, 2), device=device, dtype=torch.float64
             )
@@ -316,134 +352,114 @@ def evaluate_mdlm(
             error = None
             try:
                 for raw in loader:
-                    selected = [
-                        (
-                            row,
-                            _sample_key(row["dataset"], row["sequence_id"]),
-                        )
-                        for row in raw
-                    ]
-                    selected = [(row, key) for row, key in selected if key in requested]
-                    seen.update(key for _, key in selected)
-                    eval_rows = [row for row, key in selected if key in eval_keys]
-                    if eval_rows:
-                        batch = prepare_mdlm_batch(
-                            eval_rows,
-                            tokenizer,
-                            max_len=int(cfg.data.max_len),
-                            codebook_size=codebook_size,
-                            crop="center",
-                            seeds=[0] * len(eval_rows),
-                        )
-                        batch = cast(
-                            MDLMBatch,
-                            {
-                                key: value.to(device)
-                                if isinstance(value, torch.Tensor)
-                                else value
-                                for key, value in batch.items()
-                            },
-                        )
-                        populations[0] += len(eval_rows)
-                        for index, (name, case) in enumerate(denoising_cases):
-                            # This diagnostic config is fixed and never reads train.mdlm.
-                            corruption_cfg = OmegaConf.create(
-                                {
-                                    "regime_weights": {case.regime: 1},
-                                    "placement": case.placement,
-                                    "span_mean": case.get("span_mean", 8),
-                                    "noise": {
-                                        "name": "linear",
-                                        "power": 2,
-                                        "min_mask_probability": 1e-4,
-                                    },
-                                }
-                            )
-                            corruption = corrupt_mdlm_batch(
-                                batch,
-                                corruption_cfg,
-                                seeds=[
-                                    stable_seed(
-                                        [
-                                            cfg.train.eval.get("seed", 1729),
-                                            key,
-                                            name,
-                                            "denoising",
-                                        ]
-                                    )
-                                    for key in batch["sample_keys"]
-                                ],
-                                mask_probability=float(case.probability),
-                                regime=case.regime,
-                            )
-                            outputs = eval_model(
-                                sequence_tokens=corruption["sequence_tokens"],
-                                structure_tokens=corruption["structure_tokens"],
-                            )
-                            terms = mdlm_loss_terms(
-                                outputs, batch, corruption, canonical_aa_ids=canonical
-                            )
-                            denoising[index] += torch.stack(
-                                [
-                                    terms[key].double()
-                                    for key in (
-                                        "ce_sum",
-                                        "correct",
-                                        "masked_count",
-                                        "eligible_count",
-                                    )
-                                ]
-                            )
-                    # At most 16 frozen samples; singleton trajectories make decoder context fixed too.
-                    for row, key in selected:
-                        if key not in generation_keys:
+                    for row in raw:
+                        key = row["canonical_id"]
+                        if key not in requested:
                             continue
-                        populations[1] += 1
-                        batch = prepare_mdlm_batch(
-                            [row],
-                            tokenizer,
-                            max_len=int(cfg.data.max_len),
-                            codebook_size=codebook_size,
-                            crop="center",
-                            seeds=[0],
-                        )
-                        batch = cast(
-                            MDLMBatch,
-                            {
-                                name: value.to(device)
-                                if isinstance(value, torch.Tensor)
-                                else value
-                                for name, value in batch.items()
-                            },
-                        )
-                        for index, (name, case) in enumerate(generation_cases):
-                            if case.regime.startswith("joint") and not joint_qualified:
+                        entry = identity["coverage"][key]
+                        if entry["status"] != "admitted" or entry["source"] != dataset:
+                            raise ValueError(
+                                "Frozen case row disagrees with admitted source coverage"
+                            )
+                        seen[key] += 1
+                        control_crops = set()
+                        for case in by_member[key]:
+                            if (
+                                row.get("canonical_content_sha256")
+                                != case["content_sha256"]
+                                or row.get("residue_map_sha256")
+                                != case["residue_map_sha256"]
+                            ):
+                                raise ValueError(
+                                    "canonical row binding disagrees with frozen case"
+                                )
+                            record = {
+                                "case_id": case["case_id"],
+                                "status": "evaluated",
+                                "reason": None,
+                                "unavailable_targets": 0,
+                                "unavailable_conditioning": 0,
+                            }
+                            records.append(record)
+                            if case["crop"][1] - case["crop"][0] > cfg.data.max_len - 2:
+                                record.update(
+                                    status="unsupported", reason="crop_capacity"
+                                )
                                 continue
-                            generate = (
-                                batch["residue_mask"][..., None]
-                                .expand(-1, -1, 2)
-                                .clone()
+                            batch = prepare_mdlm_batch(
+                                [row],
+                                tokenizer,
+                                max_len=int(cfg.data.max_len),
+                                codebook_size=codebook_size,
+                                crop="center",
+                                seeds=[case["seed"]],
+                                crop_intervals=[tuple(case["crop"])],
                             )
-                            if case.regime == "structure_only":
-                                generate[..., 0] = False
-                            elif case.regime == "sequence_only":
-                                generate[..., 1] = False
-                            seed = stable_seed(
-                                [
-                                    cfg.train.eval.get("seed", 1729),
-                                    key,
-                                    name,
-                                    "generation",
-                                ]
+                            batch = cast(
+                                MDLMBatch,
+                                {
+                                    name: value.to(device)
+                                    if isinstance(value, torch.Tensor)
+                                    else value
+                                    for name, value in batch.items()
+                                },
                             )
-                            groups = build_mask_groups(
-                                generate[0],
-                                batch["residue_mask"][0],
-                                placement=case.placement,
-                                tied=case.regime == "joint_tied",
-                                span_mean=float(case.get("span_mean", 8)),
-                                generator=torch.Generator().manual_seed(seed),
-                            )[None]
+                            corruption = project_case_controls([case], batch)
+                            record["unavailable_targets"] = int(
+                                (
+                                    corruption["requested_eligible"]
+                                    & ~corruption["eligible"]
+                                ).sum()
+                            )
+                            record["unavailable_conditioning"] = int(
+                                corruption["unavailable_conditioning"].sum()
+                            )
+                            if not bool(corruption["case_available"].all()):
+                                record.update(
+                                    status="unavailable", reason="conditioning"
+                                )
+                                continue
+                            if case["kind"] == "denoising":
+                                index = [name for name, _ in denoising_cases].index(
+                                    case["family_key"]
+                                )
+                                populations[0] += 1
+                                outputs = eval_model(
+                                    sequence_tokens=corruption["sequence_tokens"],
+                                    structure_tokens=corruption["structure_tokens"],
+                                )
+                                terms = mdlm_loss_terms(
+                                    outputs,
+                                    batch,
+                                    cast(MDLMCorruption, corruption),
+                                    canonical_aa_ids=canonical,
+                                )
+                                denoising[index] += torch.stack(
+                                    [
+                                        terms[name].double()
+                                        for name in (
+                                            "ce_sum",
+                                            "correct",
+                                            "masked_count",
+                                            "eligible_count",
+                                        )
+                                    ]
+                                )
+                                continue
+                            populations[1] += 1
+                            index = [name for name, _ in generation_cases].index(
+                                case["family_key"]
+                            )
+                            if (
+                                case["definition"]["regime"].startswith("joint")
+                                and not joint_qualified
+                            ):
+                                record.update(
+                                    status="unsupported", reason="joint_exposure"
+                                )
+                                continue
+                            generate = corruption["eligible"]
+                            groups = corruption["group_ids"].masked_fill(~generate, -1)
                             sampled = sample_mdlm(
                                 eval_model,
                                 batch,
@@ -451,18 +467,22 @@ def evaluate_mdlm(
                                 group_ids=groups,
                                 schedule=settings.generation.schedule,
                                 steps=settings.generation.sampling_steps,
-                                seeds=[seed],
+                                seeds=[case["seed"]],
                                 canonical_aa_ids=canonical,
                             )
-                            for track, (tokens, target) in enumerate(
-                                (
-                                    ("sequence_tokens", batch["sequence_tokens"]),
-                                    ("structure_tokens", batch["structure_tokens"]),
-                                )
+                            for track, tokens in enumerate(
+                                ("sequence_tokens", "structure_tokens")
                             ):
-                                condition = ~generate[..., track]
+                                condition = corruption["requested_conditioning"][
+                                    ..., track
+                                ]
                                 generation[index, 0] += (
-                                    sampled[tokens][condition] == target[condition]
+                                    sampled[tokens][condition]
+                                    == (
+                                        batch["sequence_tokens"]
+                                        if track == 0
+                                        else batch["structure_tokens"]
+                                    )[condition]
                                 ).sum()
                                 generation[index, 1] += condition.sum()
                                 completed = (
@@ -492,20 +512,21 @@ def evaluate_mdlm(
                                     batch,
                                 )
                                 _geometry_scores(geometry[index], predicted, batch)
-                        if settings.generation.decode:
-                            complete = (
-                                batch["structure_valid"] | ~batch["residue_mask"]
-                            ).all()
-                            if complete:
-                                predicted = _decode(
-                                    decoder,
-                                    eval_model.structure_codebook,
-                                    batch["structure_tokens"],
-                                    batch,
-                                )
-                                _geometry_scores(geometry[-1], predicted, batch)
-                            else:
-                                geometry[-1, :, 2] += 1
+                            crop = tuple(case["crop"])
+                            if settings.generation.decode and crop not in control_crops:
+                                control_crops.add(crop)
+                                if (
+                                    batch["structure_valid"] | ~batch["residue_mask"]
+                                ).all():
+                                    predicted = _decode(
+                                        decoder,
+                                        eval_model.structure_codebook,
+                                        batch["structure_tokens"],
+                                        batch,
+                                    )
+                                    _geometry_scores(geometry[-1], predicted, batch)
+                                else:
+                                    geometry[-1, :, 2] += 1
             except Exception as exc:
                 error = f"{type(exc).__name__}: {exc}"
             _raise_errors(error, accelerator, f"dataset {dataset}")
@@ -514,8 +535,6 @@ def evaluate_mdlm(
                     accelerator.reduce(state, reduction="sum")
                     for state in (denoising, generation, geometry, populations)
                 ]
-            if not populations.sum():
-                continue
             metrics = {}
             if populations[0]:
                 for index, (name, _) in enumerate(denoising_cases):
@@ -541,7 +560,7 @@ def evaluate_mdlm(
             if populations[1]:
                 for index, (name, case) in enumerate(generation_cases):
                     prefix = f"{name}/generation"
-                    if case.regime.startswith("joint"):
+                    if case["regime"].startswith("joint"):
                         metrics[f"{prefix}/joint_qualified"] = float(joint_qualified)
                         if not joint_qualified:
                             continue
@@ -562,10 +581,10 @@ def evaluate_mdlm(
                             f"{prefix}/token_completion": filled / requested_count
                             if requested_count
                             else 1.0,
-                            f"{prefix}/num_samples": samples,
+                            f"{prefix}/num_cases": samples,
                         }
                     )
-                    if case.regime == "sequence_only":
+                    if case["regime"] == "sequence_only":
                         metrics[f"{prefix}/native_tokenizer_conditioning"] = 1.0
                     if valid:
                         metrics[f"{prefix}/sequence_acc"] = correct / valid
@@ -598,8 +617,51 @@ def evaluate_mdlm(
         combined = Counter()
         for counts in gather_object([dict(seen)]) if accelerator else [seen]:
             combined.update(counts)
-        if set(combined) != requested or any(value != 1 for value in combined.values()):
+        admitted = {
+            key
+            for key in requested
+            if identity["coverage"][key]["status"] == "admitted"
+        }
+        if set(combined) != admitted or any(value != 1 for value in combined.values()):
             raise RuntimeError(
-                "MDLM frozen cohort has missing or duplicate samples across evaluation loaders/ranks"
+                "MDLM frozen cases have missing or duplicate admitted rows across loaders/ranks"
             )
-    return results
+        records = gather_object(records) if accelerator else records
+    by_id = {record["case_id"]: record for record in records}
+    if len(by_id) != len(records) or set(by_id) != {case["case_id"] for case in cases}:
+        raise RuntimeError("Frozen case ownership is missing or duplicated")
+    records = [by_id[case["case_id"]] for case in cases]
+    coverage = {
+        "requested_case_ids": [case["case_id"] for case in cases],
+        "canonical_controls": [
+            {
+                key: case[key]
+                for key in (
+                    "case_id",
+                    "canonical_id",
+                    "seed",
+                    "crop",
+                    "positions",
+                    "eligible",
+                    "masked",
+                    "group_ids",
+                    "conditioning",
+                )
+            }
+            for case in cases
+        ],
+        "requested_cases": len(cases),
+        "unique_samples": len(requested),
+        "cases": records,
+        **{
+            status + "_cases": sum(r["status"] == status for r in records)
+            for status in ("evaluated", "rejected", "unavailable", "unsupported")
+        },
+        **{
+            key: sum(r[key] for r in records)
+            for key in ("unavailable_targets", "unavailable_conditioning")
+        },
+    }
+    return results, evaluation_measurement(
+        protocol, model_identity=model_identity, coverage=coverage, metrics=results
+    )

@@ -1,6 +1,7 @@
 # C1: canonical data and frozen evaluation cases
 
-**Status:** Written design approved October 7, 2026; implementation plan prepared and awaiting review.
+**Status:** Design and implementation approved October 7, 2026; worker implementation/checks finished, review-gated completion pending independent task/final branch review.
+**Evidence:** [C1 implementation and qualification record](../../experiments/refactor/c1.md).
 **Base:** `main` at `71f4524`, after merged C0 / PR #16.
 **Authority:** [Research design, section 5](../../design/REFACTOR.md#5-data-representations-and-identity) and [C1 deliverable](../plans/2026-10-06-baseline-extraction.md#companion-comparison-workstream).
 
@@ -272,7 +273,7 @@ production-length/GPU/FP16 acceptance or scientific performance claim is include
 
 The source-revision policy and canonical-inventory/case/measurement separation
 above were approved October 7. The [focused C1 implementation plan](../plans/2026-10-07-c1-canonical-evaluation.md)
-is prepared for review. The existing serial subagent-driven execution and PR handoff
+is approved for execution. The existing serial subagent-driven execution and PR handoff
 preferences carry forward; do not ask the user to choose them again absent a change.
 
 Design preparation checked the current exporter/parser/loader, identity/signature,

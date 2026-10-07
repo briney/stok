@@ -393,32 +393,44 @@ stok train model=mdlm_150m train=mdlm_pilot \
   +data.train.pilot.path=/data/stok-mdlm/completed/train \
   +data.eval.validation.path=/data/stok-mdlm/completed/validation \
   data.split_manifest=/data/stok-mdlm/splits-v1.jsonl \
-  train.eval.mdlm.cohort=/data/stok-mdlm/denoising-v1.jsonl \
-  train.eval.mdlm.generation_cohort=/data/stok-mdlm/generation-v1.jsonl \
+  train.eval.mdlm.case_manifest=/data/stok-mdlm/cases-v1 \
   train.output_dir=/runs/stok-mdlm/baseline-001
 ```
 
-Split JSONL rows use `dataset`, `sequence_id`, `split` (`train`, `validation`,
-`test`), and `cluster_id`. Dataset names must match the Hydra source names
-(`pilot`/`validation` above); keep source chains and homologous clusters in one
-split. Cohort JSONL rows use `dataset` and `sequence_id`; members must be unique
-and present in the **validation** split. The generation cohort is frozen at at
-most 16 members. Exported tokenizer/policy/codebook identities must agree across
-sources. The `base`/`large` codebook aliases have the same semantics; `lite` is a
-different tokenizer/codebook and must match the actual export. For a custom
-export use `model.codebook.path=/data/stok-mdlm/tokenizer-full.pt` (or a matching
-codebook archive), independently of the selected encoder size.
+Split JSONL rows contain exactly `canonical_id`, `split` (`train`, `validation`,
+`test`), and `cluster_id`. Full canonical inventories, including representation
+rejections and test members, are audited for cluster/source/parent leakage.
+Monitoring cases select validation members only. Source names and display aliases
+do not identify biological samples. Exported tokenizer/policy/codebook identities
+must agree across sources. A custom export requires its matching
+`model.codebook.path`, independently of encoder size.
 
-The preset evaluates 32 fixed named denoising cases every 250 updates: four
-regimes × probabilities `[0.15,0.5,0.85,1.0]` × token/span placement, span mean 8,
-evaluation seed 1729. Generation runs every 1000 updates with 64 reverse steps,
-linear schedule, and no coordinate decoding by default. `train.eval.mdlm.cases`
-is an explicit named map that replaces the default matrix; for example:
+Freeze family definitions, manifest seed, crops and residue controls with
+`stok freeze-eval-cases` before launching. The preset runs denoising every 250
+successful updates and generation every 1000 updates, using 64 reverse steps and
+a linear schedule. `train.eval.mdlm.families` and
+`train.eval.mdlm.generation.families` select unique family keys from that artifact;
+null selects all families of that kind. Generation is capped at **16 expanded
+cases**, including families and replicates, by `generation.max_cases`.
+The old cohort paths, live `cases` maps, `train.eval.seed` and `max_samples` fields
+are rejected. For example, select an already frozen denoising family with:
 
 ```bash
-# Add to a launch command with its required dataset/cohort/project arguments.
-'+train.eval.mdlm.cases={probe:{regime:joint_tied,probability:0.5,placement:span,span_mean:8}}'
+train.eval.mdlm.families=[probe]
 ```
+
+Cases retain canonical positions, group IDs and realized masks when an arm lacks
+codes. Unavailable targets affect coverage and denominators; missing conditional
+inputs and unsupported crops are explicitly reported. Evaluation never silently
+recrops or redraws a case. Numeric metrics and separate finite JSON measurement
+summaries are written under `logs/evaluations/step-<update>-<measurement-sha>.json`.
+Summaries distinguish case counts from unique proteins and bind controls, actual
+protocol/execution, and the live successful-update boundary. Their live model
+`training_signature` hashes the complete native resume signature (model, seed,
+optimizer and execution included); the data identity’s same-named field hashes
+only training sources/population/splits/representation/replay. Evaluation-only
+overrides preserve both training identities. Identical replay is
+idempotent; conflicting summary bytes fail closed.
 
 For a bounded one-source overfit diagnostic, supply an actual completed export,
 a new run directory, a small budget, and disable both benchmark controls:
@@ -433,7 +445,7 @@ stok train model=mdlm_150m train=mdlm_pilot \
 ```
 
 `train.eval.mdlm.generation.steps=null` also disables generation and removes its
-cohort requirement. `stok smoke-test model=mdlm_150m train=mdlm_pilot` is an
+case requirement. `stok smoke-test model=mdlm_150m train=mdlm_pilot` is an
 explicit synthetic paired forward check; training has no dummy-data fallback.
 
 Use Hydra overrides for each isolated experiment; they retain normal override
@@ -459,10 +471,14 @@ The checkpoint records the deterministic stream, optimizer/scheduler/rank state,
 identities, precision/topology, and regime provenance. Keep model, training
 objective/masking, dataset contents/order, seed, workers, batch/accumulation,
 execution, learning rate, and original budget unchanged. Output/log/evaluation/
-checkpoint cadence changes are allowed. Populated MDLM run directories require
-an explicit complete version-3 resume checkpoint.
+checkpoint cadence changes are allowed. Scientific evaluation overrides create a new
+protocol identity while retaining exact training replay; changed sharding/order
+is rejected even when the canonical population matches. Saved readers recompute
+format-4 canonical, case, representation and protocol bindings without reopening
+original artifacts. Previous training formats are unsupported. Populated MDLM run directories require
+an explicit complete version-4 resume checkpoint.
 
-Generate biological tokens using a complete version-3 MDLM checkpoint:
+Generate biological tokens using a complete version-4 MDLM checkpoint:
 
 ```bash
 stok sample --checkpoint /runs/stok-mdlm/baseline-001/model/final.pt \
@@ -508,7 +524,7 @@ records bounded real-data BF16 Radeon diagnostics: the full architecture at
 denoising/generation and matching frozen FP32 geometry decode. A separate tiny
 dropout-zero model improved both available-target losses on its training subset.
 These are implementation diagnostics. Operational launch remains pending actual
-frozen pilot splits/cohorts, intended hardware/topology and explicit run budgets;
+frozen pilot splits/cases, intended hardware/topology and explicit run budgets;
 the preset's 10,000 updates are not a measured or authorized scientific run.
 
 ## Research contract

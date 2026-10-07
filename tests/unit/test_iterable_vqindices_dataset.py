@@ -81,6 +81,7 @@ def test_mixed_optional_columns_and_required_schema(tmp_path):
     batch = list(ds)
     for row in batch:
         row["dataset"] = "mixed-columns"
+        row["canonical_id"] = "a" * 64
     coords = prepare_mdlm_batch(
         batch, Tokenizer(), max_len=8, codebook_size=32, crop="center", seeds=[0, 0]
     )["coords"]

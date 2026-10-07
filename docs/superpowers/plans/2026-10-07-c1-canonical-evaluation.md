@@ -8,7 +8,7 @@
 
 **Tech Stack:** Existing Python, PyTorch, NumPy, PyArrow, Biopython, Hydra/OmegaConf/YAML, Click and Accelerate; pinned `/tmp/stok-config-env`, no new dependencies.
 
-**Spec:** [Approved C1 design](../specs/2026-10-07-c1-canonical-evaluation-design.md). Written-spec approval was supplied October 7. Baseline `71f4524`; design commit `c4d96df`; worktree `.worktrees/research-c1`, branch `refactor/research-c1`. Existing serial subagent-driven execution and push/PR preferences carry forward. This plan awaits review before implementation.
+**Spec:** [Approved C1 design](../specs/2026-10-07-c1-canonical-evaluation-design.md). Written-spec approval was supplied October 7. Baseline `71f4524`; design commit `c4d96df`; worktree `.worktrees/research-c1`, branch `refactor/research-c1`. Existing serial subagent-driven execution and push/PR preferences carry forward. The user approved execution October 7. Tasks 1 and 2 are implemented and reviewed; Task 3 worker implementation/checks are finished; review-gated completion remains pending. Independent Task 3 and final branch review remain pending. Actual source/package boundaries and limits are recorded in the [C1 qualification report](../../experiments/refactor/c1.md).
 
 ## Global Constraints
 

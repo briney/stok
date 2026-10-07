@@ -16,6 +16,7 @@ def loss_case():
         [
             {
                 "dataset": "local",
+                "canonical_id": "c" * 64,
                 "sequence_id": "a",
                 "sequence": "AC",
                 "structure_tokens": [0, 1],
