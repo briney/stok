@@ -362,3 +362,119 @@ def test_canonical_records_require_sequence_provenance(record_with_missing_oxyge
     record["provenance"]["source"].pop("sequence_source")
     with pytest.raises(ValueError, match="source"):
         validate_canonical_record(record)
+
+
+def test_frozen_inventory_rejects_duplicate_resolved_selection_with_distinct_ids(
+    tmp_path,
+):
+    directory = tmp_path / "canonical"
+    prepare_canonical_dataset(requests(tmp_path, [request()]), directory)
+    record = json.loads((directory / "records.jsonl").read_text())
+    original_request = json.loads((directory / "inputs.jsonl").read_text())
+    duplicate = copy.deepcopy(record)
+    duplicate["identity"]["source_accession"] = "other-accession"
+    duplicate["canonical_id"] = json_sha256(duplicate["identity"])
+    duplicate["provenance"]["sequence_id"] = "alias"
+    second_request = {
+        key: value
+        for key, value in original_request.items()
+        if key not in {"request_id", "canonical_id"}
+    }
+    second_request.update(source_accession="other-accession", sequence_id="alias")
+    request_id = json_sha256(
+        {"request_version": 1, "ordinal": 1, "request": second_request}
+    )
+    duplicate["provenance"]["request_id"] = request_id
+    second_request.update(request_id=request_id, canonical_id=duplicate["canonical_id"])
+    assert record["canonical_id"] != duplicate["canonical_id"]
+    validate_canonical_record(duplicate)
+    records = [record, duplicate]
+    (directory / "records.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in records)
+    )
+    (directory / "inputs.jsonl").write_text(
+        json.dumps(original_request) + "\n" + json.dumps(second_request) + "\n"
+    )
+    summary = json.loads((directory / "manifest.json").read_text())
+    summary.update(
+        requested_input_count=2,
+        canonical_record_count=2,
+        records_sha256=file_sha256(directory / "records.jsonl"),
+        inputs_sha256=file_sha256(directory / "inputs.jsonl"),
+        population_sha256=json_sha256(
+            sorted(
+                (
+                    row["canonical_id"],
+                    row["content_sha256"],
+                    row["residue_map_sha256"],
+                    row["parent_ids"],
+                )
+                for row in records
+            )
+        ),
+    )
+    (directory / "manifest.json").write_text(json.dumps(summary))
+    with pytest.raises(ValueError, match="[Dd]uplicate.*selection"):
+        validate_canonical_dataset(directory)
+    with pytest.raises(ValueError, match="[Dd]uplicate.*selection"):
+        list(iter_canonical_records(directory))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("source_namespace", None),
+        ("source_accession", None),
+        ("source_namespace", True),
+        ("source_accession", 4),
+        ("source_namespace", ""),
+        ("source_accession", " alias "),
+        ("sequence_id", None),
+        ("path", []),
+        ("model_index", True),
+        ("chain_namespace", 3),
+        ("chain_id", False),
+        ("sequence", ["A"]),
+        ("parent_ids", [True]),
+    ],
+)
+def test_parser_rejected_inventory_requires_typed_source_declarations(
+    tmp_path, field, value
+):
+    directory = tmp_path / "canonical"
+    prepare_canonical_dataset(
+        requests(tmp_path, [request(chain_id="absent")]), directory
+    )
+    row = json.loads((directory / "inputs.jsonl").read_text())
+    if value is None:
+        row.pop(field)
+    else:
+        row[field] = value
+    request_fields = {key: item for key, item in row.items() if key != "request_id"}
+    row["request_id"] = json_sha256(
+        {"request_version": 1, "ordinal": 0, "request": request_fields}
+    )
+    rejection = json.loads((directory / "rejections.jsonl").read_text())
+    rejection["request_id"] = row["request_id"]
+    (directory / "inputs.jsonl").write_text(json.dumps(row) + "\n")
+    (directory / "rejections.jsonl").write_text(json.dumps(rejection) + "\n")
+    summary = json.loads((directory / "manifest.json").read_text())
+    summary.update(
+        inputs_sha256=file_sha256(directory / "inputs.jsonl"),
+        rejections_sha256=file_sha256(directory / "rejections.jsonl"),
+    )
+    (directory / "manifest.json").write_text(json.dumps(summary))
+    with pytest.raises(ValueError, match="request|source"):
+        validate_canonical_dataset(directory)
+
+
+def test_synthetic_display_alias_preserves_declared_source_identity():
+    from tests.utils.synthetic import canonical_fixture, make_mdlm_rows
+
+    row = make_mdlm_rows()[1]
+    alias = canonical_fixture({**row, "sequence_id": "display-alias"})
+    assert alias["canonical_id"] == row["canonical_id"]
+    assert (
+        alias["identity"]["source_accession"]
+        == row["canonical_identity"]["source_accession"]
+    )

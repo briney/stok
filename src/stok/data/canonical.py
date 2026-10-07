@@ -330,6 +330,19 @@ def _jsonl(path: Path) -> Iterator[dict[str, Any]]:
             yield row
 
 
+def _resolved_selection(identity: Mapping[str, Any]) -> tuple[Any, ...]:
+    return tuple(
+        identity[key]
+        for key in (
+            "source_revision_sha256",
+            "model_index",
+            "model_serial_id",
+            "chain_namespace",
+            "chain_id",
+        )
+    )
+
+
 def _population(records: Sequence[Mapping[str, Any]]) -> str:
     return json_sha256(
         sorted(
@@ -359,12 +372,19 @@ def validate_canonical_dataset(directory: str | Path) -> dict[str, Any]:
             raise ValueError(f"Corrupt canonical {name} inventory")
     # ponytail: inventory metadata stays in RAM; index JSONL if corpus size requires it.
     records = []
-    ids = set()
+    ids, selections = set(), set()
     for record in _jsonl(directory / "records.jsonl"):
         validate_canonical_record(record)
         if record["canonical_id"] in ids:
             raise ValueError("Duplicate or conflicting canonical record")
         ids.add(record["canonical_id"])
+        if record["identity"]["record_kind"] == "structure":
+            selection = _resolved_selection(record["identity"])
+            if selection in selections:
+                raise ValueError(
+                    "Duplicate resolved raw-revision/model/chain selection"
+                )
+            selections.add(selection)
         records.append(
             {
                 key: record[key]
@@ -399,6 +419,54 @@ def validate_canonical_dataset(directory: str | Path) -> dict[str, Any]:
         raise ValueError("Canonical parser requests do not partition inventory")
     by_id = {record["canonical_id"]: record for record in records}
     for ordinal, row in enumerate(inputs):
+        if any(
+            not _identifier(row.get(key))
+            for key in ("sequence_id", "path", "source_namespace", "source_accession")
+        ):
+            raise ValueError(
+                "Canonical request requires explicit string source declarations"
+            )
+        if "canonical_id" in row and not _digest(row["canonical_id"]):
+            raise ValueError("Invalid canonical request record ID")
+        sequence_only = (
+            row.get("canonical_id") in by_id
+            and by_id[row["canonical_id"]]["identity"]["record_kind"] == "sequence"
+        )
+        if sequence_only:
+            if (
+                row.get("model_index") is not None
+                or row.get("chain_namespace") is not None
+                or row.get("chain_id") is not None
+            ):
+                raise ValueError(
+                    "Sequence-only request must have absent structural selection"
+                )
+        elif (
+            type(row.get("model_index")) is not int
+            or row["model_index"] < 0
+            or not isinstance(row.get("chain_namespace"), str)
+            or row["chain_namespace"] not in {"author", "label"}
+        ):
+            raise ValueError("Canonical request has invalid model/chain selection")
+        if row.get("chain_id") is not None and not _identifier(row["chain_id"]):
+            raise ValueError("Canonical request chain_id must be a string or null")
+        if row.get("sequence") is not None and (
+            not isinstance(row["sequence"], str)
+            or not row["sequence"]
+            or any(aa not in "ACDEFGHIKLMNPQRSTVWYX" for aa in row["sequence"])
+        ):
+            raise ValueError(
+                "Canonical request sequence must contain uppercase amino acids or X"
+            )
+        parents = row.get("parent_ids")
+        if (
+            not isinstance(parents, list)
+            or any(not _digest(parent) for parent in parents)
+            or parents != sorted(set(parents))
+        ):
+            raise ValueError(
+                "Canonical request parent IDs must be unique sorted digests"
+            )
         if not _digest(row.get("source_revision_sha256")):
             raise ValueError("Invalid canonical request source revision")
         request = {
@@ -538,17 +606,7 @@ def prepare_canonical_dataset(
                     source_accession=entry["source_accession"],
                     parent_ids=entry.get("parent_ids", ()),
                 )
-                identity = record["identity"]
-                selection = tuple(
-                    identity[key]
-                    for key in (
-                        "source_revision_sha256",
-                        "model_index",
-                        "model_serial_id",
-                        "chain_namespace",
-                        "chain_id",
-                    )
-                )
+                selection = _resolved_selection(record["identity"])
                 if selection in selections:
                     raise ValueError(
                         "Duplicate resolved raw-revision/model/chain selection"

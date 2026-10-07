@@ -133,7 +133,9 @@ def canonical_fixture(row):
         source,
     )
     return canonical_record(
-        structure, source_namespace="synthetic", source_accession=row["sequence_id"]
+        structure,
+        source_namespace=row["canonical_identity"]["source_namespace"],
+        source_accession=row["canonical_identity"]["source_accession"],
     )
 
 
@@ -150,6 +152,24 @@ def canonical_row(row, record):
     }
 
 
+def declare_synthetic_source(row, *, source_accession):
+    """Explicitly declare a distinct fixture source; display aliases alone do not."""
+    row = {
+        **row,
+        "source": {
+            **row["source"],
+            "path": source_accession + ".cif",
+            "sha256": json_sha256({"fixture_source": source_accession}),
+        },
+        "canonical_identity": {
+            **row["canonical_identity"],
+            "source_namespace": "synthetic",
+            "source_accession": source_accession,
+        },
+    }
+    return canonical_row(row, canonical_fixture(row))
+
+
 def make_mdlm_rows() -> list[dict]:
     """Clean schema-2 paired rows; inventory keeps four original atoms."""
     rows = []
@@ -162,6 +182,10 @@ def make_mdlm_rows() -> list[dict]:
             tokens[14] = None
         row = {
             "dataset": "synthetic",
+            "canonical_identity": {
+                "source_namespace": "synthetic",
+                "source_accession": sequence_id,
+            },
             "sequence_id": sequence_id,
             "sequence": sequence,
             "structure_tokens": tokens,
@@ -196,8 +220,8 @@ def write_dataset(path, rows, *, codebook=None, policy=None):
         request = {
             "sequence_id": row["sequence_id"],
             "path": row["source"]["path"],
-            "source_namespace": "synthetic",
-            "source_accession": row["sequence_id"],
+            "source_namespace": record["identity"]["source_namespace"],
+            "source_accession": record["identity"]["source_accession"],
             "source_revision_sha256": row["source"]["sha256"],
             "chain_id": "A",
             "chain_namespace": "label",

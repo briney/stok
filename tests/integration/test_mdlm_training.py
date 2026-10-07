@@ -14,7 +14,11 @@ from stok.data.mdlm import CANONICAL_AA, prepare_mdlm_batch
 from stok.models.mdlm import STokMDLM
 from stok.utils.mdlm import corrupt_mdlm_batch
 from stok.utils.tokenizer import Tokenizer
-from tests.utils.synthetic import make_mdlm_rows, write_dataset
+from tests.utils.synthetic import (
+    make_mdlm_rows,
+    write_dataset,
+    declare_synthetic_source,
+)
 
 
 def mdlm_config(project, source, codebook_path, **options):
@@ -69,7 +73,7 @@ def training_fixture(tmp_path, n=8, rows=None):
         for i in range(n):
             row = originals[i % 2].copy()
             row["sequence_id"] = str(i)
-            rows.append(row)
+            rows.append(declare_synthetic_source(row, source_accession=f"training-{i}"))
     return write_dataset(tmp_path / "data", rows, codebook=codebook), path
 
 
@@ -231,6 +235,10 @@ def test_tiny_paired_subset_learns(tmp_path):
         }
         for i in range(2)
     ]
+    rows = [
+        declare_synthetic_source(row, source_accession=f"training-{i}")
+        for i, row in enumerate(rows)
+    ]
     source, codebook = training_fixture(tmp_path, rows=rows)
     states = []
     for steps in (0, 60):
@@ -369,6 +377,10 @@ def test_no_eligible_window_skips_but_preserves_consumed_cursor(tmp_path):
         }
         for i in range(4)
     ]
+    rows = [
+        declare_synthetic_source(row, source_accession=f"training-{i}")
+        for i, row in enumerate(rows)
+    ]
     source, codebook = training_fixture(tmp_path, rows=rows)
     state = checkpoint(
         mdlm_config(
@@ -394,6 +406,10 @@ def test_all_unusable_mdlm_pass_fails_without_update(tmp_path):
     rows = [
         {**make_mdlm_rows()[1], "sequence_id": str(i), "structure_tokens": [None] * 3}
         for i in range(4)
+    ]
+    rows = [
+        declare_synthetic_source(row, source_accession=f"training-{i}")
+        for i, row in enumerate(rows)
     ]
     source, codebook = training_fixture(tmp_path, rows=rows)
     cfg = mdlm_config(
@@ -465,6 +481,10 @@ def test_real_zero_mask_draw_still_updates_adamw(tmp_path):
             "residue_map": original["residue_map"][:1],
         }
         for i in range(2)
+    ]
+    rows = [
+        declare_synthetic_source(row, source_accession=f"training-{i}")
+        for i, row in enumerate(rows)
     ]
     source, codebook = training_fixture(tmp_path, rows=rows)
     initial = checkpoint(

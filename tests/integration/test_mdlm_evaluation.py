@@ -14,7 +14,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from stok.data.mdlm import CANONICAL_AA, prepare_mdlm_batch
-from stok.utils.pretrained import json_sha256, state_sha256
+from stok.utils.pretrained import state_sha256
 from stok.utils.tokenizer import Tokenizer
 
 
@@ -538,22 +538,20 @@ def test_decoder_loader_attaches_quantizer_identity_from_full_checkpoint(
 
 def evaluation_training_fixture(tmp_path):
     from tests.integration.test_mdlm_training import training_fixture, mdlm_config
-    from tests.utils.synthetic import write_dataset, make_mdlm_rows
+    from tests.utils.synthetic import (
+        write_dataset,
+        make_mdlm_rows,
+        declare_synthetic_source,
+    )
 
     source, codebook_path = training_fixture(tmp_path)
     codebook = torch.load(codebook_path, weights_only=True)["codebook"]
     originals = make_mdlm_rows()
     heldout = [
-        {
-            **row,
-            "sequence_id": "heldout_" + row["sequence_id"],
-            "source": {
-                "path": "heldout_" + row["sequence_id"] + ".cif",
-                "sha256": json_sha256(
-                    {"fixture_source": "heldout_" + row["sequence_id"]}
-                ),
-            },
-        }
+        declare_synthetic_source(
+            {**row, "sequence_id": "heldout_" + row["sequence_id"]},
+            source_accession="heldout_" + row["canonical_identity"]["source_accession"],
+        )
         for row in originals
     ]
     eval_source = write_dataset(tmp_path / "heldout", heldout, codebook=codebook)

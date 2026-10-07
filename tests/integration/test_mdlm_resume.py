@@ -12,7 +12,11 @@ from omegaconf import OmegaConf
 from tests.integration.test_mdlm_training import mdlm_config, training_fixture
 from tests.integration.test_training_progress import training_env
 from tests.integration.test_distributed_training import run_distributed
-from tests.utils.synthetic import make_mdlm_rows, write_dataset
+from tests.utils.synthetic import (
+    make_mdlm_rows,
+    write_dataset,
+    declare_synthetic_source,
+)
 
 PROBE = r"""
 import os, sys, torch
@@ -150,6 +154,10 @@ def config_for(tmp_path, source_kind="sharded", workers=0):
     )
     if source_kind == "mixed":
         rows = [{**make_mdlm_rows()[i % 2], "sequence_id": f"b{i}"} for i in range(20)]
+        rows = [
+            declare_synthetic_source(row, source_accession=f"second-{i}")
+            for i, row in enumerate(rows)
+        ]
         second = write_dataset(tmp_path / "second", rows)
         cfg.data.train.other = {"path": str(second), "fraction": 0.4}
         split = tmp_path / "split.jsonl"
@@ -564,6 +572,10 @@ def test_no_eligible_windows_are_in_resume_cursor(tmp_path):
             "structure_tokens": [None] * 3 if i < 4 else [0, 1, 2],
         }
         for i in range(12)
+    ]
+    rows = [
+        declare_synthetic_source(row, source_accession=f"training-{i}")
+        for i, row in enumerate(rows)
     ]
     source, codebook = training_fixture(tmp_path, rows=rows)
     cfg = mdlm_config(
