@@ -12,6 +12,7 @@ from typing import Any, Optional, cast
 import torch
 import torch.nn as nn
 from accelerate.utils import gather_object, set_seed
+from accelerate.utils.environment import get_cpu_distributed_information
 from omegaconf import DictConfig, OmegaConf
 from torch.optim import AdamW
 from stok.data.loaders import (
@@ -302,12 +303,24 @@ def run_training(cfg: DictConfig) -> None:
     cfg.train.eval.mdlm = resolve_mdlm_eval_config(cfg)
     from stok.eval.cases import read_evaluation_cases, publish_evaluation_summary
 
-    shared = (
-        read_evaluation_cases(cfg.train.eval.mdlm.case_manifest)
-        if cfg.train.eval.mdlm.case_manifest
-        else None
-    )
-    resolve_mdlm_eval_config(cfg, identity={"shared_cases": shared})
+    case_error = None
+    try:
+        shared = (
+            read_evaluation_cases(cfg.train.eval.mdlm.case_manifest)
+            if cfg.train.eval.mdlm.case_manifest
+            else None
+        )
+        resolve_mdlm_eval_config(cfg, identity={"shared_cases": shared})
+    except Exception as exc:
+        # Single-process case/cap errors stay before device setup. Launched peers
+        # must initialize communication to exchange even rank-local read errors.
+        distributed = get_cpu_distributed_information().world_size > 1 or (
+            torch.distributed.is_initialized()
+            and torch.distributed.get_world_size() > 1
+        )
+        if not distributed:
+            raise
+        case_error = f"{type(exc).__name__}: {exc}"
     OmegaConf.set_readonly(cfg, True)
     objective = "mdlm"
     project = cfg.train.output_dir
@@ -342,6 +355,7 @@ def run_training(cfg: DictConfig) -> None:
         if precision is not None
         else _maybe_get_accelerator()
     )
+    _raise_rank_errors(case_error, accelerator, "MDLM preflight failed")
     is_main = accelerator.is_main_process if accelerator else True
     printer = accelerator.print if accelerator else print
 
@@ -380,6 +394,11 @@ def run_training(cfg: DictConfig) -> None:
             "mdlm_identity": mdlm_identity,
         }
         mdlm_eval = resolve_mdlm_eval_config(cfg, identity=mdlm_identity)
+    except Exception as exc:
+        preflight_error = f"{type(exc).__name__}: {exc}"
+    _raise_rank_errors(preflight_error, accelerator, "MDLM preflight failed")
+
+    try:
         train_loader, eval_loaders = _build_dataloaders(
             cfg,
             identity=mdlm_identity,

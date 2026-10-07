@@ -1230,3 +1230,127 @@ def test_live_measurement_binds_complete_training_signature(tmp_path):
         second_checkpoint["signature"]
     )
     assert first["model_identity"] != second["model_identity"]
+
+
+@pytest.mark.parametrize("missing", ["original", "arm"])
+@pytest.mark.parametrize("mixed", [False, True])
+def test_generation_without_effective_targets_is_unavailable(missing, mixed):
+    import copy
+
+    population = rows(1)
+    population[0].update(sequence="A" * 30, structure_tokens=[0] * 30)
+    if missing == "original":
+        population[0]["structure_tokens"][12:18] = [None] * 6
+    cfg, identity = config(population, generation=True, denoising={})
+    cfg.train.eval.mdlm.generation.decode = False
+    cfg.train.eval.mdlm.generation.families = (
+        ["folding", "joint"] if mixed else ["folding"]
+    )
+    arm = copy.deepcopy(population)
+    if missing == "arm":
+        arm[0]["structure_tokens"][12:18] = [None] * 6
+    model = FixedModel()
+    metrics, summary = evaluate(
+        model, {"validation": loader(arm)}, (cfg, identity), return_summary=True
+    )
+    metrics = metrics["validation"]
+    coverage = summary["coverage"]
+    selected = [
+        c
+        for c in identity["shared_cases"]["cases"]
+        if c["family_key"] in cfg.train.eval.mdlm.generation.families
+    ]
+    assert coverage["requested_case_ids"] == [c["case_id"] for c in selected]
+    for controls, case in zip(coverage["canonical_controls"], selected):
+        assert controls == {k: case[k] for k in controls}
+        assert controls["crop"] == [12, 18]
+    assert coverage["requested_cases"] == 1 + mixed
+    assert coverage["evaluated_cases"] == int(mixed)
+    assert coverage["unavailable_cases"] == 1
+    folding = next(
+        r for r in coverage["cases"] if r["case_id"] == selected[0]["case_id"]
+    )
+    assert folding["status"] == "unavailable"
+    assert folding["reason"] == "no_targets"
+    assert folding["unavailable_targets"] == (6 if missing == "arm" else 0)
+    assert "folding/generation/token_completion" not in metrics
+    assert metrics.get("folding/generation/num_cases", 0) == 0
+    if mixed:
+        assert metrics["joint/generation/num_cases"] == 1
+        assert metrics["joint/generation/token_completion"] == 1
+        assert len(model.calls) == 3
+    else:
+        assert model.calls == []
+
+
+def _startup_artifact_probe(config_path, failure):
+    import os
+    from datetime import timedelta
+    from accelerate import Accelerator
+    from accelerate.utils import InitProcessGroupKwargs
+    from stok.eval import cases
+    from stok.training import engine
+
+    rank = int(os.environ["RANK"])
+    owner = engine if failure == "audit" else cases
+    name = "validate_mdlm_sources" if failure == "audit" else "read_evaluation_cases"
+    original = getattr(owner, name)
+
+    def read(*args, **kwargs):
+        if rank == 1:
+            raise OSError("injected rank-local canonical artifact read failure")
+        return original(*args, **kwargs)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("startup failure reached model/W&B/output")
+
+    setattr(owner, name, read)
+    engine._maybe_get_accelerator = lambda *a, **k: Accelerator(
+        cpu=True, kwargs_handlers=[InitProcessGroupKwargs(timeout=timedelta(seconds=3))]
+    )
+    engine.build_model = forbidden
+    engine._resolve_project_dirs = forbidden
+    engine._maybe_init_wandb = forbidden
+    engine.run_training(OmegaConf.load(config_path))
+
+
+@pytest.mark.parametrize("failure", ["read", "mixed_cap", "audit"])
+def test_rank_local_startup_artifact_failure_reaches_every_rank(tmp_path, failure):
+    from stok.eval.cases import freeze_evaluation_cases, read_evaluation_cases
+    from tests.integration.test_distributed_training import run_distributed
+    from tests.integration.test_training_progress import training_env
+
+    cfg = evaluation_training_fixture(tmp_path)
+    if failure == "mixed_cap":
+        shared = read_evaluation_cases(cfg.train.eval.mdlm.case_manifest)
+        request = {
+            **shared["request"],
+            "members": shared["request"]["members"][:1],
+            "replicates": 17,
+        }
+        capped = tmp_path / "capped"
+        freeze_evaluation_cases(
+            [r["directory"] for r in shared["canonical_inventories"]],
+            shared["split_manifest"],
+            request,
+            capped,
+        )
+        cfg.train.eval.mdlm.case_manifest = str(capped)
+    path = tmp_path / "config.yaml"
+    OmegaConf.save(cfg, path)
+    command = [
+        sys.executable,
+        "-c",
+        "import sys; from tests.integration.test_mdlm_evaluation import _startup_artifact_probe; _startup_artifact_probe(*sys.argv[1:])",
+        str(path),
+        failure,
+    ]
+    for result in run_distributed(command, timeout=30, env=training_env()):
+        assert result.returncode != 0
+        assert "MDLM preflight failed" in result.stderr, result.stderr
+        assert "injected rank-local canonical artifact read failure" in result.stderr
+        assert "Timed out" not in result.stderr
+        assert "startup failure reached" not in result.stderr
+        if failure == "mixed_cap":
+            assert "16 expanded cases" in result.stderr
+    assert not (tmp_path / "run").exists()

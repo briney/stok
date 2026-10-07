@@ -512,3 +512,14 @@ def test_canonical_batch_keys_and_recorded_crop_are_representation_independent()
             seeds=[0],
             crop_intervals=[(3, 10)],
         )
+
+
+@pytest.mark.parametrize("digest", ["g" * 64, "A" * 64])
+def test_batch_rejects_noncanonical_digest(digest):
+    from stok.data.mdlm import prepare_mdlm_batch
+
+    row = {**make_mdlm_rows()[0], "canonical_id": digest}
+    with pytest.raises(ValueError, match="canonical_id.*SHA-256"):
+        prepare_mdlm_batch(
+            [row], Tokenizer(), max_len=8, codebook_size=C, crop="center", seeds=[0]
+        )

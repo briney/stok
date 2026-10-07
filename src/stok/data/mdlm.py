@@ -8,6 +8,7 @@ from typing import Any, Literal, TypedDict
 import pyarrow.parquet as pq
 import torch
 
+from .canonical import _digest
 from .collate import tokenize_residues
 from .structure_export import validate_structure_dataset
 from ..utils.pretrained import file_sha256, json_sha256, state_sha256
@@ -148,7 +149,7 @@ def prepare_mdlm_batch(
         context = f"Sample {row.get('dataset', '?')}/{row.get('sequence_id', '?')}"
         try:
             canonical_id = row["canonical_id"]
-            if not isinstance(canonical_id, str) or len(canonical_id) != 64:
+            if not _digest(canonical_id):
                 raise ValueError("canonical_id must be a SHA-256 digest")
             seq = row["sequence"]
             if not isinstance(seq, str) or not seq:

@@ -446,6 +446,9 @@ def evaluate_mdlm(
                                     ]
                                 )
                                 continue
+                            if not bool(corruption["eligible"].any()):
+                                record.update(status="unavailable", reason="no_targets")
+                                continue
                             populations[1] += 1
                             index = [name for name, _ in generation_cases].index(
                                 case["family_key"]
@@ -573,15 +576,15 @@ def evaluate_mdlm(
                         valid,
                         samples,
                     ) = generation[index].tolist()
+                    metrics[f"{prefix}/num_cases"] = samples
+                    if not samples:
+                        continue
                     metrics.update(
                         {
                             f"{prefix}/condition_preservation": preserved / clamped
                             if clamped
                             else 1.0,
-                            f"{prefix}/token_completion": filled / requested_count
-                            if requested_count
-                            else 1.0,
-                            f"{prefix}/num_cases": samples,
+                            f"{prefix}/token_completion": filled / requested_count,
                         }
                     )
                     if case["regime"] == "sequence_only":
