@@ -146,7 +146,10 @@ def validate_mdlm_config(config: DictConfig) -> None:
         )
     if config.placement not in {"token", "span"}:
         raise ValueError("Unsupported MDLM placement")
-    if not math.isfinite(float(config.span_mean)) or float(config.span_mean) < 1:
+    if (
+        not math.isfinite(float(config.get("span_mean", 8)))
+        or float(config.get("span_mean", 8)) < 1
+    ):
         raise ValueError("MDLM span_mean must be finite and >= 1")
     p_min = float(config.noise.min_mask_probability)
     if not math.isfinite(p_min) or not 0 < p_min < 1:
@@ -154,7 +157,7 @@ def validate_mdlm_config(config: DictConfig) -> None:
     t_min = time_from_mask_probability(
         torch.tensor(p_min, dtype=torch.float64),
         name=config.noise.name,
-        power=float(config.noise.power),
+        power=float(config.noise.get("power", 2)),
     )
     if (
         not 0
@@ -215,8 +218,8 @@ def corrupt_mdlm_batch(
     placement = config.placement if placement is None else placement
     if placement not in {"token", "span"}:
         raise ValueError(f"Unsupported MDLM placement: {placement}")
-    span_mean = float(config.span_mean)
-    name, power = config.noise.name, float(config.noise.power)
+    span_mean = float(config.get("span_mean", 8))
+    name, power = config.noise.name, float(config.noise.get("power", 2))
     t_min = time_from_mask_probability(
         torch.tensor(float(config.noise.min_mask_probability), dtype=torch.float64),
         name=name,

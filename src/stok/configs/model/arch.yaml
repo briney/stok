@@ -12,23 +12,10 @@ encoder:
   attn_dropout: 0.0
   norm: "layernorm"  # "layernorm" or "rmsnorm"
 
-classifier:
-  tie_to_codebook: true
-  learnable_temperature: true
-  use_cosine: false
-  bias_from_code_norm: true
-  projector_dim: null
-  ignore_index: -100
-
 codebook:
-  preset: "base"  # "base" or "lite"
+  preset: base
   path: null
-  trainable: false
 
 decoder:
-  enabled: false
-  preset: null    # if null, inherit from model.codebook.preset
-  path: null      # overrides preset when set
-  freeze: true
-
-
+  preset: null  # null inherits the codebook preset when generation.decode is true
+  path: null

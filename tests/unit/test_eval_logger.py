@@ -34,7 +34,6 @@ def test_format_eval_message_known_metrics():
         wandb=None,
         log_file=None,
         is_main=True,
-        objective="mlm",
     )
 
     metrics = {
@@ -62,7 +61,6 @@ def test_format_eval_message_structure_metrics():
         wandb=None,
         log_file=None,
         is_main=True,
-        objective="codebook",
     )
 
     metrics = {
@@ -87,7 +85,6 @@ def test_format_eval_message_unknown_metrics():
         wandb=None,
         log_file=None,
         is_main=True,
-        objective="mlm",
     )
 
     metrics = {
@@ -111,7 +108,6 @@ def test_format_eval_message_all_computed_metrics_logged():
         wandb=None,
         log_file=None,
         is_main=True,
-        objective="mlm",
     )
 
     # Mix of known and unknown metrics
@@ -150,7 +146,6 @@ def test_log_eval_console_output():
         wandb=None,
         log_file=None,
         is_main=True,
-        objective="mlm",
     )
 
     metrics = {"loss": 0.5, "mask_acc": 0.85, "custom_metric": 0.42}
@@ -171,7 +166,6 @@ def test_log_eval_wandb_logs_all_metrics():
         wandb=wandb,
         log_file=None,
         is_main=True,
-        objective="mlm",
     )
 
     metrics = {
@@ -204,7 +198,6 @@ def test_log_eval_not_main_process():
         wandb=wandb,
         log_file=None,
         is_main=False,  # Not main process
-        objective="mlm",
     )
 
     metrics = {"loss": 0.5}
@@ -221,7 +214,6 @@ def test_format_eval_message_metric_ordering():
         wandb=None,
         log_file=None,
         is_main=True,
-        objective="mlm",
     )
 
     # Provide metrics in random order
@@ -262,7 +254,6 @@ def test_format_eval_message_epoch_not_logged_twice():
         wandb=None,
         log_file=None,
         is_main=True,
-        objective="mlm",
     )
 
     # Simulate what train.py does: inject epoch into metrics dict
@@ -292,7 +283,6 @@ def test_log_eval_epoch_in_metrics_not_duplicated():
         wandb=None,
         log_file=None,
         is_main=True,
-        objective="mlm",
     )
 
     # Metrics with epoch injected (as train.py does)

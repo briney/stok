@@ -11,6 +11,7 @@ import torch
 from .collate import tokenize_residues
 from .structure_export import validate_structure_dataset
 from ..utils.pretrained import file_sha256, json_sha256, state_sha256
+from ..utils.tokenizer import Tokenizer
 
 CANONICAL_AA = "ACDEFGHIKLMNPQRSTVWY"
 
@@ -41,6 +42,40 @@ class MDLMRunIdentity(TypedDict):
     training_signature: str
     eval_cohort: dict[str, Any] | None
     generation_cohort: dict[str, Any] | None
+
+
+def mdlm_vocabulary(codebook: torch.Tensor) -> dict[str, int | str]:
+    return {
+        "codebook_size": codebook.shape[0],
+        "structure_pad": codebook.shape[0],
+        "structure_mask": codebook.shape[0] + 1,
+        "structure_unavailable": codebook.shape[0] + 2,
+        "sequence_targets": CANONICAL_AA,
+        "sequence_vocab_sha256": json_sha256(Tokenizer().get_vocab()),
+    }
+
+
+def mdlm_training_signature(identity) -> str:
+    """Reconstruct training identity from saved fields, without artifact access."""
+    return json_sha256(
+        {
+            "sources": [
+                {"dataset": name, **source}
+                for name, source in identity["sources"].items()
+                if source["kind"] == "train"
+            ],
+            **{
+                key: identity[key]
+                for key in (
+                    "split_sha256",
+                    "codebook_sha256",
+                    "tokenizer_sha256",
+                    "policy_sha256",
+                    "vocabulary",
+                )
+            },
+        }
+    )
 
 
 def _sample_key(namespace: str, sequence_id: str) -> str:
@@ -388,34 +423,17 @@ def validate_mdlm_sources(
             keys.append(samples[key]["sample_key"])
         return {"sha256": file_sha256(path), "sample_keys": keys}
 
-    vocabulary = {
-        "codebook_size": codebook.shape[0],
-        "structure_pad": codebook.shape[0],
-        "structure_mask": codebook.shape[0] + 1,
-        "structure_unavailable": codebook.shape[0] + 2,
-        "sequence_targets": CANONICAL_AA,
-    }
-    training_identity = {
-        "sources": [
-            {"dataset": name, **identity}
-            for name, identity in sources.items()
-            if identity["kind"] == "train"
-        ],
-        "split_sha256": split_sha256,
-        "codebook_sha256": digest,
-        "tokenizer_sha256": compatible[0],
-        "policy_sha256": compatible[1],
-        "vocabulary": vocabulary,
-    }
-    return {
+    identity: MDLMRunIdentity = {
         "sources": sources,
         "sample_key_namespaces": namespaces,
         "split_sha256": split_sha256,
         "tokenizer_sha256": compatible[0],
         "policy_sha256": compatible[1],
         "codebook_sha256": digest,
-        "vocabulary": vocabulary,
-        "training_signature": json_sha256(training_identity),
+        "vocabulary": mdlm_vocabulary(codebook),
+        "training_signature": "",
         "eval_cohort": cohort_identity(eval_cohort),
         "generation_cohort": cohort_identity(generation_cohort),
     }
+    identity["training_signature"] = mdlm_training_signature(identity)
+    return identity

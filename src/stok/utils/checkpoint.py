@@ -3,20 +3,22 @@
 from contextlib import contextmanager
 from importlib.metadata import version
 from pathlib import Path
-from typing import TypedDict, cast
+from typing import cast
 import os
-import math
 import platform
 import random
 import tempfile
+import hashlib
 
 import numpy as np
 import torch
 from accelerate.utils import gather_object
 from omegaconf import OmegaConf
 
-from stok.config import normalize_training_config
+from stok.config import validate_training_config
 from stok.data.dataset import set_dataset_epoch
+from stok.data.mdlm import mdlm_training_signature, mdlm_vocabulary
+from stok.training.tasks import validate_logging_state
 from stok.utils.pretrained import file_sha256, state_sha256
 
 
@@ -38,11 +40,15 @@ def collect_rng_state(*, device=None):
     return state
 
 
-def restore_rng_state(state):
-    random.setstate(state["python"])
+def _numpy_rng_state(state):
     numpy = list(state["numpy"])
     numpy[1] = np.asarray(numpy[1], dtype=np.uint32)
-    np.random.set_state(tuple(numpy))
+    return tuple(numpy)
+
+
+def restore_rng_state(state):
+    random.setstate(state["python"])
+    np.random.set_state(_numpy_rng_state(state))
     torch.set_rng_state(state["torch"])
     if "cuda" in state:
         torch.cuda.set_rng_state_all(state["cuda"])
@@ -67,11 +73,28 @@ def rank_errors(error, accelerator, context):
         raise RuntimeError(f"{context}: {errors}")
 
 
-def resume_signature(cfg, *, sources, codebook, accelerator, training_decoder=None):
+def package_source_sha256(root: Path | None = None) -> str:
+    """Hash installed Python/config names and bytes identically in checkout and wheel."""
+    root = root or Path(__file__).resolve().parents[1]
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root)
+        if path.suffix not in {".py", ".yaml"} or any(
+            part in {"__pycache__", "build", "dist"} for part in relative.parts
+        ):
+            continue
+        name, content = relative.as_posix().encode(), path.read_bytes()
+        for value in (name, content):
+            digest.update(len(value).to_bytes(8, "big"))
+            digest.update(value)
+    return digest.hexdigest()
+
+
+def scientific_config(cfg):
+    """Project the training trajectory, permitting evaluation/output overrides."""
     config = OmegaConf.to_container(cfg, resolve=True)
     if not isinstance(config, dict):
         raise ValueError("Resume configuration must resolve to a mapping")
-    config = normalize_training_config(config, checkpoint=True)
     train, data = config["train"], config["data"]
     for key in (
         "output_dir",
@@ -81,24 +104,16 @@ def resume_signature(cfg, *, sources, codebook, accelerator, training_decoder=No
         "log_every",
         "eval",
         "save_every",
-        "mdlm_identity",
-        "effective_precision",
-        "decoding",
     ):
         train.pop(key, None)
     data.pop("eval", None)
-    # Decoder settings affect training only when geometry supervision is active.
-    uses_decoder = bool(train.get("fape", {}).get("enabled"))
-    decoder_identity = None
-    if uses_decoder:
-        if training_decoder is None:
-            raise ValueError(
-                "FAPE resume identity requires the loaded training decoder"
-            )
-        decoder_identity = state_sha256(training_decoder.state_dict())
-    else:
-        config["model"].pop("decoder", None)
+    config["model"].pop("decoder", None)
     config.pop("print_model_summary", None)
+    return config
+
+
+def resume_signature(cfg, *, sources, codebook, accelerator, identity):
+    config = scientific_config(cfg)
     identities = []
     for source in sources:
         path = Path(source["path"])
@@ -117,18 +132,27 @@ def resume_signature(cfg, *, sources, codebook, accelerator, training_decoder=No
         "config": config,
         "sources": identities,
         "source_order": sources,
-        "training_decoder": decoder_identity,
-        "mdlm_identity": OmegaConf.select(
-            cfg, "train.mdlm_identity.training_signature"
-        ),
+        "mdlm_identity": identity["training_signature"],
         "codebook": state_sha256({"codebook": codebook})
         if codebook is not None
         else None,
+        "source": {"sha256": package_source_sha256()},
         "software": {
             "python": platform.python_version(),
             **{
                 name: version(name)
-                for name in ("torch", "accelerate", "numpy", "pyarrow")
+                for name in (
+                    "torch",
+                    "accelerate",
+                    "numpy",
+                    "pyarrow",
+                    "hydra-core",
+                    "omegaconf",
+                    "tokenizers",
+                    "transformers",
+                    "x-transformers",
+                    "vector-quantize-pytorch",
+                )
             },
         },
         "execution": {
@@ -148,6 +172,13 @@ def resume_signature(cfg, *, sources, codebook, accelerator, training_decoder=No
             else None,
             "deterministic": torch.are_deterministic_algorithms_enabled(),
             "tf32": torch.backends.cuda.matmul.allow_tf32,
+            "sdpa": {
+                "flash": torch.backends.cuda.flash_sdp_enabled(),
+                "math": torch.backends.cuda.math_sdp_enabled(),
+                "memory_efficient": torch.backends.cuda.mem_efficient_sdp_enabled(),
+                "cudnn": torch.backends.cuda.cudnn_sdp_enabled(),
+                "math_low_precision_reduction": torch.backends.cuda.fp16_bf16_reduction_math_sdp_allowed(),
+            },
         },
     }
 
@@ -155,10 +186,10 @@ def resume_signature(cfg, *, sources, codebook, accelerator, training_decoder=No
 def read_training_checkpoint(path: Path) -> dict:
     payload = torch.load(path, map_location="cpu", weights_only=True)
     if not isinstance(payload, dict) or (
-        type(payload.get("format_version")) is not int or payload["format_version"] != 2
+        type(payload.get("format_version")) is not int or payload["format_version"] != 3
     ):
         raise ValueError(
-            "Full resume requires a version 2 training checkpoint; weights-only/legacy checkpoints cannot resume"
+            "STok requires a complete version 3 training checkpoint; unsupported versions and weights-only checkpoints cannot load"
         )
     required = {
         "model",
@@ -168,6 +199,7 @@ def read_training_checkpoint(path: Path) -> dict:
         "signature",
         "rank_states",
         "config",
+        "runtime",
         "global_step",
         "micro_step",
         "residues_seen",
@@ -178,18 +210,78 @@ def read_training_checkpoint(path: Path) -> dict:
         raise ValueError(
             f"Incomplete resume checkpoint: missing {sorted(required - payload.keys())}"
         )
+    validate_resume_signature(payload, payload["signature"])
     return payload
 
 
 def validate_resume_signature(payload: dict, expected: dict) -> None:
     saved = dict(payload["signature"])
-    if "config" in saved:
-        saved["config"] = normalize_training_config(saved["config"], checkpoint=True)
     if saved != expected:
         changed = [key for key in expected if saved.get(key) != expected[key]]
         raise ValueError(
             f"Resume signature mismatch: {changed}; original data/model/execution/budget must be unchanged"
         )
+    runtime = payload["runtime"]
+    required_runtime = {
+        "components",
+        "effective_precision",
+        "mdlm_identity",
+        "software",
+        "execution",
+        "source",
+    }
+    if not isinstance(runtime, dict) or required_runtime - runtime.keys():
+        raise ValueError("Incomplete runtime manifest")
+    components = runtime["components"]
+    cfg = OmegaConf.create(payload["config"])
+    if scientific_config(cfg) != saved["config"]:
+        raise ValueError(
+            "Checkpoint scientific configuration disagrees with resume identity"
+        )
+    validate_training_config(cfg)
+    required_components = {
+        "objective": cfg.train.objective,
+        "model": "stok_mdlm",
+        "sequence_tokenizer": "native",
+        "structure_representation": "frozen_vq",
+        "optimizer": cfg.train.optimizer,
+        "scheduler": cfg.train.scheduler,
+    }
+    if (
+        not isinstance(components, dict)
+        or any(
+            components.get(key) != value for key, value in required_components.items()
+        )
+        or any(not isinstance(value, str) or not value for value in components.values())
+    ):
+        raise ValueError("Incomplete or inconsistent component/representation manifest")
+    identity = runtime["mdlm_identity"]
+    codebook = payload["model"].get("structure_codebook")
+    if not isinstance(codebook, torch.Tensor) or codebook.ndim != 2:
+        raise ValueError("Checkpoint structure codebook is missing or invalid")
+    digest = state_sha256({"codebook": codebook})
+    if digest != saved["codebook"] or digest != identity.get("codebook_sha256"):
+        raise ValueError("Checkpoint structure codebook disagrees with resume identity")
+    if identity.get("vocabulary") != mdlm_vocabulary(codebook):
+        raise ValueError("Checkpoint vocabulary identity is incompatible")
+    try:
+        training_signature = mdlm_training_signature(identity)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("Incomplete MDLM training identity") from exc
+    if (
+        any(
+            runtime.get(key) != saved[key]
+            for key in ("software", "execution", "source")
+        )
+        or training_signature != identity.get("training_signature")
+        or training_signature != saved["mdlm_identity"]
+        or runtime["effective_precision"] != saved["execution"]["precision"]
+        or (
+            cfg.train.mixed_precision is not None
+            and cfg.train.mixed_precision != runtime["effective_precision"]
+        )
+    ):
+        raise ValueError("Checkpoint runtime manifest disagrees with resume identity")
     ranks = payload["rank_states"]
     size = expected["execution"]["world_size"]
     if (
@@ -199,6 +291,20 @@ def validate_resume_signature(payload: dict, expected: dict) -> None:
     ):
         raise ValueError("Missing or invalid per-rank resume state")
     execution = expected["execution"]
+    sdpa = execution.get("sdpa")
+    if (
+        not isinstance(sdpa, dict)
+        or set(sdpa)
+        != {
+            "flash",
+            "math",
+            "memory_efficient",
+            "cudnn",
+            "math_low_precision_reduction",
+        }
+        or any(type(value) is not bool for value in sdpa.values())
+    ):
+        raise ValueError("Incomplete SDPA execution policy in resume identity")
     sizes = execution.get("cuda_rng_state_sizes")
     if (
         not isinstance(sizes, list)
@@ -223,8 +329,15 @@ def validate_resume_signature(payload: dict, expected: dict) -> None:
         ):
             raise ValueError("Invalid resume cursor")
         rng = rank["rng"]
-        if not isinstance(rng, dict):
-            raise ValueError("Invalid RNG state")
+        try:
+            # Validate native CPU states on local generators, without changing
+            # training streams or touching the saved/current CUDA device.
+            random.Random(0).setstate(rng["python"])
+            np.random.RandomState(0).set_state(_numpy_rng_state(rng))
+            torch.Generator().set_state(rng["torch"])
+            torch.Generator().set_state(rank["loader_generator_state"])
+        except (KeyError, IndexError, TypeError, ValueError, RuntimeError) as exc:
+            raise ValueError("Incomplete or invalid CPU/loader RNG state") from exc
         if sizes:
             states, active = rng.get("cuda"), rng.get("cuda_device")
             if (
@@ -244,36 +357,7 @@ def validate_resume_signature(payload: dict, expected: dict) -> None:
                 raise ValueError("Incomplete or invalid CUDA RNG state collection")
         elif "cuda" in rng or "cuda_device" in rng:
             raise ValueError("Unexpected CUDA RNG state for CPU execution")
-        logging = rank["logging"]
-        required_logging = {
-            "running_loss",
-            "running_updates",
-            "running_cls_loss",
-            "running_cls_count",
-            "running_fape_loss",
-            "running_fape_count",
-            "running_pred_nan_frac_sum",
-            "running_pred_nan_frac_count",
-            "running_masked_acc_sum",
-            "running_masked_acc_count",
-            "total_missing_structure",
-            "total_noncanonical_sequence",
-            "mdlm_running",
-        }
-        if not isinstance(logging, dict) or required_logging - logging.keys():
-            raise ValueError("Incomplete per-rank logging state")
-        if not isinstance(logging["mdlm_running"], torch.Tensor) or logging[
-            "mdlm_running"
-        ].shape != (5, 2):
-            raise ValueError("Invalid per-rank MDLM logging state")
-        if any(
-            not isinstance(logging[key], (int, float))
-            or not math.isfinite(logging[key])
-            for key in required_logging - {"mdlm_running"}
-        ):
-            raise ValueError("Invalid numeric logging state")
-        if not isinstance(rank["loader_generator_state"], torch.Tensor):
-            raise ValueError("Missing epoch-start loader generator state")
+        validate_logging_state(rank["logging"])
     if any(
         type(payload[key]) is not int or payload[key] < 0
         for key in ("global_step", "micro_step", "residues_seen", "executed_positions")
@@ -281,37 +365,37 @@ def validate_resume_signature(payload: dict, expected: dict) -> None:
         raise ValueError("Invalid resume counters")
     if payload["scheduler"].get("last_epoch") != payload["global_step"]:
         raise ValueError("Resume scheduler and successful-update counters disagree")
-
-
-class TrainingProgress(TypedDict):
-    """Completed-boundary cursor, cumulative counts, and unflushed log state."""
-
-    epoch: int
-    batches_in_epoch: int
-    global_step: int
-    micro_step: int
-    residues_seen: int
-    executed_positions: int
-    total_missing_structure: int
-    total_noncanonical_sequence: int
-    running_loss: float
-    running_updates: int
-    running_cls_loss: float
-    running_cls_count: int
-    running_fape_loss: float
-    running_fape_count: int
-    running_pred_nan_frac_sum: float
-    running_pred_nan_frac_count: int
-    running_masked_acc_sum: float
-    running_masked_acc_count: int
-    mdlm_running: torch.Tensor
-    rng: dict
-    loader_generator_state: torch.Tensor
+    # AdamW initializes state lazily: frozen/unused parameters may legitimately lack it.
+    # Separate saved coverage detects a deleted/emptied initialized entry without
+    # assuming every optimizer parameter has participated in an update.
+    initialized = payload["optimizer_initialized"]
+    states = payload["optimizer"]["state"]
+    actual = {key for key, state in states.items() if state}
+    if (
+        not isinstance(initialized, list)
+        or len(initialized) != len(set(initialized))
+        or set(initialized) != actual
+    ):
+        raise ValueError("Missing or unexpected initialized AdamW parameter state")
+    if payload["global_step"] and not states:
+        raise ValueError(
+            "Missing optimizer continuation state after successful updates"
+        )
+    for state in states.values():
+        if state and (
+            {"step", "exp_avg", "exp_avg_sq"} - state.keys()
+            or any(
+                not isinstance(state[key], torch.Tensor)
+                for key in ("exp_avg", "exp_avg_sq")
+            )
+            or state["exp_avg"].shape != state["exp_avg_sq"].shape
+        ):
+            raise ValueError("Incomplete or incompatible AdamW continuation state")
 
 
 def restore_training_state(
     payload: dict, *, model, optimizer, scheduler, accelerator
-) -> TrainingProgress:
+) -> dict:
     rank = payload["rank_states"][accelerator.process_index if accelerator else 0]
     device = accelerator.device if accelerator else torch.device("cpu")
     if device.type == "cuda":
@@ -326,37 +410,16 @@ def restore_training_state(
             )
     elif "cuda" in rank["rng"]:
         raise ValueError("CUDA RNG training state requires CUDA execution")
-    # AdamW initializes state lazily: frozen/unused parameters may legitimately lack it.
-    # Separate saved coverage detects a deleted/emptied initialized entry without
-    # assuming every optimizer parameter has participated in an update.
-    initialized = payload["optimizer_initialized"]
-    states = payload["optimizer"]["state"]
-    actual = {key for key, state in states.items() if state}
-    if (
-        not isinstance(initialized, list)
-        or len(initialized) != len(set(initialized))
-        or set(initialized) != actual
-    ):
-        raise ValueError("Missing or unexpected initialized AdamW parameter state")
     plain = accelerator.unwrap_model(model) if accelerator else model
     plain.load_state_dict(payload["model"], strict=True)
-    if payload["config"]["train"].get("objective") == "mdlm":
-        plain.mdlm_regime_weights = payload["config"]["train"]["mdlm"]["regime_weights"]
+    plain.mdlm_regime_weights = payload["config"]["train"]["mdlm"]["regime_weights"]
     optimizer.load_state_dict(payload["optimizer"])
     scheduler.load_state_dict(payload["scheduler"])
-    if payload["global_step"] and not optimizer.state:
-        raise ValueError(
-            "Missing optimizer continuation state after successful updates"
-        )
     for group in optimizer.param_groups:
         for parameter in group["params"]:
             state = optimizer.state.get(parameter)
-            if state and (
-                {"step", "exp_avg", "exp_avg_sq"} - state.keys()
-                or any(
-                    state[key].shape != parameter.shape
-                    for key in ("exp_avg", "exp_avg_sq")
-                )
+            if state and any(
+                state[key].shape != parameter.shape for key in ("exp_avg", "exp_avg_sq")
             ):
                 raise ValueError("Incomplete or incompatible AdamW continuation state")
     scaler = getattr(accelerator, "scaler", None)
@@ -366,15 +429,14 @@ def restore_training_state(
         )
     if scaler is not None:
         scaler.load_state_dict(rank["scaler"])
-    # Validate RNG before any output replacement; restore it again after replay.
+    # Apply actual device RNG before output replacement; restore again after replay.
     rng = collect_rng_state(device=device)
     try:
         restore_rng_state(rank["rng"])
-        torch.Generator().set_state(rank["loader_generator_state"])
     finally:
         restore_rng_state(rng)
     return {
-        **rank["logging"],
+        "logging": rank["logging"],
         "epoch": rank["epoch"],
         "batches_in_epoch": rank["batches_in_epoch"],
         "global_step": payload["global_step"],

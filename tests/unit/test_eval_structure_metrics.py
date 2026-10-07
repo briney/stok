@@ -14,9 +14,7 @@ from stok.eval.metrics.structure import (
 
 def _make_cfg():
     """Create a minimal config for testing."""
-    return OmegaConf.create(
-        {"model": {"classifier": {"ignore_index": -100}, "encoder": {"pad_id": 1}}}
-    )
+    return OmegaConf.create({"model": {"encoder": {"pad_id": 1}}})
 
 
 def _stable_ncac_coords(batch: int, length: int) -> torch.Tensor:
@@ -41,8 +39,6 @@ class TestLDDTMetric:
         """Test metric initializes with correct defaults."""
         metric = LDDTMetric()
         assert metric.name == "lddt"
-        assert metric.objectives == {"codebook"}
-        assert metric.requires_decoder is True
         assert metric.requires_coords is True
 
     def test_lddt_metric_identical_structures(self):
@@ -110,8 +106,6 @@ class TestTMScoreMetric:
         """Test metric initializes with correct defaults."""
         metric = TMScoreMetric()
         assert metric.name == "tm"
-        assert metric.objectives == {"codebook"}
-        assert metric.requires_decoder is True
         assert metric.requires_coords is True
 
     def test_tm_metric_identical_structures(self):
@@ -137,8 +131,6 @@ class TestRMSDMetric:
         """Test metric initializes with correct defaults."""
         metric = RMSDMetric()
         assert metric.name == "rmsd"
-        assert metric.objectives == {"codebook"}
-        assert metric.requires_decoder is True
         assert metric.requires_coords is True
 
     def test_rmsd_metric_identical_structures(self):
@@ -170,8 +162,6 @@ class TestFAPEMetric:
         """Test metric initializes with correct defaults."""
         metric = FAPEMetric()
         assert metric.name == "fape_loss"
-        assert metric.objectives == {"codebook"}
-        assert metric.requires_decoder is True
         assert metric.requires_coords is True
 
     def test_fape_metric_identical_structures(self):
@@ -203,8 +193,6 @@ class TestPredNaNFracMetric:
         """Test metric initializes with correct defaults."""
         metric = PredNaNFracMetric()
         assert metric.name == "pred_nan_frac"
-        assert metric.objectives == {"codebook"}
-        assert metric.requires_decoder is True
         assert metric.requires_coords is False  # Only needs pred_coords
 
     def test_pred_nan_frac_no_nans(self):

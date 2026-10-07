@@ -1,23 +1,36 @@
 """Protein-weighted structure scores; absent observations are not zero scores."""
 
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 
 import torch
-from stok.eval.base import MetricBase
-from stok.eval.registry import register_metric
 from stok.utils.losses import fape_loss
 from stok.utils.masking import residue_mask_from_tokens
 from stok.utils.metrics import lddt_ca, rmsd, tm_score
 
 
-class _StructureMetric(MetricBase):
-    objectives = {"codebook"}
-    requires_decoder = True
+class _StructureMetric(ABC):
+    name = ""
     requires_coords = True
 
     def __init__(self, **kwargs):
-        super().__init__(**kwargs)
         self.reset()
+
+    def reset_population(self):
+        self.num_valid = self.num_skipped = self.num_failed = 0
+
+    def diagnostics(self) -> dict[str, float]:
+        return {
+            f"{self.name}/{key}": float(getattr(self, key))
+            for key in ("num_valid", "num_skipped", "num_failed")
+        }
+
+    def population_values(self):
+        return [self.num_valid, self.num_skipped, self.num_failed]
+
+    def load_population(self, tensor):
+        self.num_valid, self.num_skipped, self.num_failed = map(
+            int, tensor[-3:].tolist()
+        )
 
     @abstractmethod
     def score(self, pred, true, mask) -> torch.Tensor | None: ...
@@ -78,7 +91,7 @@ class _StructureMetric(MetricBase):
     def load_state_tensors(self, tensors):
         if tensors:
             self._sum, self._count = tensors[0][:2].tolist()
-            self.load_population(tensors[0], self._count)
+            self.load_population(tensors[0])
 
 
 def _target_mask(coords, mask, all_atoms=False):
@@ -93,7 +106,6 @@ def _can_align(coords, mask):
     )
 
 
-@register_metric("lddt")
 class LDDTMetric(_StructureMetric):
     name = "lddt"
 
@@ -108,7 +120,6 @@ class LDDTMetric(_StructureMetric):
         return lddt_ca(pred, true, valid)[0][0]
 
 
-@register_metric("tm_score")
 class TMScoreMetric(_StructureMetric):
     """Kabsch-aligned C-alpha TM score, not a TM-align optimization."""
 
@@ -121,7 +132,6 @@ class TMScoreMetric(_StructureMetric):
         return tm_score(pred, true, valid)[0][0]
 
 
-@register_metric("rmsd")
 class RMSDMetric(_StructureMetric):
     name = "rmsd"
 
@@ -136,7 +146,6 @@ class RMSDMetric(_StructureMetric):
         return rmsd(pred, true, valid, align=self.align, atom_set=self.atom_set)[0]
 
 
-@register_metric("fape")
 class FAPEMetric(_StructureMetric):
     name = "fape_loss"
 
@@ -153,7 +162,6 @@ class FAPEMetric(_StructureMetric):
         )
 
 
-@register_metric("pred_nan_frac")
 class PredNaNFracMetric(_StructureMetric):
     name = "pred_nan_frac"
     requires_coords = False

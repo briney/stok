@@ -20,13 +20,11 @@ from pathlib import Path
 from omegaconf import OmegaConf
 from stok.training import engine as train
 from stok.training import tasks
-from stok.models.stok import STokModel
 cfg = OmegaConf.load(sys.argv[1])
 stop = int(sys.argv[2])
 rank = int(os.environ.get("RANK", 0))
 trace = []
 original_corrupt = tasks.corrupt_mdlm_batch
-original_forward = STokModel.forward
 original_save = train._save_checkpoint
 
 def corrupt(batch, *args, **kwargs):
@@ -34,17 +32,12 @@ def corrupt(batch, *args, **kwargs):
     trace.append({'seeds': kwargs['seeds'], 'batch': batch, 'corruption': result})
     return result
 
-def forward(self, tokens, *args, **kwargs):
-    trace.append(tokens.detach().cpu().clone())
-    return original_forward(self, tokens, *args, **kwargs)
-
 def save(*args, **kwargs):
     original_save(*args, **kwargs)
     if kwargs['global_step'] == stop:
         raise InterruptedError('intentional interruption after completed checkpoint')
 
 tasks.corrupt_mdlm_batch = corrupt
-STokModel.forward = forward
 train._save_checkpoint = save
 if os.environ.get('RESUME_SKIP'):
     original_accelerator = train._maybe_get_accelerator
@@ -69,14 +62,13 @@ if os.environ.get('RESUME_SKIP'):
         return mdlm_forward(self, *args, **kwargs)
     STokMDLM.forward = rank_forward
 if os.environ.get('CHECK_PROGRESS_CONTRACT'):
-    from typing import is_typeddict
-    from stok.utils.checkpoint import TrainingProgress
     original_restore = train.restore_training_state
     def restore(*args, **kwargs):
         result = original_restore(*args, **kwargs)
-        assert is_typeddict(TrainingProgress), 'TrainingProgress must be TypedDict'
         assert type(result) is dict, 'TrainingProgress must be an ordinary dict'
-        assert {'epoch', 'batches_in_epoch', 'global_step', 'micro_step', 'residues_seen', 'executed_positions', 'running_loss', 'running_updates', 'mdlm_running'} <= result.keys()
+        assert {'epoch', 'batches_in_epoch', 'global_step', 'micro_step', 'residues_seen', 'executed_positions', 'logging'} <= result.keys()
+        assert 'running_loss' not in result and 'rng' in result
+        assert result['logging']['running_updates'] == 1
         assert result['epoch'] == 0 and result['global_step'] == 1
         return result
     train.restore_training_state = restore
@@ -138,7 +130,7 @@ def equal(a, b):
         assert a == b
 
 
-def config_for(tmp_path, objective="mdlm", source_kind="sharded", workers=0):
+def config_for(tmp_path, source_kind="sharded", workers=0):
     source, codebook = training_fixture(tmp_path, n=20)
     cfg = mdlm_config(
         tmp_path / "full",
@@ -177,33 +169,20 @@ def config_for(tmp_path, objective="mdlm", source_kind="sharded", workers=0):
             )
         )
         cfg.data.split_manifest = str(split)
-    if objective in {"mlm", "codebook"}:
-        cfg.train.objective = objective
-        cfg.train.mlm.mask_prob = 0.7
-        if source_kind == "map":
-            cfg.data.train.local.path = str(source / "part-000000.parquet")
-        elif source_kind == "mixed":
-            cfg.data.train.other.path = str(second / "part-000000.parquet")
     return cfg
 
 
 @pytest.mark.parametrize("workers", [0, 2])
 @pytest.mark.parametrize(
-    "objective,source_kind,stop",
+    "source_kind,stop",
     [
-        ("mdlm", "sharded", 2),
-        ("mdlm", "sharded", 4),
-        ("mdlm", "mixed", 2),
-        ("mlm", "map", 2),
-        ("mlm", "sharded", 4),
-        ("mlm", "mixed", 2),
-        ("codebook", "map", 2),
+        ("sharded", 2),
+        ("sharded", 4),
+        ("mixed", 2),
     ],
 )
-def test_resume_matches_uninterrupted_training(
-    tmp_path, workers, objective, source_kind, stop
-):
-    cfg = config_for(tmp_path, objective, source_kind, workers)
+def test_resume_matches_uninterrupted_training(tmp_path, workers, source_kind, stop):
+    cfg = config_for(tmp_path, source_kind, workers)
     execute(cfg, tmp_path / "full.yaml")
     cfg.train.output_dir = str(tmp_path / "interrupted")
     execute(cfg, tmp_path / "interrupted.yaml", stop=stop, ok=False)
@@ -213,7 +192,7 @@ def test_resume_matches_uninterrupted_training(
     execute(cfg, tmp_path / "resumed.yaml")
     full = torch.load(tmp_path / "full/model/final.pt", weights_only=True)
     resumed = torch.load(tmp_path / "interrupted/model/final.pt", weights_only=True)
-    assert full["format_version"] == resumed["format_version"] == 2
+    assert full["format_version"] == resumed["format_version"] == 3
     for key in (
         "model",
         "optimizer",
@@ -264,6 +243,9 @@ def test_two_rank_continuation_with_actual_cpu_scaler_skip(tmp_path, workers):
     execute(cfg, tmp_path / "resumed.yaml", distributed=True, extra_env=env)
     full = torch.load(tmp_path / "full/model/final.pt", weights_only=True)
     resumed = torch.load(tmp_path / "interrupted/model/final.pt", weights_only=True)
+    for rank_state in full["rank_states"]:
+        assert rank_state["logging"]["running_updates"] == 1
+    equal(full["rank_states"][0]["logging"], full["rank_states"][1]["logging"])
     for key in (
         "model",
         "optimizer",
@@ -315,7 +297,12 @@ def test_rejected_resume_preserves_every_artifact(tmp_path, key, value):
     before = snapshot(project)
     OmegaConf.update(cfg, key, value)
     results = execute(cfg, tmp_path / "rejected.yaml", ok=False)
-    assert "signature mismatch" in results[0].stderr
+    reason = (
+        "only supports paired mdlm"
+        if key == "train.objective"
+        else "signature mismatch"
+    )
+    assert reason in results[0].stderr
     assert snapshot(project) == before
 
 
@@ -390,24 +377,14 @@ def test_rank_local_checkpoint_failures_reach_all_ranks(tmp_path, failure):
         assert not list((project / "checkpoints").glob(".*.pt.*"))
 
 
-@pytest.mark.parametrize("objective", ["mlm", "codebook"])
-def test_legacy_invalid_resume_does_not_touch_artifacts(tmp_path, objective):
-    cfg = config_for(tmp_path, "mlm", "map")
-    cfg.train.objective = objective
-    execute(cfg, tmp_path / "original.yaml", stop=1, ok=False)
-    project = Path(cfg.train.output_dir)
-    cfg.train.resume_from = str(project / "checkpoints/step_00000001.pt")
-    cfg.train.lr *= 2
-    before = snapshot(project)
-    execute(cfg, tmp_path / "rejected.yaml", ok=False)
-    assert snapshot(project) == before
-
-
 @pytest.mark.parametrize(
     "damage",
     [
         "logging",
         "logging_value",
+        "logging_tensor",
+        "manifest_source",
+        "manifest_identity",
         "optimizer",
         "optimizer_partial",
         "optimizer_empty_entry",
@@ -427,6 +404,12 @@ def test_incomplete_rank_state_rejected_before_output(tmp_path, damage):
         del rank["logging"]["running_loss"]
     elif damage == "logging_value":
         rank["logging"]["running_loss"] = "broken"
+    elif damage == "logging_tensor":
+        rank["logging"]["mdlm_running"][0, 0] = float("nan")
+    elif damage == "manifest_source":
+        payload["runtime"]["source"] = {"sha256": "changed"}
+    elif damage == "manifest_identity":
+        payload["runtime"]["mdlm_identity"]["training_signature"] = "changed"
     elif damage == "optimizer":
         payload["optimizer"]["state"].clear()
     elif damage == "optimizer_partial":
@@ -676,7 +659,7 @@ def test_resume_allows_output_logging_evaluation_and_checkpoint_overrides(tmp_pa
     equal(full["rank_states"][0]["rng"], final["rank_states"][0]["rng"])
 
 
-def test_training_progress_is_flat_typed_dict(tmp_path):
+def test_resume_cursor_keeps_task_logging_separate(tmp_path):
     cfg = config_for(tmp_path)
     execute(cfg, tmp_path / "original.yaml", stop=1, ok=False)
     cfg.train.resume_from = str(
@@ -685,94 +668,27 @@ def test_training_progress_is_flat_typed_dict(tmp_path):
     execute(cfg, tmp_path / "resumed.yaml", extra_env={"CHECK_PROGRESS_CONTRACT": "1"})
 
 
-def fape_config(tmp_path):
-    from stok.models.decoder import GeometricDecoder
-
-    cfg = config_for(tmp_path, "codebook", "map")
-    decoder = GeometricDecoder(
-        d_code=2,
-        d_model=16,
-        n_heads=2,
-        n_layers=1,
-        ffn_mult=1,
-        max_length=32,
-        num_memory_tokens=0,
-        attn_kv_heads=1,
-    )
-    cfg.model.decoder.path = str(tmp_path / "decoder.pt")
-    cfg.model.decoder.preset = "lite"
-    torch.save(decoder.state_dict(), cfg.model.decoder.path)
-    cfg.data.load_coords = True
-    cfg.train.fape.enabled = True
-    cfg.train.fape.start_step = 0
-    cfg.train.fape.weight = 1
-    cfg.train.max_steps = 3
-    cfg.train.log_every = 1
-    return cfg
-
-
-def test_changed_training_decoder_rejected_before_artifacts(tmp_path):
-    cfg = fape_config(tmp_path)
-    env = {"RESUME_TINY_DECODER": "1"}
-    execute(cfg, tmp_path / "original.yaml", stop=1, ok=False, extra_env=env)
-    project = Path(cfg.train.output_dir)
-    cfg.train.resume_from = str(project / "checkpoints/step_00000001.pt")
-    before = snapshot(project)
-    decoder = torch.load(cfg.model.decoder.path, weights_only=True)
-    decoder["projector_in.weight"].add_(0.25)
-    torch.save(decoder, cfg.model.decoder.path)
-    results = execute(cfg, tmp_path / "rejected.yaml", extra_env=env, ok=False)
-    assert "signature mismatch" in results[0].stderr
-    assert snapshot(project) == before
-
-
-@pytest.mark.parametrize("distributed", [False, True])
-def test_fape_resume_with_same_decoder_matches_uninterrupted(tmp_path, distributed):
-    cfg = fape_config(tmp_path)
-    cfg.train.log_every = 2
-    env = {"RESUME_TINY_DECODER": "1"}
-    execute(cfg, tmp_path / "full.yaml", extra_env=env, distributed=distributed)
-    cfg.train.output_dir = str(tmp_path / "interrupted")
-    execute(
-        cfg,
-        tmp_path / "interrupted.yaml",
-        stop=1,
-        ok=False,
-        extra_env=env,
-        distributed=distributed,
-    )
-    cfg.train.resume_from = str(tmp_path / "interrupted/checkpoints/step_00000001.pt")
-    execute(cfg, tmp_path / "resumed.yaml", extra_env=env, distributed=distributed)
-    full = torch.load(tmp_path / "full/model/final.pt", weights_only=True)
-    resumed = torch.load(tmp_path / "interrupted/model/final.pt", weights_only=True)
-    for key in (
-        "model",
-        "optimizer",
-        "scheduler",
-        "global_step",
-        "micro_step",
-        "rank_states",
-    ):
-        equal(full[key], resumed[key])
-    assert " | fape " in (tmp_path / "full/logs/train.log").read_text()
-
-    # Only main rank resets after step 2; both rank states must round-trip.
-    assert len(full["rank_states"]) == (2 if distributed else 1)
-    for rank, rank_state in enumerate(full["rank_states"]):
-        logging = rank_state["logging"]
-        assert logging["running_updates"] == (1 if rank == 0 else 3)
-        assert logging["running_pred_nan_frac_count"] == (
-            3 if rank == 0 else full["micro_step"]
-        )
-        assert logging["running_fape_count"] > 0
-    assert full["residues_seen"] == resumed["residues_seen"] == 0
-
-
 def test_optimizer_coverage_preserves_unused_and_frozen_parameters(tmp_path):
-    from stok.cli.train import _save_checkpoint
-    from stok.utils.checkpoint import read_training_checkpoint, restore_training_state
+    from stok.training.engine import _save_checkpoint
+    from stok.utils.checkpoint import (
+        read_training_checkpoint,
+        restore_training_state,
+        resume_signature,
+    )
+    from stok.data.mdlm import validate_mdlm_sources
+
+    source, artifact = training_fixture(tmp_path)
+    codebook = torch.load(artifact, weights_only=True)["codebook"]
+    cfg = mdlm_config(tmp_path / "run", source, artifact)
+    identity = validate_mdlm_sources(
+        {"local": {"path": str(source)}}, {}, codebook=codebook, split_manifest=None
+    )
+    signature = resume_signature(
+        cfg, sources=[], codebook=codebook, accelerator=None, identity=identity
+    )
 
     model = torch.nn.Module()
+    model.register_buffer("structure_codebook", codebook)
     model.unused = torch.nn.Parameter(torch.ones(1))
     model.frozen = torch.nn.Parameter(torch.ones(1), requires_grad=False)
     model.used = torch.nn.Linear(2, 1)
@@ -786,14 +702,6 @@ def test_optimizer_coverage_preserves_unused_and_frozen_parameters(tmp_path):
         [
             "running_loss",
             "running_updates",
-            "running_cls_loss",
-            "running_cls_count",
-            "running_fape_loss",
-            "running_fape_count",
-            "running_pred_nan_frac_sum",
-            "running_pred_nan_frac_count",
-            "running_masked_acc_sum",
-            "running_masked_acc_count",
             "total_missing_structure",
             "total_noncanonical_sequence",
         ],
@@ -808,10 +716,25 @@ def test_optimizer_coverage_preserves_unused_and_frozen_parameters(tmp_path):
         scheduler=scheduler,
         global_step=1,
         micro_step=1,
-        cfg=OmegaConf.create({"train": {"objective": "codebook"}}),
+        residues_seen=1,
+        executed_positions=1,
+        runtime={
+            "components": {
+                "objective": "mdlm",
+                "model": "stok_mdlm",
+                "sequence_tokenizer": "native",
+                "structure_representation": "frozen_vq",
+                "optimizer": "adamw",
+                "scheduler": "warmup_linear",
+            },
+            "effective_precision": "no",
+            **{key: signature[key] for key in ("source", "software", "execution")},
+            "mdlm_identity": identity,
+        },
+        cfg=cfg,
         accelerator=None,
         training_state={
-            "signature": {},
+            "signature": signature,
             "wandb_run_id": None,
             "local": {
                 "epoch": 0,
@@ -842,26 +765,9 @@ def test_optimizer_coverage_preserves_unused_and_frozen_parameters(tmp_path):
     equal(optimizer.state_dict(), restored_optimizer.state_dict())
 
 
-def test_eval_only_decoder_does_not_constrain_resume_signature(tmp_path):
-    from stok.utils.checkpoint import resume_signature
-
-    cfg = config_for(tmp_path, "codebook", "map")
-    cfg.train.fape.enabled = False
-    decoder = torch.nn.Linear(2, 3)
-    first = resume_signature(
-        cfg, sources=[], codebook=None, accelerator=None, training_decoder=decoder
-    )
-    with torch.no_grad():
-        decoder.weight.add_(1)
-    second = resume_signature(
-        cfg, sources=[], codebook=None, accelerator=None, training_decoder=decoder
-    )
-    assert first == second
-
-
 @pytest.fixture(scope="module")
 def rng_checkpoint(tmp_path_factory):
-    from stok.cli.train import run_training
+    from stok.training.engine import run_training
 
     root = tmp_path_factory.mktemp("rng-checkpoint")
     cfg = config_for(root)

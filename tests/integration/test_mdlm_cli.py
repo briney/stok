@@ -13,7 +13,7 @@ import pytest
 import torch
 
 from stok.cli.cli import cli
-from stok.cli.train import run_training
+from stok.training.engine import run_training
 from stok.eval.mdlm import resolve_mdlm_eval_config
 from stok.models.mdlm import STokMDLM
 from stok.utils.mdlm import REGIMES, validate_mdlm_config
@@ -83,7 +83,7 @@ def test_pilot_composes_pinned_values_and_parameter_count():
         1,
     }
     assert {case.regime for case in resolved.cases.values()} == set(REGIMES)
-    assert all(case.span_mean == 8 for case in resolved.cases.values())
+    assert all(case.get("span_mean", 8) == 8 for case in resolved.cases.values())
     assert not any(
         key in cfg.train.eval.mdlm
         for key in ("mask_probabilities", "regimes", "placements", "generation_steps")
@@ -98,9 +98,9 @@ def test_hydra_overrides_remain_authoritative(regime):
     cfg = pilot(
         *weights,
         "train.mdlm.placement=span",
-        "train.mdlm.span_mean=5",
+        "+train.mdlm.span_mean=5",
         "train.mdlm.noise.name=power",
-        "train.mdlm.noise.power=3",
+        "+train.mdlm.noise.power=3",
         "train.batch_size=1",
         "train.mixed_precision=no",
     )
@@ -170,13 +170,13 @@ def test_startup_fails_before_artifacts_or_wandb(tmp_path, monkeypatch, kind):
     elif kind == "precision":
         cfg.train.mixed_precision = "fp16"
     else:
-        cfg.train.gumbel.hard = True
+        cfg.train.gumbel = {"hard": True}
     monkeypatch.setattr(
         "stok.training.engine._maybe_init_wandb",
         lambda *a, **kw: pytest.fail("W&B reached before preflight"),
     )
     with pytest.raises(
-        (ValueError, RuntimeError), match="MDLM|precision|project_path|populated"
+        (ValueError, RuntimeError), match="MDLM|precision|output_dir|populated|gumbel"
     ):
         run_training(cfg)
     assert not project.exists() or sorted(p.name for p in project.iterdir()) == ["keep"]
@@ -226,7 +226,7 @@ def row_for(payload, mode):
     if mode == "folding":
         row["sequence"] = "AXG"
     elif mode == "inverse_folding":
-        identity = payload["config"]["train"]["mdlm_identity"]
+        identity = payload["runtime"]["mdlm_identity"]
         row.update(
             structure_tokens=[2, None, 7],
             tokenizer_sha256=identity["tokenizer_sha256"],
@@ -370,6 +370,8 @@ def test_invalid_manifest_never_creates_output(tmp_path, trained, change):
     "change", ["legacy", "objective", "codebook", "conditional", "unknown"]
 )
 def test_invalid_or_unqualified_checkpoint_fails_closed(tmp_path, trained, change):
+    from stok.utils.checkpoint import scientific_config
+
     checkpoint, payload = trained
     changed = {
         **payload,
@@ -386,6 +388,10 @@ def test_invalid_or_unqualified_checkpoint_fails_closed(tmp_path, trained, chang
         )
     elif change == "conditional":
         changed["config"]["train"]["mdlm"]["regime_weights"] = {"structure_only": 1}
+        changed["signature"] = {
+            **payload["signature"],
+            "config": scientific_config(OmegaConf.create(changed["config"])),
+        }
     else:
         del changed["config"]["train"]["mdlm"]["regime_weights"]
     checkpoint = tmp_path / "bad.pt"
@@ -394,8 +400,10 @@ def test_invalid_or_unqualified_checkpoint_fails_closed(tmp_path, trained, chang
         tmp_path, checkpoint, [{"sequence_id": "sample", "length": 3}], "joint"
     )
     assert result.exit_code != 0 and not output.exists()
-    if change in {"conditional", "unknown"}:
+    if change == "conditional":
         assert "joint" in result.output and "qualified" in result.output
+    elif change == "unknown":
+        assert "configuration" in result.output
 
 
 def test_sampling_rejects_incomplete_saved_rank_state(tmp_path, trained):
@@ -490,7 +498,7 @@ def test_supplied_target_tokens_never_reach_first_forward(
     tmp_path, trained, monkeypatch, mode
 ):
     checkpoint, payload = trained
-    identity = payload["config"]["train"]["mdlm_identity"]
+    identity = payload["runtime"]["mdlm_identity"]
     row = {
         "sequence_id": "sample",
         "length": 3,
@@ -606,3 +614,188 @@ def test_cpu_sampling_valid_gpu_checkpoint_never_restores_device_rng(
     )
     assert result.exit_code == 0, result.output
     assert json.loads(output.read_text())["length"] == 3
+
+
+@pytest.mark.parametrize(
+    "damage", ["representation", "sequence_vocabulary", "active_metrics"]
+)
+def test_sampler_rejects_corrupt_current_identity_and_state(tmp_path, trained, damage):
+    import copy
+
+    _, original = trained
+    payload = copy.deepcopy(original)
+    if damage == "representation":
+        payload["runtime"]["components"]["structure_representation"] = "lfq"
+    elif damage == "sequence_vocabulary":
+        payload["runtime"]["mdlm_identity"]["vocabulary"]["sequence_vocab_sha256"] = (
+            "changed"
+        )
+    else:
+        payload["rank_states"][0]["logging"]["mdlm_running"][0, 0] = float("nan")
+    checkpoint = tmp_path / "bad.pt"
+    torch.save(payload, checkpoint)
+    result, output = invoke_sample(
+        tmp_path, checkpoint, [{"sequence_id": "sample", "length": 3}], "joint"
+    )
+    assert result.exit_code != 0 and not output.exists()
+    assert any(
+        word in result.output.lower()
+        for word in ("representation", "vocabulary", "logging")
+    )
+
+
+def test_sampler_rejects_same_size_reordered_sequence_vocabulary(
+    tmp_path, trained, monkeypatch
+):
+    from importlib import import_module
+    from stok.utils.tokenizer import DEFAULT_VOCAB, Tokenizer
+
+    vocab = list(DEFAULT_VOCAB)
+    left, right = vocab.index("A"), vocab.index("G")
+    vocab[left], vocab[right] = vocab[right], vocab[left]
+    path = tmp_path / "vocab.txt"
+    path.write_text("\n".join(vocab))
+    monkeypatch.setattr(
+        import_module("stok.cli.sample"),
+        "Tokenizer",
+        lambda: Tokenizer(vocab_file=str(path)),
+    )
+    checkpoint, _ = trained
+    result, output = invoke_sample(
+        tmp_path, checkpoint, [{"sequence_id": "sample", "length": 3}], "joint"
+    )
+    assert result.exit_code != 0 and not output.exists()
+    assert "vocabulary" in result.output.lower()
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "components",
+        "cpu_rng",
+        "optimizer",
+        "optimizer_partial",
+        "numpy_rng",
+        "loader_rng",
+    ],
+)
+def test_current_reader_rejects_incomplete_continuation_state(
+    tmp_path, trained, damage
+):
+    from stok.utils.checkpoint import read_training_checkpoint
+
+    _, original = trained
+    payload = copy.deepcopy(original)
+    if damage == "components":
+        del payload["runtime"]["components"]
+    elif damage == "cpu_rng":
+        payload["rank_states"][0]["rng"] = {}
+    elif damage == "optimizer":
+        payload["optimizer"]["state"].clear()
+    elif damage == "optimizer_partial":
+        next(iter(payload["optimizer"]["state"].values())).pop("exp_avg")
+    elif damage == "numpy_rng":
+        payload["rank_states"][0]["rng"]["numpy"] = []
+    else:
+        payload["rank_states"][0]["loader_generator_state"] = torch.zeros(
+            3, dtype=torch.uint8
+        )
+    checkpoint = tmp_path / "incomplete.pt"
+    torch.save(payload, checkpoint)
+    with pytest.raises(ValueError, match="manifest|RNG|AdamW"):
+        read_training_checkpoint(checkpoint)
+    result, output = invoke_sample(
+        tmp_path, checkpoint, [{"sequence_id": "sample", "length": 3}], "joint"
+    )
+    assert result.exit_code != 0 and not output.exists()
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("config.train.mdlm.regime_weights.joint_independent", 0),
+        ("config.model.encoder.dropout", 0.9),
+        ("config.model.encoder.n_heads", 4),
+        ("runtime.effective_precision", "fp16"),
+        ("runtime.mdlm_identity.tokenizer_sha256", "changed"),
+        ("runtime.mdlm_identity.policy_sha256", "changed"),
+        ("runtime.mdlm_identity.sources.local.sha256", "changed"),
+        ("runtime.mdlm_identity.vocabulary.structure_pad", 99),
+        ("runtime.components.model", "other-model"),
+        ("runtime.components.optimizer", "other-optimizer"),
+        ("runtime.components.scheduler", "warmup_cosine"),
+        ("model.structure_codebook", None),
+        ("signature.codebook", "changed"),
+    ],
+)
+def test_current_reader_binds_scientific_and_artifact_identity(
+    tmp_path, trained, field, value
+):
+    from stok.utils.checkpoint import (
+        read_training_checkpoint,
+        validate_resume_signature,
+    )
+
+    _, original = trained
+    payload = copy.deepcopy(original)
+    target = payload
+    parts = field.split(".")
+    for part in parts[:-1]:
+        target = target[part]
+    target[parts[-1]] = target[parts[-1]] + 1 if value is None else value
+    checkpoint = tmp_path / "inconsistent.pt"
+    torch.save(payload, checkpoint)
+    with pytest.raises(
+        ValueError, match="configuration|manifest|identity|codebook|vocabulary"
+    ):
+        read_training_checkpoint(checkpoint)
+    with pytest.raises(
+        ValueError,
+        match="configuration|manifest|identity|codebook|vocabulary|signature",
+    ):
+        validate_resume_signature(payload, original["signature"])
+    result, output = invoke_sample(
+        tmp_path, checkpoint, [{"sequence_id": "sample", "length": 3}], "joint"
+    )
+    assert result.exit_code != 0 and not output.exists()
+
+
+def test_reader_and_sampling_allow_operational_overrides_and_inference_backend(
+    tmp_path, trained, monkeypatch
+):
+    from stok.utils.checkpoint import (
+        read_training_checkpoint,
+        validate_resume_signature,
+    )
+
+    _, original = trained
+    payload = copy.deepcopy(original)
+    cfg = payload["config"]
+    cfg["train"].update(
+        output_dir="/unused", resume_from="/absent", log_every=99, save_every=99
+    )
+    cfg["train"]["wandb"]["name"] = "changed"
+    cfg["train"]["eval"]["seed"] += 1
+    cfg["data"]["eval"] = {"other": {"path": "/absent/eval"}}
+    cfg["model"]["decoder"]["path"] = "/absent/decoder"
+    cfg["print_model_summary"] = not cfg["print_model_summary"]
+    checkpoint = tmp_path / "overrides.pt"
+    torch.save(payload, checkpoint)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("inference validation initialized CUDA")
+
+    monkeypatch.setattr(torch.cuda, "_lazy_init", forbidden)
+    original_flash = torch.backends.cuda.flash_sdp_enabled()
+    try:
+        torch.backends.cuda.enable_flash_sdp(not original_flash)
+        read = read_training_checkpoint(checkpoint)
+        validate_resume_signature(read, original["signature"])
+        result, output = invoke_sample(
+            tmp_path, checkpoint, [row_for(payload, "joint")], "joint"
+        )
+        assert result.exit_code == 0, result.output
+        assert json.loads(output.read_text())["length"] == 3
+    finally:
+        torch.backends.cuda.enable_flash_sdp(original_flash)
+    assert torch.backends.cuda.flash_sdp_enabled() == original_flash

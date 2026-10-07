@@ -1,8 +1,8 @@
 """Training and evaluation loader construction and residue alignment."""
 
-from functools import partial
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Optional, cast
+from typing import Any
 
 import numpy as np
 import torch
@@ -15,11 +15,8 @@ from torch.utils.data import (
     DistributedSampler,
 )
 
-from stok.data.collate import align_coords, mlm_collate, tokenize_residues
 from stok.data.dataset import (
     PARQUET_EXTENSIONS,
-    DummyMLMDataset,
-    DummySequenceDataset,
     InterleavedIterableDataset,
     IterableTokenizedDataset,
     MapAsIterableDataset,
@@ -27,68 +24,7 @@ from stok.data.dataset import (
     distributed_rank,
     _usable_samples,
 )
-from stok.eval.registry import METRIC_REGISTRY, resolve_eval_metrics
 from stok.utils.tokenizer import Tokenizer
-
-
-def _tokenize_and_align(
-    batch: list[dict[str, Any]] | list[tuple[torch.Tensor, torch.Tensor]],
-    tokenizer: Optional[Tokenizer],
-    *,
-    max_len: int,
-    ignore_index: int,
-    pad_id: int,
-    num_classes: int | None = None,
-):
-    # if using DummySequenceDataset, batch is tuples(tokens, labels)
-    if tokenizer is None:
-        tokens, labels = zip(*cast(list[tuple[torch.Tensor, torch.Tensor]], batch))
-        return torch.stack(tokens, dim=0), torch.stack(labels, dim=0)
-
-    # else TokenizedDataset dicts with 'sequence' and optionally 'structure_tokens'
-    input_ids = []
-    label_ids = []
-    coords_batch: list[torch.Tensor] = []
-    batch = cast(list[dict[str, Any]], batch)
-    for item in batch:
-        seq: str = item["sequence"]
-
-        if pad_id != tokenizer.pad_token_id:
-            raise ValueError("Model pad_id must match tokenizer padding")
-        ids = tokenize_residues(seq, tokenizer, max_len)
-
-        # build labels aligned to tokens: CLS/EOS/PAD -> ignore_index
-        L = ids.size(0)
-        labels = torch.full((L,), ignore_index, dtype=torch.long)
-
-        # Handle indices if present (may be absent for structure folder datasets)
-        indices_raw = item.get("structure_tokens")
-        if indices_raw is not None:
-            indices: torch.Tensor = indices_raw.long()
-            if indices.numel() != len(seq):
-                raise ValueError(
-                    f"Sample {item.get('sequence_id', '?')}: structure_tokens length must match sequence length"
-                )
-            if num_classes is not None and (indices >= num_classes).any():
-                raise ValueError(
-                    f"Sample {item.get('sequence_id', '?')}: class ID out of range"
-                )
-            copy_len = min(len(seq), L - 2)
-            values = indices[:copy_len]
-            labels[1 : 1 + copy_len] = values.masked_fill(values < 0, ignore_index)
-
-        input_ids.append(ids)
-        label_ids.append(labels)
-        # optional coords tensor [max_len, 3, 3]
-        c = item.get("coords")
-        coords_batch.append(align_coords(c, residue_count=len(seq), token_length=L))
-
-    tokens = torch.stack(input_ids, dim=0)
-    labels = torch.stack(label_ids, dim=0)
-    if any(item.get("coords") is not None for item in batch):
-        return tokens, labels, torch.stack(coords_batch, dim=0)
-    else:
-        return tokens, labels
 
 
 def _parse_eval_configs(cfg: DictConfig) -> dict[str, dict[str, Any]]:
@@ -96,10 +32,9 @@ def _parse_eval_configs(cfg: DictConfig) -> dict[str, dict[str, Any]]:
     Normalize eval config into {name: {path, **options}}.
 
     Supports:
-      - Legacy single path: data.eval="/path" -> {"default": {"path": "/path"}}
+      - Single path: data.eval="/path" -> {"default": {"path": "/path"}}
       - Dict of paths: data.eval.val="/p" -> {"val": {"path": "/p"}}
       - Dict of configs: data.eval.val.path="/p" -> {"val": {"path": "/p", ...}}
-      - Structure folder format: data.eval.pdb.format="structure" for PDB/mmCIF folders
     """
     raw_eval = cfg.data.get("eval")
     if raw_eval is None:
@@ -116,12 +51,7 @@ def _parse_eval_configs(cfg: DictConfig) -> dict[str, dict[str, Any]]:
             elif isinstance(value, (dict, DictConfig)):
                 if value.get("path") is None:
                     continue
-                entry = dict(value)
-                # Preserve format-related keys for structure folder support
-                for key in ("format", "chain_id", "recursive"):
-                    if key in value:
-                        entry[key] = value.get(key)
-                result[name] = entry
+                result[name] = dict(value)
             else:
                 raise ValueError(f"Invalid eval config for '{name}': {type(value)}")
         return result
@@ -228,7 +158,7 @@ class MixtureSampler(Sampler[int]):
         lengths: list[int],
         fractions: list[float],
         seed: int = 0,
-        num_samples: Optional[int] = None,
+        num_samples: int | None = None,
         rank: int = 0,
         world_size: int = 1,
     ):
@@ -276,367 +206,110 @@ class MixtureSampler(Sampler[int]):
 def _build_dataloaders(
     cfg: DictConfig,
     *,
-    codebook_size: int | None,
-    pad_id: int,
-    is_mlm: bool | None = None,
-    objective: str | None = None,
+    identity: Mapping[str, Any],
 ) -> tuple[DataLoader, dict[str, DataLoader]]:
-    if objective is not None and (
-        objective not in {"mlm", "codebook", "mdlm"}
-        or (is_mlm is not None and is_mlm != (objective == "mlm"))
-    ):
-        raise ValueError("Conflicting objective/is_mlm flags or unknown objective")
-    objective = objective or ("mlm" if is_mlm else "codebook")
-    is_mlm, is_mdlm = objective == "mlm", objective == "mdlm"
+    """Build raw aligned MDLM loaders; all derived state stays in consumers."""
     rank, world_size = distributed_rank()
-    batch_size: int = cfg.train.batch_size
-    max_len: int = cfg.data.max_len
-    num_workers: int = cfg.data.num_workers
-    pin_memory: bool = cfg.data.pin_memory
-    ignore_index: int = -100 if is_mdlm else cfg.model.classifier.ignore_index
-
-    # resolve dataloader buffering
-    prefetch_factor: int = int(getattr(cfg.data, "prefetch_factor", 2))
-
-    # resolve whether to load 3D coordinates from disk
-    user_load_coords = getattr(cfg.data, "load_coords", None)
-
+    pad_id = cfg.model.encoder.pad_id
+    batch_size = cfg.train.batch_size
+    num_workers = cfg.data.num_workers
     eval_configs = _parse_eval_configs(cfg)
     train_configs = _parse_train_configs(cfg)
-    fape_required = objective == "codebook" and bool(
-        cfg.train.get("fape", {}).get("enabled", False)
-    )
-
-    def coordinate_setting(options, needed, required=False):
-        value = options.get("load_coords", user_load_coords)
-        alias = options.get("has_coords")
-        if alias is not None:
-            if (
-                "load_coords" in options
-                and value is not None
-                and bool(value) != bool(alias)
-            ):
-                raise ValueError("Conflicting has_coords and load_coords settings")
-            value = alias
-        if value is False and required:
-            raise ValueError(
-                "load_coords=false conflicts with requested structure supervision/metrics"
-            )
-        return bool(needed) if value is None else bool(value), value is True
-
-    tokenizer: Optional[Tokenizer] = None
-    collate_fn = None
-    train_sampler: Optional[Sampler[int]] = None
-
-    # MLM-specific config
-    if is_mlm:
-        mlm_cfg = cfg.train.get("mlm", {})
-        mask_prob = float(mlm_cfg.get("mask_prob", 0.15))
-        mask_token_prob = float(mlm_cfg.get("mask_token_prob", 0.8))
-        random_token_prob = float(mlm_cfg.get("random_token_prob", 0.1))
-
-    # Supported structure file extensions for auto-detection
-    structure_exts = {".pdb", ".ent", ".cif", ".mmcif"}
-
-    # dataset picker usable for train/eval
-    def _pick_dataset(
-        path: str,
-        load_coords: bool,
-        require_structure_tokens: bool = True,
-        *,
-        dataset_format: str | None = None,
-        chain_id: str | None = None,
-        recursive: bool = False,
-        allow_structure_folders: bool = False,
-        dataset_name: str | None = None,
+    if not train_configs:
+        raise ValueError("MDLM requires real paired Parquet training sources")
+    tokenizer = Tokenizer()
+    if pad_id != tokenizer.pad_token_id or cfg.model.encoder.vocab_size != len(
+        tokenizer
     ):
-        p = Path(path)
+        raise ValueError("Model vocabulary and pad_id must match tokenizer")
+    for key in ("bos_id", "eos_id"):
+        if cfg.model.encoder[key] != getattr(
+            tokenizer, key.replace("_id", "_token_id")
+        ):
+            raise ValueError(f"Model {key} must match tokenizer")
 
-        # Explicit structure folder format
-        if allow_structure_folders and dataset_format == "structure":
-            from stok.data.structure_dataset import StructureFolderDataset
+    def coordinate_setting(options, needed=False):
+        value = options.get("load_coords", cfg.data.load_coords)
+        if value is False and needed:
+            raise ValueError("load_coords=false conflicts with decoded MDLM evaluation")
+        return needed if value is None else value, value is True or needed
 
-            ds = StructureFolderDataset(
-                folder_path=str(p),
-                max_length=max_len,
-                chain_id=chain_id,
-                recursive=recursive,
-                load_coords=load_coords,
-            )
-            return ds
-
-        # heuristic: directory containing parquet shards -> Iterable; else map-style
-        if p.is_dir():
-            has_parquet = any(
-                f.is_file() and f.suffix.lower() in PARQUET_EXTENSIONS
-                for f in p.iterdir()
-            )
-            if has_parquet:
-                shuffle_shards = bool(getattr(cfg.data, "shuffle_shards", True))
-                shuffle_rows = bool(getattr(cfg.data, "shuffle_rows", True))
-                return IterableTokenizedDataset(
-                    dataset_path=str(p),
-                    max_length=None if is_mdlm else max_len,
-                    dataset_name=dataset_name,
-                    shuffle_shards=shuffle_shards,
-                    shuffle_rows=shuffle_rows,
-                    load_coords=bool(load_coords),
-                    require_structure_tokens=require_structure_tokens,
+    def dataset(path, options, name, *, training):
+        needed = not training and bool(
+            OmegaConf.select(cfg, "train.eval.mdlm.generation.decode", default=False)
+        )
+        load_coords, require_coords = coordinate_setting(options, needed)
+        kwargs: dict[str, Any] = dict(
+            dataset_path=path,
+            max_length=None,
+            dataset_name=identity["sample_key_namespaces"][name],
+            load_coords=load_coords,
+            require_structure_tokens=training,
+        )
+        if Path(path).is_dir():
+            if not any(
+                p.is_file() and p.suffix.lower() in PARQUET_EXTENSIONS
+                for p in Path(path).iterdir()
+            ):
+                raise ValueError(
+                    f"{path}: expected a directory containing Parquet shards"
                 )
-
-            # Auto-detect structure folder (no parquet, has structure files)
-            has_structures = any(
-                f.suffix.lower() in structure_exts for f in p.iterdir() if f.is_file()
+            ds = IterableTokenizedDataset(
+                **kwargs,
+                shuffle_shards=cfg.data.shuffle_shards if training else False,
+                shuffle_rows=cfg.data.shuffle_rows if training else False,
             )
-            if allow_structure_folders and has_structures:
-                from stok.data.structure_dataset import StructureFolderDataset
+        else:
+            ds = TokenizedDataset(**kwargs)
+        if require_coords and not ds.has_coords:
+            raise ValueError(
+                f"{name}: load_coords=true requires a coordinate-capable source"
+            )
+        return ds
 
-                return StructureFolderDataset(
-                    folder_path=str(p),
-                    max_length=max_len,
-                    chain_id=chain_id,
-                    recursive=recursive,
-                    load_coords=load_coords,
-                )
-
-            raise ValueError(f"{p}: expected a directory containing Parquet shards")
-
-        return TokenizedDataset(
-            dataset_path=str(path),
-            max_length=None if is_mdlm else max_len,
-            dataset_name=dataset_name,
-            load_coords=bool(load_coords),
-            require_structure_tokens=require_structure_tokens,
+    pairs = [
+        (
+            dataset(str(source["path"]), source, source["name"], training=True),
+            source["fraction"],
+        )
+        for source in train_configs
+    ]
+    sampler = None
+    if len(pairs) == 1:
+        train_ds = pairs[0][0]
+    elif any(isinstance(ds, IterableDataset) for ds, _ in pairs):
+        iterables = [
+            ds
+            if isinstance(ds, IterableTokenizedDataset)
+            else MapAsIterableDataset(ds, num_samples=len(ds), seed=cfg.train.seed)
+            for ds, _ in pairs
+        ]
+        train_ds = InterleavedIterableDataset(
+            iterables,
+            [fraction for _, fraction in pairs],
+            num_samples=sum(ds.num_samples for ds in iterables),
+            seed=cfg.train.seed,
+        )
+    else:
+        train_ds = ConcatDataset([ds for ds, _ in pairs])
+        sampler = MixtureSampler(
+            lengths=[len(ds) for ds, _ in pairs],
+            fractions=[fraction for _, fraction in pairs],
+            rank=rank,
+            world_size=world_size,
+            seed=cfg.train.seed,
         )
 
-    if len(train_configs) > 0:
-        # Real dataset(s); tokenize in collate
-        tokenizer = Tokenizer()
-
-        if is_mdlm:
-            collate_fn = list
-        elif is_mlm:
-
-            def collate(batch):
-                return mlm_collate(
-                    batch,
-                    tokenizer,
-                    max_len=max_len,
-                    mask_prob=mask_prob,
-                    mask_token_prob=mask_token_prob,
-                    random_token_prob=random_token_prob,
-                    pad_id=pad_id,
-                    ignore_index=ignore_index,
-                )
-
-            collate_fn = collate
-        else:
-
-            def collate(batch):
-                return _tokenize_and_align(
-                    batch,
-                    tokenizer,
-                    max_len=max_len,
-                    ignore_index=ignore_index,
-                    pad_id=pad_id,
-                    num_classes=codebook_size,
-                )
-
-            collate_fn = collate
-
-        if len(train_configs) == 1:
-            # Single dataset (backwards compatible)
-            train_load, force_coords = coordinate_setting(
-                train_configs[0], fape_required, fape_required
-            )
-            train_ds = _pick_dataset(
-                str(train_configs[0]["path"]),
-                train_load,
-                require_structure_tokens=not is_mlm,
-                dataset_name=cfg.train.mdlm_identity.sample_key_namespaces[
-                    train_configs[0]["name"]
-                ]
-                if is_mdlm
-                else None,
-            )
-            if force_coords and not train_ds.has_coords:
-                raise ValueError(
-                    "load_coords=true requires a coordinate-capable training source"
-                )
-        else:
-            # Multiple datasets with fractions
-            ds_pairs = []
-            for tcfg in train_configs:
-                t_load_coords, force_coords = coordinate_setting(
-                    tcfg, fape_required, fape_required
-                )
-                ds = _pick_dataset(
-                    str(tcfg["path"]),
-                    t_load_coords,
-                    require_structure_tokens=not is_mlm,
-                    dataset_name=cfg.train.mdlm_identity.sample_key_namespaces[
-                        tcfg["name"]
-                    ]
-                    if is_mdlm
-                    else None,
-                )
-                if force_coords and not ds.has_coords:
-                    raise ValueError(
-                        f"load_coords=true requires coordinates: {tcfg['path']}"
-                    )
-                ds_pairs.append((ds, float(tcfg["fraction"])))
-
-            any_iterable = any(isinstance(ds, IterableDataset) for ds, _ in ds_pairs)
-            if any_iterable:
-                # Convert map-style datasets to iterable wrappers, then interleave
-                iterables: list[IterableTokenizedDataset | MapAsIterableDataset] = []
-                fracs: list[float] = []
-                total_samples = 0
-                for ds, frac in ds_pairs:
-                    if isinstance(ds, IterableTokenizedDataset):
-                        itds = ds
-                    else:
-                        itds = MapAsIterableDataset(
-                            ds,
-                            num_samples=len(ds),
-                            seed=int(cfg.train.get("seed", 1337)),
-                        )
-                    iterables.append(itds)
-                    fracs.append(float(frac))
-                    try:
-                        total_samples += itds.num_samples
-                    except Exception:
-                        total_samples = 0
-                train_ds = InterleavedIterableDataset(
-                    iterables,
-                    fracs,
-                    num_samples=total_samples if total_samples > 0 else None,
-                    seed=int(cfg.train.get("seed", 1337)),
-                )
-            else:
-                # Efficient mixture sampler over a ConcatDataset
-                map_datasets = [ds for ds, _ in ds_pairs]
-                lengths = [int(len(ds)) for ds in map_datasets]
-                fracs = [float(fr) for _, fr in ds_pairs]
-                concat = ConcatDataset(map_datasets)
-                sampler = MixtureSampler(
-                    lengths=lengths,
-                    rank=rank,
-                    world_size=world_size,
-                    fractions=fracs,
-                    seed=int(cfg.train.get("seed", 1337)),
-                )
-                setattr(
-                    concat,
-                    "has_coords",
-                    any(getattr(ds, "has_coords", False) for ds in map_datasets),
-                )
-                setattr(
-                    concat,
-                    "has_labels",
-                    any(getattr(ds, "has_labels", True) for ds in map_datasets),
-                )
-                train_ds = concat
-                train_sampler = sampler
-    else:
-        # fallback dummy data for quick smoke test
-        if is_mdlm:
-            raise ValueError("MDLM requires real paired Parquet training sources")
-        if is_mlm:
-            train_ds = DummyMLMDataset(
-                num_samples=512,
-                seq_len=min(max_len, 256) - 2,  # Account for CLS/EOS tokens
-            )
-            tokenizer = Tokenizer()
-
-            def collate(batch):
-                return mlm_collate(
-                    batch,
-                    tokenizer,
-                    max_len=max_len,
-                    mask_prob=mask_prob,
-                    mask_token_prob=mask_token_prob,
-                    random_token_prob=random_token_prob,
-                    pad_id=pad_id,
-                    ignore_index=ignore_index,
-                )
-
-            collate_fn = collate
-        else:
-            assert codebook_size is not None
-            train_ds = DummySequenceDataset(
-                num_samples=512,
-                seq_len=min(max_len, 256),
-                vocab_size=cfg.model.encoder.vocab_size,
-                num_classes=codebook_size,
-                pad_id=pad_id,
-            )
-
-    if fape_required and not getattr(train_ds, "has_coords", False):
-        raise ValueError("FAPE requires a training source with coordinates")
-    cfg.data.load_coords = bool(getattr(train_ds, "has_coords", False))
-    train_collate_fn = collate_fn
-
-    # configure shuffle depending on dataset type / sampler usage
-    is_iterable = isinstance(train_ds, IterableDataset)
-    # only meaningful for multi-process loading
-    if tokenizer is None and len(eval_configs) > 0:
-        tokenizer = Tokenizer()
-
-        if is_mlm:
-
-            def collate(batch):
-                return mlm_collate(
-                    batch,
-                    tokenizer,
-                    max_len=max_len,
-                    mask_prob=mask_prob,
-                    mask_token_prob=mask_token_prob,
-                    random_token_prob=random_token_prob,
-                    pad_id=pad_id,
-                    ignore_index=ignore_index,
-                )
-
-            collate_fn = collate
-        else:
-
-            def collate(batch):
-                return _tokenize_and_align(
-                    batch,
-                    tokenizer,
-                    max_len=max_len,
-                    ignore_index=ignore_index,
-                    pad_id=pad_id,
-                    num_classes=codebook_size,
-                )
-
-            collate_fn = collate
-
-    if max_len < 3:
-        raise ValueError("data.max_len must be >= 3")
-    if tokenizer is not None:
-        if tokenizer.pad_token_id != pad_id or len(tokenizer) != int(
-            cfg.model.encoder.vocab_size
-        ):
-            raise ValueError("Model vocabulary and pad_id must match tokenizer")
-        for key in ("bos_id", "eos_id"):
-            OmegaConf.update(
-                cfg,
-                f"model.encoder.{key}",
-                getattr(tokenizer, key.replace("_id", "_token_id")),
-                force_add=True,
-            )
-
-    def _make_dl_kwargs(batch_sz: int):
-        kwargs = {
-            "batch_size": batch_sz,
-            "num_workers": num_workers,
-            "pin_memory": pin_memory,
-            "collate_fn": collate_fn,
-            "persistent_workers": False,
-        }
-        if num_workers > 0 and prefetch_factor is not None and prefetch_factor > 0:
-            kwargs["prefetch_factor"] = prefetch_factor
+    def loader_kwargs(size):
+        kwargs: dict[str, Any] = dict(
+            batch_size=size,
+            num_workers=num_workers,
+            pin_memory=cfg.data.pin_memory,
+            collate_fn=list,
+            persistent_workers=False,
+        )
+        if num_workers:
+            kwargs["prefetch_factor"] = cfg.data.prefetch_factor
         return kwargs
 
     if isinstance(
@@ -650,128 +323,36 @@ def _build_dataloaders(
             print(
                 f"Training stream drops {dropped} samples per pass for complete rank/worker batches"
             )
-    elif train_sampler is None:
-        train_sampler = DistributedSampler(
+    elif sampler is None:
+        sampler = DistributedSampler(
             train_ds,
             num_replicas=world_size,
             rank=rank,
             shuffle=True,
-            seed=int(cfg.train.get("seed", 1337)),
+            seed=cfg.train.seed,
             drop_last=True,
         )
-    if train_sampler is not None:
-        train_loader = DataLoader(
-            train_ds,  # type: ignore[arg-type]
-            sampler=train_sampler,
-            drop_last=True,
-            **_make_dl_kwargs(batch_size),
+    train_loader = DataLoader(
+        train_ds,
+        sampler=sampler,
+        shuffle=False,
+        drop_last=True,
+        **loader_kwargs(batch_size),
+    )
+    eval_loaders = {}
+    for name, options in eval_configs.items():
+        ds = dataset(options["path"], options, name, training=False)
+        eval_sampler = (
+            None
+            if isinstance(ds, IterableDataset)
+            else range(rank, len(ds), world_size)
         )
-    else:
-        train_loader = DataLoader(
-            train_ds,
-            shuffle=(not is_iterable),
-            drop_last=True,
-            **_make_dl_kwargs(batch_size),
-        )
-    train_loader.collate_fn = train_collate_fn or train_loader.collate_fn
-    if isinstance(train_ds, DummySequenceDataset):
-        from torch.utils.data import default_collate
-
-        train_loader.collate_fn = default_collate
-    eval_loaders: dict[str, DataLoader] = {}
-    for name, eval_cfg in eval_configs.items():
-        eval_path = eval_cfg["path"]
-        eval_batch_size = int(eval_cfg.get("batch_size", batch_size))
-        resolved = (
-            {} if is_mdlm else resolve_eval_metrics(cfg, name, objective=objective)
-        )
-        needs_coords = (
-            bool(
-                OmegaConf.select(
-                    cfg, "train.eval.mdlm.generation.decode", default=False
-                )
-            )
-            if is_mdlm
-            else any(METRIC_REGISTRY[key].requires_coords for key in resolved)
-        )
-        requires_coords = any(
-            settings["explicit"] and METRIC_REGISTRY[key].requires_coords
-            for key, settings in resolved.items()
-        )
-        eval_load_coords, force_coords = coordinate_setting(
-            eval_cfg, needs_coords, requires_coords
-        )
-        # Extract structure folder format options
-        eval_format = eval_cfg.get("format")
-        eval_chain_id = eval_cfg.get("chain_id")
-        eval_recursive = bool(eval_cfg.get("recursive", False))
-
-        # Structure folders always have coords, don't require indices
-        ds = _pick_dataset(
-            eval_path,
-            eval_load_coords,
-            require_structure_tokens=False,
-            dataset_format=eval_format,
-            chain_id=eval_chain_id,
-            recursive=eval_recursive,
-            allow_structure_folders=not is_mdlm,
-            dataset_name=cfg.train.mdlm_identity.sample_key_namespaces[name]
-            if is_mdlm
-            else None,
-        )
-        if force_coords and not ds.has_coords:
-            raise ValueError(
-                f"Dataset {name}: load_coords=true requires a coordinate-capable source"
-            )
-        for metric_name, settings in resolved.items():
-            if not settings["explicit"]:
-                continue
-            if METRIC_REGISTRY[metric_name].requires_coords and not ds.has_coords:
-                raise ValueError(
-                    f"Dataset {name}, metric {metric_name}: missing coordinates"
-                )
-            if (
-                not is_mlm
-                and metric_name in {"accuracy", "perplexity"}
-                and not ds.has_labels
-            ):
-                raise ValueError(
-                    f"Dataset {name}, metric {metric_name}: missing labels"
-                )
-        eval_cfg["load_coords"] = bool(ds.has_coords)
-        if isinstance(ds, IterableDataset):
-            ds.shuffle_shards = False
-            ds.shuffle_rows = False
-            eval_sampler = None
-        else:
-            eval_sampler = range(rank, len(ds), world_size)
-        eval_kwargs = _make_dl_kwargs(eval_batch_size)
-        eval_seed = int(
-            cfg.train.get("eval", {}).get(
-                "seed", 1729 if is_mdlm else cfg.train.get("seed", 1337)
-            )
-        )
-        eval_kwargs["generator"] = torch.Generator().manual_seed(eval_seed)
-        if is_mlm:
-            eval_kwargs["collate_fn"] = partial(
-                mlm_collate,
-                tokenizer=tokenizer,
-                max_len=max_len,
-                mask_prob=mask_prob,
-                mask_token_prob=mask_token_prob,
-                random_token_prob=random_token_prob,
-                pad_id=pad_id,
-                ignore_index=ignore_index,
-                eval_seed=eval_seed,
-                dataset_name=name,
-            )
         eval_loaders[name] = DataLoader(
             ds,
             sampler=eval_sampler,
             shuffle=False,
             drop_last=False,
-            **eval_kwargs,
+            generator=torch.Generator().manual_seed(cfg.train.eval.get("seed", 1729)),
+            **loader_kwargs(options.get("batch_size", batch_size)),
         )
-        eval_loaders[name].metric_configs = resolved
-    cfg.data.eval = OmegaConf.create(eval_configs)
     return train_loader, eval_loaders

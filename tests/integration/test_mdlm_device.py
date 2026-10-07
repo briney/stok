@@ -9,7 +9,7 @@ from omegaconf import OmegaConf
 import pytest
 import torch
 
-from stok.cli.train import _build_dataloaders
+from stok.data.loaders import _build_dataloaders
 from stok.data.mdlm import CANONICAL_AA, prepare_mdlm_batch, validate_mdlm_sources
 from stok.eval.mdlm import validate_mdlm_decoder
 from stok.models.decoder import load_pretrained_decoder
@@ -40,14 +40,11 @@ def test_real_paired_bf16_overfit_and_conditioned_decode():
         {"diagnostic": source}, {}, codebook=codebook, split_manifest=None
     )
     OmegaConf.set_struct(cfg, False)
-    cfg.train.mdlm_identity = identity
     cfg.data.train = {"diagnostic": {"path": source}}
     cfg.data.max_len, cfg.data.num_workers = 66, 0
     cfg.data.shuffle_rows = cfg.data.shuffle_shards = False
     cfg.data.load_coords = True
-    loader, _ = _build_dataloaders(
-        cfg, codebook_size=len(codebook), pad_id=1, objective="mdlm"
-    )
+    loader, _ = _build_dataloaders(cfg, identity=identity)
     tokenizer = Tokenizer()
     batch = prepare_mdlm_batch(
         next(iter(loader)),
@@ -273,7 +270,7 @@ def test_real_device_rng_inventory_continuation(tmp_path, monkeypatch):
     assert [state.numel() for state in rng["cuda"]] == sizes
     assert rng["cuda_device"] == torch.cuda.current_device()
     assert resumed["signature"]["execution"]["device"] == "cuda"
-    assert resumed["config"]["train"]["effective_precision"] == "bf16"
+    assert resumed["runtime"]["effective_precision"] == "bf16"
 
     def forbidden(*args, **kwargs):
         pytest.fail("CPU sampler touched CUDA RNG")

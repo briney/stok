@@ -1,10 +1,9 @@
-import math
-
 import pytest
 import torch
 from omegaconf import OmegaConf
 
-from stok.cli.train import _build_scheduler, _compute_accuracy, _parse_eval_configs
+from stok.training.engine import _build_scheduler
+from stok.data.loaders import _parse_eval_configs
 
 
 def test_build_scheduler_warmup_then_cosine_decay():
@@ -22,6 +21,7 @@ def test_build_scheduler_warmup_then_cosine_decay():
 
     lrs: list[float] = []
     for _ in range(total_steps):
+        opt.step()
         sched.step()
         lrs.append(sched.get_last_lr()[0])
 
@@ -50,6 +50,7 @@ def test_build_scheduler_linear_with_stable_and_auto_decay_steps():
 
     lrs: list[float] = []
     for _ in range(total_steps):
+        opt.step()
         sched.step()
         lrs.append(sched.get_last_lr()[0])
 
@@ -82,6 +83,7 @@ def test_build_scheduler_warmup_then_stable_only_when_zero_decay_steps():
 
     lrs: list[float] = []
     for _ in range(total_steps):
+        opt.step()
         sched.step()
         lrs.append(sched.get_last_lr()[0])
 
@@ -89,21 +91,7 @@ def test_build_scheduler_warmup_then_stable_only_when_zero_decay_steps():
     assert all(abs(lr - 1.0) <= 1e-6 for lr in lrs[warmup_steps:])
 
 
-def test_compute_accuracy_with_ignore_index():
-    ignore_index = -100
-    logits = torch.tensor(
-        [
-            [2.0, 1.0],  # pred 0, ignored
-            [0.1, 0.9],  # pred 1, correct
-            [0.9, 0.1],  # pred 0, incorrect
-        ]
-    )
-    labels = torch.tensor([ignore_index, 1, 1])
-    acc = _compute_accuracy(logits, labels, ignore_index)
-    assert math.isclose(acc, 0.5, rel_tol=1e-6, abs_tol=1e-6)
-
-
-def test_parse_eval_configs_supports_legacy_string():
+def test_parse_eval_configs_supports_single_path():
     cfg = OmegaConf.create({"data": {"eval": "/path/to/eval"}})
     parsed = _parse_eval_configs(cfg)
     assert parsed == {"default": {"path": "/path/to/eval"}}
@@ -131,7 +119,7 @@ def test_parse_eval_configs_rejects_invalid_type():
 
 def test_accelerator_initialization_failure_is_not_hidden(monkeypatch):
     import accelerate
-    from stok.cli.train import _maybe_get_accelerator
+    from stok.training.engine import _maybe_get_accelerator
 
     def fail(**kwargs):
         raise RuntimeError("initialization failed")
@@ -142,7 +130,7 @@ def test_accelerator_initialization_failure_is_not_hidden(monkeypatch):
 
 
 def test_accumulation_windows_keep_partial_tail():
-    from stok.cli.train import iter_windows
+    from stok.training.engine import iter_windows
 
     assert list(iter_windows(range(5), 4)) == [[0, 1, 2, 3], [4]]
     assert list(iter_windows([], 4)) == []
@@ -151,134 +139,10 @@ def test_accumulation_windows_keep_partial_tail():
 
 
 def test_manual_accumulation_is_not_divided_by_accelerate_environment(monkeypatch):
-    from stok.cli.train import _maybe_get_accelerator
+    from stok.training.engine import _maybe_get_accelerator
 
     monkeypatch.setenv("ACCELERATE_GRADIENT_ACCUMULATION_STEPS", "4")
     accelerator = _maybe_get_accelerator()
     value = torch.tensor(1.0, requires_grad=True)
     accelerator.backward(value * 16)
     assert value.grad.item() == 16.0
-
-
-@pytest.mark.parametrize("load_coords", [None, False, True])
-def test_required_coordinate_loading_policy(tmp_path, load_coords):
-    from pathlib import Path
-    import pandas as pd
-    from hydra import compose, initialize_config_dir
-    from stok.cli.train import _build_dataloaders
-
-    source = tmp_path / "train.parquet"
-    pd.DataFrame(
-        [
-            {
-                "sequence_id": "p",
-                "sequence": "LAG",
-                "structure_tokens": [0, 1, 2],
-                "coordinates": [[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]]]
-                * 3,
-            }
-        ]
-        * 2
-    ).to_parquet(source)
-    with initialize_config_dir(
-        config_dir=str(Path(__file__).resolve().parents[2] / "src/stok/configs"),
-        version_base=None,
-    ):
-        cfg = compose(
-            config_name="config",
-            overrides=[
-                "train.batch_size=2",
-                "data.max_len=6",
-                "data.num_workers=0",
-                f"data.train={source}",
-                "train.fape.enabled=true",
-            ],
-        )
-    cfg.data.load_coords = load_coords
-    if load_coords is False:
-        with pytest.raises(ValueError, match="load_coords"):
-            _build_dataloaders(cfg, codebook_size=128, pad_id=1)
-    else:
-        loader, _ = _build_dataloaders(cfg, codebook_size=128, pad_id=1)
-        batch = next(iter(loader))
-        assert len(batch) == 3 and torch.isfinite(batch[2][:, 1:4]).all()
-
-
-def test_coordinate_alias_conflict_and_missing_source(tmp_path):
-    from pathlib import Path
-    from hydra import compose, initialize_config_dir
-    from stok.cli.train import _build_dataloaders
-
-    source = tmp_path / "seq.parquet"
-    import pandas as pd
-
-    pd.DataFrame(
-        [{"sequence_id": "p", "sequence": "LAG", "structure_tokens": [0, 1, 2]}] * 2
-    ).to_parquet(source, index=False)
-    with initialize_config_dir(
-        config_dir=str(Path(__file__).resolve().parents[2] / "src/stok/configs"),
-        version_base=None,
-    ):
-        cfg = compose(
-            config_name="config",
-            overrides=[f"data.train={source}", "data.num_workers=0"],
-        )
-    cfg.data.eval = {
-        "val": {"path": str(source), "has_coords": True, "load_coords": False}
-    }
-    with pytest.raises(ValueError, match="Conflicting"):
-        _build_dataloaders(cfg, codebook_size=128, pad_id=1)
-    cfg.data.eval = {"val": {"path": str(source), "has_coords": True}}
-    with pytest.raises(ValueError, match="coordinate-capable"):
-        _build_dataloaders(cfg, codebook_size=128, pad_id=1)
-
-
-@pytest.mark.parametrize(
-    "override,match",
-    [
-        ("model.classifier.tie_to_codebook=false", "tie_to_codebook"),
-        ("model.codebook.trainable=true", "codebook.trainable"),
-        ("model.decoder.freeze=false", "decoder.freeze"),
-        ("train.optimizer=sgd", "train.optimizer"),
-    ],
-)
-def test_unsupported_options_fail_before_accelerator(monkeypatch, override, match):
-    from hydra import compose, initialize_config_dir
-    from pathlib import Path
-    import stok.training.engine as train
-
-    with initialize_config_dir(
-        config_dir=str(Path(train.__file__).parents[1] / "configs"), version_base=None
-    ):
-        cfg = compose(config_name="config", overrides=[override])
-
-    def should_not_initialize():
-        raise AssertionError("Validation must precede accelerator/downloads")
-
-    monkeypatch.setattr(train, "_maybe_get_accelerator", should_not_initialize)
-    with pytest.raises(ValueError, match=match):
-        train.run_training(cfg)
-
-
-@pytest.mark.parametrize(
-    "option",
-    ["train.fape.enabled", "model.decoder.enabled", "train.decoding.eval_enabled"],
-)
-def test_mlm_rejects_explicit_geometry_before_initialization(monkeypatch, option):
-    from hydra import compose, initialize_config_dir
-    from pathlib import Path
-    import stok.training.engine as train
-
-    with initialize_config_dir(
-        config_dir=str(Path(train.__file__).parents[1] / "configs"), version_base=None
-    ):
-        cfg = compose(
-            config_name="config", overrides=["train.objective=mlm", f"{option}=true"]
-        )
-
-    def should_not_initialize():
-        raise AssertionError("MLM geometry must be rejected before initialization")
-
-    monkeypatch.setattr(train, "_maybe_get_accelerator", should_not_initialize)
-    with pytest.raises(ValueError, match="MLM"):
-        train.run_training(cfg)

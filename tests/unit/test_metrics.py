@@ -153,7 +153,6 @@ def test_fixed_cameo_subset_matches_independent_ca_references():
     from pathlib import Path
     from Bio.SVDSuperimposer import SVDSuperimposer
     from stok.utils.structure_parser import parse_structure
-    from stok.eval.metrics.contact import _compute_contact_map
 
     root = Path(__file__).parents[1] / "test_data/cameo"
     for filename in ("7YPD_B.pdb", "8JVC_A.pdb"):
@@ -186,7 +185,3 @@ def test_fixed_cameo_subset_matches_independent_ca_references():
                 errors = abs(dp[i, neighbors] - dt[i, neighbors])
                 local.append(np.mean(errors[:, None] < np.array([0.5, 1.0, 2.0, 4.0])))
         assert np.isclose(lddt_ca(pred, true)[0].item(), np.mean(local), atol=2e-5)
-        expected_contacts = np.isfinite(dt) & (dt < 8)
-        assert np.array_equal(
-            _compute_contact_map(true[None])[0].numpy(), expected_contacts
-        )

@@ -1,11 +1,9 @@
 import sys
 
-import torch
-from hydra import compose, initialize
 from omegaconf import DictConfig, OmegaConf
 
-from stok.models.stok import STokModel
-from stok.models.mdlm import STokMDLM
+from stok.config import load_training_config
+from stok.models.build import build_model
 from stok.utils.codebook import load_codebook
 
 
@@ -15,16 +13,6 @@ def run_smoke_test(cfg: DictConfig):
     Args:
         cfg: Hydra configuration dictionary.
     """
-    # # Warn if deprecated/unused decoder config is present
-    # try:
-    #     if "decoder" in cfg.model:
-    #         print(
-    #             "Warning: cfg.model.decoder is ignored. Decoder presets are selected "
-    #             "via model.codebook.preset and loaded with load_pretrained_decoder()."
-    #         )
-    # except Exception:
-    #     pass
-
     print(OmegaConf.to_yaml(cfg))
 
     # Load codebook from config (preset, path, or fallback to random)
@@ -36,95 +24,40 @@ def run_smoke_test(cfg: DictConfig):
     # Infer codebook size from the loaded tensor
     codebook_size = codebook.shape[0]
 
-    if cfg.train.get("objective") == "mdlm":
-        enc = cfg.model.encoder
-        model = STokMDLM(
-            vocab_size=enc.vocab_size,
-            pad_id=enc.pad_id,
-            codebook=codebook,
-            d_model=enc.d_model,
-            n_heads=enc.n_heads,
-            n_layers=enc.n_layers,
-            ffn_mult=enc.ffn_mult,
-            dropout=enc.dropout,
-            attn_dropout=enc.attn_dropout,
-            norm_type=enc.norm,
-        )
-        # Explicit synthetic forward fixture; training still requires completed real sources.
-        from stok.data.mdlm import prepare_mdlm_batch
-        from stok.utils.tokenizer import Tokenizer
+    model = build_model(cfg, codebook=codebook)
+    # Explicit synthetic forward fixture; training still requires completed real sources.
+    from stok.data.mdlm import prepare_mdlm_batch
+    from stok.utils.tokenizer import Tokenizer
 
-        batch = prepare_mdlm_batch(
-            [
-                {
-                    "dataset": "synthetic-smoke",
-                    "sequence_id": "0",
-                    "sequence": "ACDE",
-                    "structure_tokens": [0, 1, None, 0],
-                }
-            ],
-            Tokenizer(),
-            max_len=6,
-            codebook_size=codebook_size,
-            crop="center",
-            seeds=[0],
-        )
-        out = model(batch["sequence_tokens"], batch["structure_tokens"])
-        print(
-            f"Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}"
-        )
-        print(
-            "sequence_logits:",
-            out["sequence_logits"].shape,
-            "structure_logits:",
-            out["structure_logits"].shape,
-        )
-        print("OK")
-        return
-
-    model = STokModel(
-        vocab_size=cfg.model.encoder.vocab_size,
-        pad_id=cfg.model.encoder.pad_id,
-        d_model=cfg.model.encoder.d_model,
-        n_heads=cfg.model.encoder.n_heads,
-        n_layers=cfg.model.encoder.n_layers,
-        ffn_mult=cfg.model.encoder.ffn_mult,
-        dropout=cfg.model.encoder.dropout,
-        attn_dropout=cfg.model.encoder.attn_dropout,
-        codebook=codebook,
-        classifier_kwargs=dict(
-            use_cosine=cfg.model.classifier.use_cosine,
-            learnable_temperature=cfg.model.classifier.learnable_temperature,
-            bias_from_code_norm=cfg.model.classifier.bias_from_code_norm,
-            projector_dim=cfg.model.classifier.projector_dim,
-        ),
-        norm_type=cfg.model.encoder.norm,
+    batch = prepare_mdlm_batch(
+        [
+            {
+                "dataset": "synthetic-smoke",
+                "sequence_id": "0",
+                "sequence": "ACDE",
+                "structure_tokens": [0, 1, None, 0],
+            }
+        ],
+        Tokenizer(),
+        max_len=6,
+        codebook_size=codebook_size,
+        crop="center",
+        seeds=[0],
     )
-
-    if cfg.print_model_summary:
-        n_params = sum(p.numel() for p in model.parameters())
-        print(f"Model params: {n_params / 1e6:.2f}M")
-
-    # Tiny forward sanity check
-    B, L = 2, 16
-    tokens = torch.randint(low=1, high=cfg.model.encoder.vocab_size, size=(B, L))
-    tokens[:, -2:] = cfg.model.encoder.pad_id
-    labels = torch.randint(low=0, high=codebook_size, size=(B, L))
-    labels[:, -2:] = (
-        cfg.model.classifier.ignore_index
-        if "ignore_index" in cfg.model.classifier
-        else -100
+    out = model(batch["sequence_tokens"], batch["structure_tokens"])
+    print(
+        f"Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}"
     )
-
-    out = model(
-        tokens=tokens, labels=labels, ignore_index=cfg.model.classifier.ignore_index
+    print(
+        "sequence_logits:",
+        out["sequence_logits"].shape,
+        "structure_logits:",
+        out["structure_logits"].shape,
     )
-    print("logits:", out["logits"].shape, "loss:", float(out["loss"].item()))
     print("OK")
+    return
 
 
 if __name__ == "__main__":
     overrides = sys.argv[1:]
-    with initialize(version_base=None, config_path="../configs"):
-        cfg = compose(config_name="config", overrides=overrides)
-        run_smoke_test(cfg)
+    run_smoke_test(load_training_config(overrides))

@@ -14,11 +14,10 @@ from stok.data.mdlm import CANONICAL_AA, MDLMBatch, prepare_mdlm_batch
 from stok.eval.mdlm import validate_mdlm_decoder
 from stok.models.decoder import load_pretrained_decoder
 from stok.models.build import build_model
-from stok.models.mdlm import STokMDLM
-from stok.utils.checkpoint import read_training_checkpoint, validate_resume_signature
+from stok.utils.checkpoint import read_training_checkpoint
 from stok.utils.decoding import decode_token_aligned_coords
 from stok.utils.mdlm import build_mask_groups, stable_seed
-from stok.utils.pretrained import file_sha256, state_sha256
+from stok.utils.pretrained import file_sha256, json_sha256, state_sha256
 from stok.utils.sampling import inference_context, sample_mdlm
 from stok.utils.tokenizer import Tokenizer
 
@@ -72,17 +71,24 @@ def sample_cmd(
     decoder_path,
     decoder_preset,
 ):
-    """Generate aligned sequence/structure tokens from a version-2 MDLM checkpoint."""
+    """Generate aligned sequence/structure tokens from a version-3 MDLM checkpoint."""
     if output.exists():
         raise click.ClickException(f"Refusing to overwrite output: {output}")
     try:
         payload = read_training_checkpoint(checkpoint)
-        # Saved internal consistency only; generation does not match current execution.
-        validate_resume_signature(payload, payload["signature"])
         cfg = OmegaConf.create(payload["config"])
+        OmegaConf.set_readonly(cfg, True)
         if cfg.train.get("objective") != "mdlm":
             raise ValueError("Sampling requires an MDLM training checkpoint")
-        identity = cfg.train.mdlm_identity
+        components = payload["runtime"]["components"]
+        if (
+            components["sequence_tokenizer"] != "native"
+            or components["structure_representation"] != "frozen_vq"
+        ):
+            raise ValueError(
+                "Checkpoint representation is incompatible with the sampler"
+            )
+        identity = OmegaConf.create(payload["runtime"]["mdlm_identity"])
         codebook = payload["model"]["structure_codebook"]
         if state_sha256({"codebook": codebook}) != identity.codebook_sha256:
             raise ValueError("Checkpoint structure codebook digest mismatch")
@@ -98,10 +104,11 @@ def sample_cmd(
             "structure_mask": len(codebook) + 1,
             "structure_unavailable": len(codebook) + 2,
             "sequence_targets": CANONICAL_AA,
+            "sequence_vocab_sha256": json_sha256(tokenizer.get_vocab()),
         }
         if dict(identity.vocabulary) != expected_vocabulary:
             raise ValueError("Checkpoint vocabulary identity is incompatible")
-        model = cast(STokMDLM, build_model(cfg, codebook=codebook))
+        model = build_model(cfg, codebook=codebook)
         model.load_state_dict(payload["model"], strict=True)
         model.to(device)
         rows: list[tuple[str, int, MDLMBatch]] = []

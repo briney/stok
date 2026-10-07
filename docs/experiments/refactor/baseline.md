@@ -1,5 +1,10 @@
 # Baseline extraction qualification — October 6, 2026
 
+This records the completed extraction merged in PR #15 at `404a2c4`. Its compatibility
+checks describe that historical scope. The user's subsequent
+[clean-break research policy](../../design/REFACTOR.md#1-purpose-and-decisions) removes
+backward-compatibility requirements from future work; the results below remain unchanged.
+
 `gcp_large_paired_mdlm_tied_v1` names the existing Hydra composition
 `model=mdlm_150m train=mdlm_pilot`: 144,797,472 trainable parameters, learned
 structure embeddings, and tied linear categorical predictions. Frozen GCP
@@ -35,8 +40,7 @@ authorized or run. Documentation changed concurrently with read-only qualificati
 training helper imports remain compatible. YAML/Hydra groups and keys, legacy
 normalization, later override precedence, ordered parameter/state names and
 initialization, and complete v2 checkpoint/signature validation remain intact.
-No head selector was introduced; omitted versus explicit future tied-head
-settings must be normalized in C5 rather than altering legacy resumes here.
+No head selector was introduced; historical resume signatures were unchanged in this slice.
 `cli/smoke_test.py` retains its existing non-MDLM codebook-head behavior even
 for an MLM configuration; changing that is separate behavior work.
 
@@ -411,20 +415,11 @@ scientific result is claimed by this extraction.
 
 ## Companion backlog and remaining inputs
 
-These deliverables remain unimplemented in this extraction. The
-[approved C0–C6 contracts](../../superpowers/plans/2026-10-06-baseline-extraction.md#companion-comparison-workstream)
-retain detailed anchors and acceptance gates; no broad scientific comparison
+The [C0–C6 workstream](../../superpowers/plans/2026-10-06-baseline-extraction.md#companion-comparison-workstream)
+owns the forward backlog, anchors, and acceptance gates. Following the clean-break decision,
+C0 covers canonical configuration, runtime/checkpoint state, and removal of unused compatibility
+paths. C1 identity/protocol design can proceed alongside it. No broad scientific comparison
 starts before C1–C3 provide trustworthy populations and primary metrics.
-
-| Item | Remaining work / required inputs |
-|---|---|
-| C0 — Scientific configuration | Frozen authored choices separated from runtime state; strict active/unsupported settings and early unsupported pretrained-MDLM errors, preserving legacy inactive defaults and equivalent resumes |
-| C1 — Canonical evaluation IDs | Source/model/chain/revision/residue identities, frozen seeds/replicates, operational train/validation/test exports and lineage/splits; preserve occurrence keys and shard/order-sensitive resume signatures |
-| C2 — Attempt records | Immutable length/seed/case/replicate schedule; durable per-attempt outcomes/costs, including pre-output failures; preserve current sample CLI atomic publication |
-| C3 — Primary joint scoring | Chosen independent sequence-folding evaluator/version, atoms/thresholds/metrics, novelty corpus and budget; retain all requested denominators and distinguish Kabsch C-alpha TM from optimized TM-align |
-| C4 — Recipes/reports | Qualified C0–C3 inputs, explicit variants/training seeds and budgets, safe artifact manifests and paired/bootstrap reports; unconditional same-seed proteins are not pairs |
-| C5 — Real alternatives | Tied vs frozen-prototype head with input embeddings fixed and equivalent omitted/explicit defaults; qualified GCP adapter/artifacts/decoder and selected second representation |
-| C6 — Research extensions | Concrete scientific question, selected pretrained adapter/geometry/fusion/recurrence/hybrid, compatible artifacts/sampler/decoder, explicit hardware and evaluation/training budgets |
 
 Operational frozen validation/generation cohorts, novelty search/evaluator and
 intended hardware/resource limits remain open. Second representation and
