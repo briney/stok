@@ -18,13 +18,14 @@ PROBE = r"""
 import os, sys, torch
 from pathlib import Path
 from omegaconf import OmegaConf
-from stok.cli import train
+from stok.training import engine as train
+from stok.training import tasks
 from stok.models.stok import STokModel
 cfg = OmegaConf.load(sys.argv[1])
 stop = int(sys.argv[2])
 rank = int(os.environ.get("RANK", 0))
 trace = []
-original_corrupt = train.corrupt_mdlm_batch
+original_corrupt = tasks.corrupt_mdlm_batch
 original_forward = STokModel.forward
 original_save = train._save_checkpoint
 
@@ -42,7 +43,7 @@ def save(*args, **kwargs):
     if kwargs['global_step'] == stop:
         raise InterruptedError('intentional interruption after completed checkpoint')
 
-train.corrupt_mdlm_batch = corrupt
+tasks.corrupt_mdlm_batch = corrupt
 STokModel.forward = forward
 train._save_checkpoint = save
 if os.environ.get('RESUME_SKIP'):
@@ -96,9 +97,17 @@ finally:
 """
 
 
-def execute(cfg, path, *, stop=-1, distributed=False, extra_env=None, ok=True):
+def execute(
+    cfg, path, *, stop=-1, distributed=False, extra_env=None, ok=True, probe=None
+):
     OmegaConf.save(cfg, path)
-    command = [sys.executable, "-c", PROBE, str(path), str(stop)]
+    command = [
+        sys.executable,
+        "-c",
+        PROBE if probe is None else probe,
+        str(path),
+        str(stop),
+    ]
     env = {**training_env(), **(extra_env or {})}
     results = (
         run_distributed(command, timeout=60, env=env)
@@ -367,9 +376,13 @@ def test_rank_local_checkpoint_failures_reach_all_ranks(tmp_path, failure):
     )
     for result in results:
         assert result.returncode != 0
-        assert (
-            "CUDA RNG" if failure == "cuda_rng" else "injected rank-"
-        ) in result.stderr, result.stderr
+        sentinel = {
+            "read": "injected rank-local read failure",
+            "write": "injected rank-zero write failure",
+            "state": "injected rank-local state failure",
+            "cuda_rng": "CUDA RNG",
+        }[failure]
+        assert sentinel in result.stderr, result.stderr
     if failure in {"read", "cuda_rng"}:
         assert snapshot(project) == before
     else:
@@ -713,14 +726,23 @@ def test_changed_training_decoder_rejected_before_artifacts(tmp_path):
     assert snapshot(project) == before
 
 
-def test_fape_resume_with_same_decoder_matches_uninterrupted(tmp_path):
+@pytest.mark.parametrize("distributed", [False, True])
+def test_fape_resume_with_same_decoder_matches_uninterrupted(tmp_path, distributed):
     cfg = fape_config(tmp_path)
+    cfg.train.log_every = 2
     env = {"RESUME_TINY_DECODER": "1"}
-    execute(cfg, tmp_path / "full.yaml", extra_env=env)
+    execute(cfg, tmp_path / "full.yaml", extra_env=env, distributed=distributed)
     cfg.train.output_dir = str(tmp_path / "interrupted")
-    execute(cfg, tmp_path / "interrupted.yaml", stop=1, ok=False, extra_env=env)
+    execute(
+        cfg,
+        tmp_path / "interrupted.yaml",
+        stop=1,
+        ok=False,
+        extra_env=env,
+        distributed=distributed,
+    )
     cfg.train.resume_from = str(tmp_path / "interrupted/checkpoints/step_00000001.pt")
-    execute(cfg, tmp_path / "resumed.yaml", extra_env=env)
+    execute(cfg, tmp_path / "resumed.yaml", extra_env=env, distributed=distributed)
     full = torch.load(tmp_path / "full/model/final.pt", weights_only=True)
     resumed = torch.load(tmp_path / "interrupted/model/final.pt", weights_only=True)
     for key in (
@@ -733,6 +755,17 @@ def test_fape_resume_with_same_decoder_matches_uninterrupted(tmp_path):
     ):
         equal(full[key], resumed[key])
     assert " | fape " in (tmp_path / "full/logs/train.log").read_text()
+
+    # Only main rank resets after step 2; both rank states must round-trip.
+    assert len(full["rank_states"]) == (2 if distributed else 1)
+    for rank, rank_state in enumerate(full["rank_states"]):
+        logging = rank_state["logging"]
+        assert logging["running_updates"] == (1 if rank == 0 else 3)
+        assert logging["running_pred_nan_frac_count"] == (
+            3 if rank == 0 else full["micro_step"]
+        )
+        assert logging["running_fape_count"] > 0
+    assert full["residues_seen"] == resumed["residues_seen"] == 0
 
 
 def test_optimizer_coverage_preserves_unused_and_frozen_parameters(tmp_path):
@@ -844,7 +877,7 @@ def test_cuda_rng_rejected_before_artifacts_or_wandb(
     tmp_path, monkeypatch, rng_checkpoint, damage
 ):
     import copy
-    from stok.cli import train
+    from stok.training import engine as train
 
     original_cfg, original = rng_checkpoint
     cfg, payload = copy.deepcopy(original_cfg), copy.deepcopy(original)

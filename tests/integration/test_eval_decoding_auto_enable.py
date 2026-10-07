@@ -80,7 +80,7 @@ def test_eval_decoding_auto_enables_decoder(tmp_path, monkeypatch, activation):
     from stok.eval import Evaluator
     import importlib
 
-    train_module = importlib.import_module("stok.cli.train")
+    train_module = importlib.import_module("stok.training.engine")
     original_load = train_module.load_pretrained_decoder
     loaded = []
 

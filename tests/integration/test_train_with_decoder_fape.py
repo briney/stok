@@ -159,7 +159,7 @@ def test_fape_only_missing_coordinates_produces_finite_update(tmp_path, monkeypa
 
     payloads = []
     monkeypatch.setattr(
-        "stok.cli.train._maybe_init_wandb",
+        "stok.training.engine._maybe_init_wandb",
         lambda *args, **kwargs: SimpleNamespace(
             log=lambda data, **kwargs: payloads.append(data)
         ),
@@ -231,6 +231,21 @@ def test_fape_only_missing_coordinates_produces_finite_update(tmp_path, monkeypa
         & payloads[0].keys()
     )
 
+    # Empty CE cannot make an inactive geometric reduction an optimizer update.
+    for case in ("zero_weight", "before_start", "missing_coordinates"):
+        cfg.train.output_dir = str(tmp_path / case)
+        cfg.train.fape.weight = 0.0 if case == "zero_weight" else 1.0
+        cfg.train.fape.start_step = 1 if case == "before_start" else 0
+        if case == "missing_coordinates":
+            table = pq.read_table(source)
+            rows = table.to_pylist()
+            for row in rows:
+                row["coordinates"] = np.full((4, 3, 3), np.nan).tolist()
+            pq.write_table(pa.Table.from_pylist(rows, schema=table.schema), source)
+        with pytest.raises(RuntimeError, match="no successful optimizer update"):
+            run_training(cfg)
+        assert not (Path(cfg.train.output_dir) / "model/final.pt").exists()
+
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.skipif(
@@ -269,3 +284,82 @@ def test_real_decoder_autocast_finite_gradients(dtype):
     assert torch.isfinite(codes.grad).all() and codes.grad.abs().sum() > 0
     optimizer.step()
     assert torch.isfinite(codes).all() and not torch.equal(codes, before)
+
+
+@pytest.mark.parametrize(
+    "train,eligible,diagnostics,accuracy_key",
+    [
+        (
+            {"objective": "CODEBOOK", "fape": {"enabled": True, "start_step": 0}},
+            1,
+            True,
+            "acc",
+        ),
+        ({"fape": {"enabled": True, "start_step": 0}}, 1, True, "acc"),
+        ({"objective": "codebook", "fape": {"start_step": 0}}, 0, True, "acc"),
+        ({"objective": "codebook"}, 0, True, "acc"),
+        ({}, 0, True, "acc"),
+        (
+            {"objective": "MLM", "fape": {"log_pred_nan_frac": True}},
+            0,
+            False,
+            "mask_acc",
+        ),
+        ({"objective": "mlm"}, 0, False, "mask_acc"),
+        (
+            {
+                "objective": "codebook",
+                "fape": {"enabled": True, "start_step": 0, "log_pred_nan_frac": False},
+            },
+            1,
+            False,
+            "acc",
+        ),
+    ],
+)
+def test_classification_task_preserves_legacy_startup_defaults(
+    train, eligible, diagnostics, accuracy_key
+):
+    from omegaconf import OmegaConf
+    from stok.training.tasks import ClassificationTask
+
+    cfg = OmegaConf.create(
+        {
+            "train": train,
+            "model": {"encoder": {"pad_id": 1}, "classifier": {"ignore_index": -100}},
+        }
+    )
+    authored = OmegaConf.to_yaml(cfg)
+    OmegaConf.set_readonly(cfg, True)
+    task = ClassificationTask(cfg, decoder=torch.nn.Identity(), codebook=None)
+    batch = (
+        torch.tensor([[0, 3, 2]]),
+        torch.full((1, 3), -100),
+        torch.zeros(1, 3, 3, 3),
+    )
+    window = task.prepare_window(
+        [batch], epoch=0, micro_step=0, global_step=0, rank=0, world_size=1
+    )
+    assert window.counts.tolist() == [0, eligible, 3]
+    assert task.log_pred_nan_frac is diagnostics
+    # Logging selection is a startup contract even without a FAPE mapping;
+    # nonempty training still requires the legacy fape.weight field.
+    state = task.logging_state()
+    state.update(
+        running_updates=1, running_masked_acc_count=1, running_masked_acc_sum=1
+    )
+    task.restore_logging_state(state)
+    _, payload = task.format_log(
+        step=1,
+        max_steps=1,
+        micro_step=1,
+        epoch=0.0,
+        lr=0.01,
+        flops=0,
+        residues_seen=0,
+        executed_positions=3,
+    )
+    assert payload[f"train/{accuracy_key}/num_valid"] == 1.0
+    assert payload[f"train/{accuracy_key}"] == 1.0
+    assert f"train/{'acc' if accuracy_key == 'mask_acc' else 'mask_acc'}" not in payload
+    assert OmegaConf.to_yaml(cfg) == authored

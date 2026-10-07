@@ -105,9 +105,13 @@ def test_eval_decode_with_wrapped_model(monkeypatch, tmp_path):
         def wait_for_everyone(self):
             pass
 
-    monkeypatch.setattr(
-        "stok.cli.train._maybe_get_accelerator", lambda: FakeAccelerator()
-    )
+    accelerator_calls = []
+
+    def accelerator():
+        accelerator_calls.append(1)
+        return FakeAccelerator()
+
+    monkeypatch.setattr("stok.training.engine._maybe_get_accelerator", accelerator)
 
     from tests.integration.test_structure_folder_eval import _create_structure_folder
 
@@ -157,4 +161,5 @@ def test_eval_decode_with_wrapped_model(monkeypatch, tmp_path):
         with initialize_config_dir(version_base=None, config_dir=str(cfg_dir)):
             cfg = compose(config_name="config", overrides=overrides)
     run_training(cfg)
+    assert len(accelerator_calls) == 1
     assert evaluated and evaluated[0]["lddt/num_valid"] == 2

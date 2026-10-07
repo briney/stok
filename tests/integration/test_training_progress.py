@@ -188,9 +188,44 @@ def test_fully_unsupervised_pass_fails_without_checkpoint(tmp_path):
 def test_skipped_optimizer_step_does_not_advance_schedule(tmp_path, monkeypatch):
     import torch
     from accelerate.optimizer import AcceleratedOptimizer
-    from hydra import compose, initialize_config_dir
     from stok.cli.train import run_training
+    from stok.training import tasks
+    from stok.models.decoder import _DECODER_ARCH
+    from tests.integration.test_mdlm_resume import fape_config
 
+    cfg = fape_config(tmp_path)
+    cfg.train.max_steps = 2
+    cfg.train.gradient_accumulation_steps = 1
+    cfg.train.log_every = 50
+    source = Path(cfg.data.train.local.path)
+    table = pq.read_table(source)
+    rows = table.to_pylist()
+    for row in rows:
+        row["coordinates"][0] = [[float("nan")] * 3 for _ in range(3)]
+    pq.write_table(pa.Table.from_pylist(rows, schema=table.schema), source)
+    monkeypatch.setitem(
+        _DECODER_ARCH,
+        "lite",
+        dict(
+            d_model=16,
+            n_heads=2,
+            n_layers=1,
+            ffn_mult=1,
+            max_length=32,
+            num_memory_tokens=0,
+            attn_kv_heads=1,
+        ),
+    )
+    decode = tasks.decode_token_aligned_coords
+
+    def missing_prediction(*args, **kwargs):
+        coords = decode(*args, **kwargs)
+        # A real forward diagnostic must survive even when AMP skips its update.
+        coords = coords.clone()
+        coords[:, 1] = float("nan")
+        return coords
+
+    monkeypatch.setattr(tasks, "decode_token_aligned_coords", missing_prediction)
     original = AcceleratedOptimizer.step
     attempts = []
 
@@ -201,22 +236,30 @@ def test_skipped_optimizer_step_does_not_advance_schedule(tmp_path, monkeypatch)
             return original(self, *args, **kwargs)
 
     monkeypatch.setattr(AcceleratedOptimizer, "step", skip_once)
-    with initialize_config_dir(
-        config_dir=str(Path(__file__).resolve().parents[2] / "src/stok/configs"),
-        version_base=None,
-    ):
-        cfg = compose(
-            config_name="config",
-            overrides=training_command(tmp_path, "train.max_steps=2")[3:],
-        )
     run_training(cfg)
     checkpoint = torch.load(
-        tmp_path / "model/final.pt", weights_only=False, map_location="cpu"
+        Path(cfg.train.output_dir) / "model/final.pt",
+        weights_only=False,
+        map_location="cpu",
     )
     assert len(attempts) == 3
     assert checkpoint["global_step"] == checkpoint["scheduler"]["last_epoch"] == 2
     assert checkpoint["micro_step"] == 3
     assert all(s["step"].item() == 2 for s in checkpoint["optimizer"]["state"].values())
+    logging = checkpoint["rank_states"][0]["logging"]
+    assert logging["running_updates"] == 2
+    assert logging["running_pred_nan_frac_count"] == 3
+    assert logging["running_pred_nan_frac_sum"] > 0
+    assert checkpoint["residues_seen"] == 0
+
+    def skip_all(self, *args, **kwargs):
+        self._is_overflow = True
+
+    monkeypatch.setattr(AcceleratedOptimizer, "step", skip_all)
+    cfg.train.output_dir = str(tmp_path / "skipped_only")
+    with pytest.raises(RuntimeError, match="no successful optimizer update"):
+        run_training(cfg)
+    assert not (Path(cfg.train.output_dir) / "model/final.pt").exists()
 
 
 def test_large_finite_loss_does_not_abort_perplexity_logging(tmp_path, monkeypatch):

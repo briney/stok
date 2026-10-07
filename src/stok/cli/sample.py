@@ -13,6 +13,7 @@ import torch
 from stok.data.mdlm import CANONICAL_AA, MDLMBatch, prepare_mdlm_batch
 from stok.eval.mdlm import validate_mdlm_decoder
 from stok.models.decoder import load_pretrained_decoder
+from stok.models.build import build_model
 from stok.models.mdlm import STokMDLM
 from stok.utils.checkpoint import read_training_checkpoint, validate_resume_signature
 from stok.utils.decoding import decode_token_aligned_coords
@@ -100,20 +101,8 @@ def sample_cmd(
         }
         if dict(identity.vocabulary) != expected_vocabulary:
             raise ValueError("Checkpoint vocabulary identity is incompatible")
-        model = STokMDLM(
-            vocab_size=enc.vocab_size,
-            pad_id=enc.pad_id,
-            codebook=codebook,
-            d_model=enc.d_model,
-            n_heads=enc.n_heads,
-            n_layers=enc.n_layers,
-            ffn_mult=enc.ffn_mult,
-            dropout=enc.dropout,
-            attn_dropout=enc.attn_dropout,
-            norm_type=enc.norm,
-        )
+        model = cast(STokMDLM, build_model(cfg, codebook=codebook))
         model.load_state_dict(payload["model"], strict=True)
-        model.mdlm_regime_weights = dict(cfg.train.mdlm.get("regime_weights") or {})
         model.to(device)
         rows: list[tuple[str, int, MDLMBatch]] = []
         ids: set[str] = set()

@@ -245,7 +245,7 @@ def test_coordinate_alias_conflict_and_missing_source(tmp_path):
 def test_unsupported_options_fail_before_accelerator(monkeypatch, override, match):
     from hydra import compose, initialize_config_dir
     from pathlib import Path
-    import stok.cli.train as train
+    import stok.training.engine as train
 
     with initialize_config_dir(
         config_dir=str(Path(train.__file__).parents[1] / "configs"), version_base=None
@@ -267,7 +267,7 @@ def test_unsupported_options_fail_before_accelerator(monkeypatch, override, matc
 def test_mlm_rejects_explicit_geometry_before_initialization(monkeypatch, option):
     from hydra import compose, initialize_config_dir
     from pathlib import Path
-    import stok.cli.train as train
+    import stok.training.engine as train
 
     with initialize_config_dir(
         config_dir=str(Path(train.__file__).parents[1] / "configs"), version_base=None

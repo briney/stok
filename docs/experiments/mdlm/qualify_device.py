@@ -48,7 +48,7 @@ profile = r"""
 import json, time
 metrics = {'updates': [], 'checkpoints': []}
 start = [None]
-original_corrupt_profile = train.corrupt_mdlm_batch
+original_corrupt_profile = tasks.corrupt_mdlm_batch
 original_step = torch.optim.AdamW.step
 original_save_profile = train._save_checkpoint
 original_restore_profile = train.restore_training_state
@@ -106,7 +106,7 @@ def save_profile(*args, **kwargs):
         metrics['hip'] = torch.version.hip
         Path(str(sys.argv[1])+'.metrics.json').write_text(json.dumps(metrics, indent=2))
 
-train.corrupt_mdlm_batch = corrupt_profile
+tasks.corrupt_mdlm_batch = corrupt_profile
 torch.optim.AdamW.step = step
 train._save_checkpoint = save_profile
 train.restore_training_state = restore_profile

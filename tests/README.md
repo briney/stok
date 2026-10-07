@@ -760,11 +760,13 @@ Run the full suite with local IPC permitted and CPU selection:
 ```bash
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 OMP_NUM_THREADS=1 TOKENIZERS_PARALLELISM=false \
   ACCELERATE_USE_CPU=true python -m pytest tests/unit tests/integration -q
-python -m ruff check src tests
+python -m ruff check .
+python -m ruff format --check .
+python -m ty check src --python "$(command -v python)" --error-on-warning
 python -m compileall -q src tests
 python -m build --no-isolation
-# Install the resulting wheel into a fresh environment with existing dependencies.
-python -m pip install --no-deps dist/stok-0.1.4-py3-none-any.whl
+# Install the actual produced wheel into a fresh environment with existing dependencies.
+python -m pip install --no-deps /path/to/produced-wheel.whl
 stok --help
 stok train --help
 stok sample --help
@@ -799,3 +801,42 @@ The real production frozen-validation `evaluate_mdlm` boundary remains pending
 supplied validation-only cohorts; training-subset utility checks are distinct.
 Actual GPU FP16 scaler overflow and multi-GPU launch are not qualified by BF16
 or CPU tests. Longer experiments require explicit identities/hardware/budgets.
+
+### Extraction reference
+
+The immutable historical reference captures `7a3e0fc` in a separate subprocess,
+then checks fresh and continued candidate training plus fixed seeded CLI samples.
+See [baseline commands and gate inventory](../docs/experiments/refactor/baseline.md).
+
+```bash
+PYTHONPATH="$PWD/src" python -m tests.utils.refactor_reference check \
+  --reference /path/to/retained-reference --output /path/to/new-candidate-output
+```
+
+Run the focused `test_refactor_reference.py` and `test_mdlm_resume.py` checks with
+the documented CPU environment and local worker/DDP IPC permitted. The local
+capture/check test exercises plumbing only; it provides no cross-version evidence.
+
+The October 6 final extraction uses the pinned `/tmp/stok-config-env/bin/python`
+and all CPU/thread settings in the
+[final migration report](../docs/experiments/refactor/baseline.md). That environment
+has the declared `setuptools.build_meta` backend but no build frontend/pip/wheel
+distributions. Its recorded package gate calls `build_sdist` and `build_wheel`
+directly, then uses the existing `uv` executable to install the local wheel
+offline with `--no-deps` in a fresh venv. Existing dependencies are exposed
+without checkout imports; every loaded STok module must resolve to that venv.
+
+The installed-wheel check exercises all four CLI commands' help, packaged MDLM
+groups, later CLI overrides over YAML, and all three fixed seeded sample modes
+from the actual retained historical checkpoint while guarded reads deny its
+original training export and external codebook archive. It preserves user
+artifacts. Full CPU counts, skip reasons, upstream warnings, hashes, and exact
+commands are recorded in the migration report; an opt-in device skip remains
+pending GPU qualification.
+
+Fault injection follows actual lookup ownership: construction in
+`stok.models.build`, preparation/loss in `stok.training.tasks`, runtime/checkpoint
+transport in `stok.training.engine`, and loaders in `stok.data.loaders`. Legacy
+`stok.cli.train` imports remain compatible; patching a reexport does not patch
+the new implementation owner. Historical reference probes stay frozen against
+the old source, separately from candidate instrumentation.
