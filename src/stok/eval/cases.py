@@ -507,12 +507,12 @@ def _validate_case(case: Mapping[str, Any]) -> None:
             both = eligible.all(-1)
             if (groups[both, 0] != groups[both, 1]).any():
                 raise ValueError("Tied controls must share groups")
-        if definition["placement"] == "token":
+        if definition["placement"] == "token" or definition["span_mean"] == 1:
             expected = torch.arange(size)[:, None].expand(-1, 2).clone()
             if not tied:
                 expected[:, 1] += size
             if not torch.equal(groups, expected.masked_fill(~eligible, -1)):
-                raise ValueError("Invalid frozen token groups")
+                raise ValueError("Invalid frozen deterministic groups")
         else:
             # Validate possible Bernoulli partitions, never replay their random stream.
             offset_min, offset_max = 0, 0

@@ -992,3 +992,51 @@ def test_case_reader_detects_raw_file_and_inventory_reference_drift(
     manifest_file.write_text(manifest_file.read_text() + "\n")
     with pytest.raises(ValueError):
         api().read_evaluation_cases(tmp_path / "cases")
+
+
+def test_read_and_projection_reject_merged_spans_at_deterministic_endpoint(
+    tmp_path, monkeypatch
+):
+    row = {
+        **make_mdlm_rows()[1],
+        "sequence": "ACD",
+        "structure_tokens": [0, 1, 2],
+    }
+    record = canonical_fixture(row)
+    directory = write_dataset(tmp_path / "encoded", [row]) / "canonical"
+    request = recipe(
+        [record],
+        crop_residues=3,
+        denoising={
+            "endpoint_span": {
+                "regime": "joint_independent",
+                "placement": "span",
+                "span_mean": 1.0,
+                "probability": 1.0,
+            }
+        },
+    )
+    result = api().freeze_evaluation_cases(
+        [directory], splits(tmp_path, [record]), request, tmp_path / "cases"
+    )
+    case = result["cases"][0]
+    assert case["group_ids"] == [[0, 3], [1, 4], [2, 5]]
+    batch = projected_batch([row], [case], max_len=5)
+
+    def unexpected_draw(*args, **kwargs):
+        raise AssertionError("Endpoint validation must not draw RNG")
+
+    monkeypatch.setattr(torch, "rand", unexpected_draw)
+    assert api().read_evaluation_cases(tmp_path / "cases")["cases"] == [case]
+    assert api().project_case_controls([case], batch)["group_ids"][0, 1:4].tolist() == [
+        [0, 3],
+        [1, 4],
+        [2, 5],
+    ]
+    case["group_ids"] = [[0, 1], [0, 1], [0, 1]]
+    rehash(case)
+    rewrite(tmp_path / "cases", [case])
+    with pytest.raises(ValueError):
+        api().read_evaluation_cases(tmp_path / "cases")
+    with pytest.raises(ValueError):
+        api().project_case_controls([case], batch)
