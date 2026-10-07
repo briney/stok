@@ -11,6 +11,7 @@ import torch
 from .collate import tokenize_residues
 from .structure_export import validate_structure_dataset
 from ..utils.pretrained import file_sha256, json_sha256, state_sha256
+from ..utils.tokenizer import Tokenizer
 
 CANONICAL_AA = "ACDEFGHIKLMNPQRSTVWY"
 
@@ -394,6 +395,7 @@ def validate_mdlm_sources(
         "structure_mask": codebook.shape[0] + 1,
         "structure_unavailable": codebook.shape[0] + 2,
         "sequence_targets": CANONICAL_AA,
+        "sequence_vocab_sha256": json_sha256(Tokenizer().get_vocab()),
     }
     training_identity = {
         "sources": [

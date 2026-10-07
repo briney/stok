@@ -729,9 +729,13 @@ def test_optional_decoder_loading_preserves_training_random_stream(
     monkeypatch.setattr(training, "load_pretrained_decoder", load_decoder)
     training.run_training(cfg)
     assert len(decoder_calls) == 1
-    actual = torch.load(tmp_path / "with_decoder/model/final.pt", weights_only=False)[
-        "model"
-    ]
+    saved = torch.load(tmp_path / "with_decoder/model/final.pt", weights_only=False)
+    assert saved["runtime"]["decoder"] == {
+        "sha256": state_sha256({"anchor": torch.zeros(())}),
+        "codebook_sha256": state_sha256({"codebook": codebook}),
+    }
+    assert saved["runtime"]["components"]["decoder"] == "geometric"
+    actual = saved["model"]
     for name in expected:
         torch.testing.assert_close(actual[name], expected[name], rtol=0, atol=0)
 

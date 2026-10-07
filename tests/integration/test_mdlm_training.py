@@ -99,7 +99,6 @@ def test_mdlm_task_accounting_and_flat_logging_round_trip(tmp_path):
     task = MDLMTask(cfg, codebook_size=32)
     empty = torch.tensor([0, 0, 3, 8, 1, 2], dtype=torch.int64)
     eligible = torch.tensor([10, 20, 6, 16, 2, 1], dtype=torch.int64)
-    assert task.allow_skipped_only_pass is True
     assert task.denominators(eligible) == {"diffusion": 12.0}
     assert task.consume_counts(empty).executed_positions == 0
     accounting = task.consume_counts(eligible)
@@ -107,8 +106,13 @@ def test_mdlm_task_accounting_and_flat_logging_round_trip(tmp_path):
     saved = task.logging_state()
     assert saved["total_missing_structure"] == 3
     assert saved["total_noncanonical_sequence"] == 3
-    saved["running_cls_loss"] = 7.0  # Even inactive v2 placeholders round-trip.
-    saved["running_cls_count"] = 9
+    assert set(saved) == {
+        "running_loss",
+        "running_updates",
+        "mdlm_running",
+        "total_missing_structure",
+        "total_noncanonical_sequence",
+    }
     saved["running_loss"] = 2.0
     saved["running_updates"] = 1
     saved["mdlm_running"] = torch.arange(10, dtype=torch.float64).reshape(5, 2)
@@ -118,7 +122,6 @@ def test_mdlm_task_accounting_and_flat_logging_round_trip(tmp_path):
     reset = task.logging_state()
     assert reset["running_loss"] == reset["running_updates"] == 0
     assert not reset["mdlm_running"].any()
-    assert reset["running_cls_loss"] == 7.0 and reset["running_cls_count"] == 9
     assert reset["total_missing_structure"] == reset["total_noncanonical_sequence"] == 3
 
 
@@ -553,3 +556,28 @@ def test_training_attaches_saved_regime_weights_for_sampling(tmp_path, monkeypat
     assert seen and all(weights == expected for weights in seen)
     assert state["config"]["train"]["mdlm"]["regime_weights"] == expected
     assert dict(cfg.train.mdlm.regime_weights) == {"joint_independent": 1}
+
+
+@pytest.mark.parametrize(
+    "damage", ["shape", "nan", "inf", "dtype", "loss", "count", "inactive"]
+)
+def test_active_logging_restore_rejects_corruption(tmp_path, damage):
+    from stok.training.tasks import MDLMTask
+
+    source, codebook = training_fixture(tmp_path)
+    task = MDLMTask(mdlm_config(tmp_path / "run", source, codebook), codebook_size=32)
+    saved = task.logging_state()
+    if damage == "shape":
+        saved["mdlm_running"] = torch.zeros(4, 2, dtype=torch.float64)
+    elif damage in {"nan", "inf"}:
+        saved["mdlm_running"][0, 0] = float(damage)
+    elif damage == "dtype":
+        saved["mdlm_running"] = saved["mdlm_running"].long()
+    elif damage == "loss":
+        saved["running_loss"] = float("nan")
+    elif damage == "count":
+        saved["running_updates"] = -1
+    else:
+        saved["running_cls_loss"] = 0
+    with pytest.raises(ValueError, match="logging"):
+        task.restore_logging_state(saved)

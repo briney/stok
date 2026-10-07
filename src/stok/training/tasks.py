@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from typing import cast
+import math
 
 import torch
 from omegaconf import DictConfig
@@ -40,23 +41,40 @@ def _initial_logging_state() -> dict:
     return {
         "running_loss": 0.0,
         "running_updates": 0,
-        "running_cls_loss": 0.0,
-        "running_cls_count": 0,
-        "running_fape_loss": 0.0,
-        "running_fape_count": 0,
-        "running_pred_nan_frac_sum": 0.0,
-        "running_pred_nan_frac_count": 0,
-        "running_masked_acc_sum": 0.0,
-        "running_masked_acc_count": 0,
         "total_missing_structure": 0,
         "total_noncanonical_sequence": 0,
         "mdlm_running": torch.zeros(5, 2, dtype=torch.float64),
     }
 
 
-class MDLMTask:
-    allow_skipped_only_pass = True
+def validate_logging_state(saved: dict) -> None:
+    if not isinstance(saved, dict) or saved.keys() != _initial_logging_state().keys():
+        raise ValueError("Incomplete or inactive per-rank logging state")
+    metrics = saved["mdlm_running"]
+    if (
+        not isinstance(metrics, Tensor)
+        or metrics.shape != (5, 2)
+        or metrics.dtype != torch.float64
+        or metrics.device.type != "cpu"
+        or not torch.isfinite(metrics).all()
+    ):
+        raise ValueError("Invalid per-rank MDLM logging state")
+    if type(saved["running_loss"]) not in (int, float) or not math.isfinite(
+        saved["running_loss"]
+    ):
+        raise ValueError("Invalid numeric logging state")
+    if any(
+        type(saved[key]) is not int or saved[key] < 0
+        for key in (
+            "running_updates",
+            "total_missing_structure",
+            "total_noncanonical_sequence",
+        )
+    ):
+        raise ValueError("Invalid logging counts")
 
+
+class MDLMTask:
     def __init__(self, cfg: DictConfig, *, codebook_size: int):
         self.cfg = cfg
         self.codebook_size = codebook_size
@@ -135,8 +153,8 @@ class MDLMTask:
     def consume_counts(self, global_counts: Tensor) -> WindowAccounting:
         self._logging["total_missing_structure"] += int(global_counts[4])
         self._logging["total_noncanonical_sequence"] += int(global_counts[5])
-        # Historical accounting: residues include empty windows; padded positions
-        # include eligible windows, even when the optimizer subsequently AMP-skips.
+        # Biological residues count every consumed window; padded positions count
+        # forwarded windows, including ones whose optimizer update AMP skips.
         return WindowAccounting(
             int(global_counts[2]),
             int(global_counts[3])
@@ -251,7 +269,14 @@ class MDLMTask:
         self._logging["mdlm_running"].zero_()
 
     def logging_state(self) -> dict:
-        return dict(self._logging)
+        return {
+            key: value.clone() if isinstance(value, Tensor) else value
+            for key, value in self._logging.items()
+        }
 
     def restore_logging_state(self, saved: dict) -> None:
-        self._logging = {key: saved[key] for key in self._logging}
+        validate_logging_state(saved)
+        self._logging = {
+            key: value.clone() if isinstance(value, Tensor) else value
+            for key, value in saved.items()
+        }

@@ -314,7 +314,8 @@ corruption regimes, token/span grouping, schedules, absorbing reverse sampling,
 paired model heads and per-modality normalization. Integration tests cover the
 production optimizer lifecycle, denoising/generation filtering, decoder identity,
 CLI/package composition, successful-update counting, replicated CPU DDP and
-fresh-process version-2 continuation with workers/dropout/accumulation.
+fresh-process version-3 continuation with workers/dropout/accumulation, all-rank
+log reset, current source/software manifests, and active-state corruption rejection.
 
 Run the full suite with local IPC permitted and CPU selection:
 

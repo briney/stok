@@ -606,3 +606,55 @@ def test_cpu_sampling_valid_gpu_checkpoint_never_restores_device_rng(
     )
     assert result.exit_code == 0, result.output
     assert json.loads(output.read_text())["length"] == 3
+
+
+@pytest.mark.parametrize(
+    "damage", ["representation", "sequence_vocabulary", "active_metrics"]
+)
+def test_sampler_rejects_corrupt_current_identity_and_state(tmp_path, trained, damage):
+    import copy
+
+    _, original = trained
+    payload = copy.deepcopy(original)
+    if damage == "representation":
+        payload["runtime"]["components"]["structure_representation"] = "lfq"
+    elif damage == "sequence_vocabulary":
+        payload["runtime"]["mdlm_identity"]["vocabulary"]["sequence_vocab_sha256"] = (
+            "changed"
+        )
+    else:
+        payload["rank_states"][0]["logging"]["mdlm_running"][0, 0] = float("nan")
+    checkpoint = tmp_path / "bad.pt"
+    torch.save(payload, checkpoint)
+    result, output = invoke_sample(
+        tmp_path, checkpoint, [{"sequence_id": "sample", "length": 3}], "joint"
+    )
+    assert result.exit_code != 0 and not output.exists()
+    assert any(
+        word in result.output.lower()
+        for word in ("representation", "vocabulary", "logging")
+    )
+
+
+def test_sampler_rejects_same_size_reordered_sequence_vocabulary(
+    tmp_path, trained, monkeypatch
+):
+    from importlib import import_module
+    from stok.utils.tokenizer import DEFAULT_VOCAB, Tokenizer
+
+    vocab = list(DEFAULT_VOCAB)
+    left, right = vocab.index("A"), vocab.index("G")
+    vocab[left], vocab[right] = vocab[right], vocab[left]
+    path = tmp_path / "vocab.txt"
+    path.write_text("\n".join(vocab))
+    monkeypatch.setattr(
+        import_module("stok.cli.sample"),
+        "Tokenizer",
+        lambda: Tokenizer(vocab_file=str(path)),
+    )
+    checkpoint, _ = trained
+    result, output = invoke_sample(
+        tmp_path, checkpoint, [{"sequence_id": "sample", "length": 3}], "joint"
+    )
+    assert result.exit_code != 0 and not output.exists()
+    assert "vocabulary" in result.output.lower()

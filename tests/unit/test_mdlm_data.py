@@ -172,13 +172,18 @@ def test_preflight_records_strict_identity_and_separate_cohorts(tmp_path):
         == second["eval_cohort"]["sample_keys"]
     )
     assert second["codebook_sha256"] == state_sha256({"codebook": CODEBOOK})
-    assert second["vocabulary"] == {
+    assert {
+        key: value
+        for key, value in second["vocabulary"].items()
+        if key != "sequence_vocab_sha256"
+    } == {
         "codebook_size": C,
         "structure_pad": C,
         "structure_mask": C + 1,
         "structure_unavailable": C + 2,
         "sequence_targets": "ACDEFGHIKLMNPQRSTVWY",
     }
+    assert len(second["vocabulary"]["sequence_vocab_sha256"]) == 64
     json.dumps(second)  # plain serialized primitives
 
 

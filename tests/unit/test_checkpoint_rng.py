@@ -47,20 +47,12 @@ def cuda_resume():
         [
             "running_loss",
             "running_updates",
-            "running_cls_loss",
-            "running_cls_count",
-            "running_fape_loss",
-            "running_fape_count",
-            "running_pred_nan_frac_sum",
-            "running_pred_nan_frac_count",
-            "running_masked_acc_sum",
-            "running_masked_acc_count",
             "total_missing_structure",
             "total_noncanonical_sequence",
         ],
         0,
     )
-    logging["mdlm_running"] = torch.zeros(5, 2)
+    logging["mdlm_running"] = torch.zeros(5, 2, dtype=torch.float64)
     rank = dict(
         rank=0,
         rng=rng,
@@ -71,13 +63,22 @@ def cuda_resume():
         logging=logging,
     )
     signature = {
+        "source": {},
+        "software": {},
+        "mdlm_identity": "test",
         "execution": {
             "device": "cuda",
             "world_size": 2,
             "cuda_rng_state_sizes": [16, 16],
-        }
+        },
     }
     payload = dict(
+        runtime={
+            "execution": signature["execution"],
+            "source": {},
+            "software": {},
+            "mdlm_identity": {"training_signature": "test"},
+        },
         signature=signature,
         rank_states=[copy.deepcopy(rank), {**rank, "rank": 1}],
         model=model.state_dict(),
@@ -240,3 +241,37 @@ def test_cpu_record_does_not_initialize_unused_cuda(
     assert signature["execution"]["cuda_rng_state_sizes"] == []
     assert signature["execution"]["cudnn"] is None
     ck.restore_rng_state(rng)
+
+
+@pytest.mark.parametrize("old", [None, 1, 2, 99])
+def test_reader_rejects_unsupported_checkpoints_clearly(tmp_path, old):
+    path = tmp_path / "old.pt"
+    torch.save({"format_version": old, "model": {}}, path)
+    with pytest.raises(ValueError, match="version 3"):
+        ck.read_training_checkpoint(path)
+
+
+def test_package_source_identity_is_location_independent_and_content_sensitive(
+    tmp_path,
+):
+    import shutil
+
+    checkout = tmp_path / "checkout/stok"
+    checkout.mkdir(parents=True)
+    (checkout / "model.py").write_text("x = 1\n")
+    (checkout / "configs").mkdir()
+    (checkout / "configs/config.yaml").write_text("x: 1\n")
+    wheel = tmp_path / "site-packages/stok"
+    shutil.copytree(checkout, wheel)
+    digest = ck.package_source_sha256(checkout)
+    assert digest == ck.package_source_sha256(wheel)
+    (wheel / "__pycache__").mkdir()
+    (wheel / "__pycache__/ignored.py").write_text("cache")
+    (wheel / "build").mkdir()
+    (wheel / "build/ignored.py").write_text("build")
+    assert digest == ck.package_source_sha256(wheel)
+    (wheel / "configs/config.yaml").write_text("x: 2\n")
+    assert digest != ck.package_source_sha256(wheel)
+    (wheel / "configs/config.yaml").write_text("x: 1\n")
+    (wheel / "model.py").rename(wheel / "other.py")
+    assert digest != ck.package_source_sha256(wheel)

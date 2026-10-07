@@ -3,12 +3,12 @@
 from contextlib import contextmanager
 from importlib.metadata import version
 from pathlib import Path
-from typing import TypedDict, cast
+from typing import cast
 import os
-import math
 import platform
 import random
 import tempfile
+import hashlib
 
 import numpy as np
 import torch
@@ -16,6 +16,7 @@ from accelerate.utils import gather_object
 from omegaconf import OmegaConf
 
 from stok.data.dataset import set_dataset_epoch
+from stok.training.tasks import validate_logging_state
 from stok.utils.pretrained import file_sha256, state_sha256
 
 
@@ -66,6 +67,23 @@ def rank_errors(error, accelerator, context):
         raise RuntimeError(f"{context}: {errors}")
 
 
+def package_source_sha256(root: Path | None = None) -> str:
+    """Hash installed Python/config names and bytes identically in checkout and wheel."""
+    root = root or Path(__file__).resolve().parents[1]
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root)
+        if path.suffix not in {".py", ".yaml"} or any(
+            part in {"__pycache__", "build", "dist"} for part in relative.parts
+        ):
+            continue
+        name, content = relative.as_posix().encode(), path.read_bytes()
+        for value in (name, content):
+            digest.update(len(value).to_bytes(8, "big"))
+            digest.update(value)
+    return digest.hexdigest()
+
+
 def resume_signature(cfg, *, sources, codebook, accelerator, identity):
     config = OmegaConf.to_container(cfg, resolve=True)
     if not isinstance(config, dict):
@@ -79,9 +97,6 @@ def resume_signature(cfg, *, sources, codebook, accelerator, identity):
         "log_every",
         "eval",
         "save_every",
-        "mdlm_identity",
-        "effective_precision",
-        "decoding",
     ):
         train.pop(key, None)
     data.pop("eval", None)
@@ -109,11 +124,23 @@ def resume_signature(cfg, *, sources, codebook, accelerator, identity):
         "codebook": state_sha256({"codebook": codebook})
         if codebook is not None
         else None,
+        "source": {"sha256": package_source_sha256()},
         "software": {
             "python": platform.python_version(),
             **{
                 name: version(name)
-                for name in ("torch", "accelerate", "numpy", "pyarrow")
+                for name in (
+                    "torch",
+                    "accelerate",
+                    "numpy",
+                    "pyarrow",
+                    "hydra-core",
+                    "omegaconf",
+                    "tokenizers",
+                    "transformers",
+                    "x-transformers",
+                    "vector-quantize-pytorch",
+                )
             },
         },
         "execution": {
@@ -140,10 +167,10 @@ def resume_signature(cfg, *, sources, codebook, accelerator, identity):
 def read_training_checkpoint(path: Path) -> dict:
     payload = torch.load(path, map_location="cpu", weights_only=True)
     if not isinstance(payload, dict) or (
-        type(payload.get("format_version")) is not int or payload["format_version"] != 2
+        type(payload.get("format_version")) is not int or payload["format_version"] != 3
     ):
         raise ValueError(
-            "Full resume requires a version 2 training checkpoint; weights-only/legacy checkpoints cannot resume"
+            "STok requires a complete version 3 training checkpoint; unsupported versions and weights-only checkpoints cannot load"
         )
     required = {
         "model",
@@ -164,6 +191,7 @@ def read_training_checkpoint(path: Path) -> dict:
         raise ValueError(
             f"Incomplete resume checkpoint: missing {sorted(required - payload.keys())}"
         )
+    validate_resume_signature(payload, payload["signature"])
     return payload
 
 
@@ -174,6 +202,15 @@ def validate_resume_signature(payload: dict, expected: dict) -> None:
         raise ValueError(
             f"Resume signature mismatch: {changed}; original data/model/execution/budget must be unchanged"
         )
+    runtime = payload["runtime"]
+    if (
+        any(
+            runtime.get(key) != saved[key]
+            for key in ("software", "execution", "source")
+        )
+        or runtime["mdlm_identity"]["training_signature"] != saved["mdlm_identity"]
+    ):
+        raise ValueError("Checkpoint runtime manifest disagrees with resume identity")
     ranks = payload["rank_states"]
     size = expected["execution"]["world_size"]
     if (
@@ -228,34 +265,7 @@ def validate_resume_signature(payload: dict, expected: dict) -> None:
                 raise ValueError("Incomplete or invalid CUDA RNG state collection")
         elif "cuda" in rng or "cuda_device" in rng:
             raise ValueError("Unexpected CUDA RNG state for CPU execution")
-        logging = rank["logging"]
-        required_logging = {
-            "running_loss",
-            "running_updates",
-            "running_cls_loss",
-            "running_cls_count",
-            "running_fape_loss",
-            "running_fape_count",
-            "running_pred_nan_frac_sum",
-            "running_pred_nan_frac_count",
-            "running_masked_acc_sum",
-            "running_masked_acc_count",
-            "total_missing_structure",
-            "total_noncanonical_sequence",
-            "mdlm_running",
-        }
-        if not isinstance(logging, dict) or required_logging - logging.keys():
-            raise ValueError("Incomplete per-rank logging state")
-        if not isinstance(logging["mdlm_running"], torch.Tensor) or logging[
-            "mdlm_running"
-        ].shape != (5, 2):
-            raise ValueError("Invalid per-rank MDLM logging state")
-        if any(
-            not isinstance(logging[key], (int, float))
-            or not math.isfinite(logging[key])
-            for key in required_logging - {"mdlm_running"}
-        ):
-            raise ValueError("Invalid numeric logging state")
+        validate_logging_state(rank["logging"])
         if not isinstance(rank["loader_generator_state"], torch.Tensor):
             raise ValueError("Missing epoch-start loader generator state")
     if any(
@@ -267,35 +277,9 @@ def validate_resume_signature(payload: dict, expected: dict) -> None:
         raise ValueError("Resume scheduler and successful-update counters disagree")
 
 
-class TrainingProgress(TypedDict):
-    """Completed-boundary cursor, cumulative counts, and unflushed log state."""
-
-    epoch: int
-    batches_in_epoch: int
-    global_step: int
-    micro_step: int
-    residues_seen: int
-    executed_positions: int
-    total_missing_structure: int
-    total_noncanonical_sequence: int
-    running_loss: float
-    running_updates: int
-    running_cls_loss: float
-    running_cls_count: int
-    running_fape_loss: float
-    running_fape_count: int
-    running_pred_nan_frac_sum: float
-    running_pred_nan_frac_count: int
-    running_masked_acc_sum: float
-    running_masked_acc_count: int
-    mdlm_running: torch.Tensor
-    rng: dict
-    loader_generator_state: torch.Tensor
-
-
 def restore_training_state(
     payload: dict, *, model, optimizer, scheduler, accelerator
-) -> TrainingProgress:
+) -> dict:
     rank = payload["rank_states"][accelerator.process_index if accelerator else 0]
     device = accelerator.device if accelerator else torch.device("cpu")
     if device.type == "cuda":
@@ -324,8 +308,7 @@ def restore_training_state(
         raise ValueError("Missing or unexpected initialized AdamW parameter state")
     plain = accelerator.unwrap_model(model) if accelerator else model
     plain.load_state_dict(payload["model"], strict=True)
-    if payload["config"]["train"].get("objective") == "mdlm":
-        plain.mdlm_regime_weights = payload["config"]["train"]["mdlm"]["regime_weights"]
+    plain.mdlm_regime_weights = payload["config"]["train"]["mdlm"]["regime_weights"]
     optimizer.load_state_dict(payload["optimizer"])
     scheduler.load_state_dict(payload["scheduler"])
     if payload["global_step"] and not optimizer.state:
@@ -358,7 +341,7 @@ def restore_training_state(
     finally:
         restore_rng_state(rng)
     return {
-        **rank["logging"],
+        "logging": rank["logging"],
         "epoch": rank["epoch"],
         "batches_in_epoch": rank["batches_in_epoch"],
         "global_step": payload["global_step"],

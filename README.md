@@ -300,8 +300,17 @@ The engine resolves and freezes a private scientific configuration. The supplied
 configuration, including read-only inputs and authored interpolations, stays
 unchanged. Each run writes `configs/authored.yaml` (unresolved authored choices),
 `configs/run.yaml` (resolved scientific settings, including evaluation defaults),
-and `configs/runtime.yaml` (artifact/data identity and effective precision).
-Checkpoints contain scientific `config` and derived `runtime` separately.
+and `configs/runtime.yaml` (component/artifact identity, software/execution contract,
+effective precision, and installed-package source checksum).
+Checkpoints contain scientific `config` and derived `runtime` separately. The
+source checksum hashes relative Python/config filenames and content, so it is
+identical in a checkout and installed wheel and needs no Git metadata. Exact
+resume requires the same source/software contract, in addition to training choices.
+`residues_seen` counts globally consumed biological residues, including empty
+supervision; `executed_positions` counts globally forwarded padded positions,
+including AMP-skipped updates. `global_step` counts successful optimizer updates.
+Checkpoints require completed accumulation boundaries and keep only active MDLM
+metrics plus per-rank loader, RNG and scaler state. Prior formats are rejected.
 
 Fresh runs require a new output directory. Resume requires matching data,
 model, seed, workers, batching, execution, optimizer and original budget.
@@ -393,9 +402,9 @@ identities, precision/topology, and regime provenance. Keep model, training
 objective/masking, dataset contents/order, seed, workers, batch/accumulation,
 execution, learning rate, and original budget unchanged. Output/log/evaluation/
 checkpoint cadence changes are allowed. Populated MDLM run directories require
-an explicit complete version-2 resume checkpoint.
+an explicit complete version-3 resume checkpoint.
 
-Generate biological tokens using a complete version-2 MDLM checkpoint:
+Generate biological tokens using a complete version-3 MDLM checkpoint:
 
 ```bash
 stok sample --checkpoint /runs/stok-mdlm/baseline-001/model/final.pt \

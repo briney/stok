@@ -40,6 +40,7 @@ from stok.utils.checkpoint import (
     validate_resume_signature,
     ResumeWandb,
 )
+from stok.utils.pretrained import state_sha256
 
 
 def _maybe_get_accelerator(precision=None):
@@ -150,11 +151,11 @@ def _save_checkpoint(
     global_step: int,
     cfg: DictConfig,
     accelerator,
-    micro_step: int = 0,
-    residues_seen: int = 0,
-    executed_positions: int = 0,
-    training_state: dict | None = None,
-    runtime: dict | None = None,
+    micro_step: int,
+    residues_seen: int,
+    executed_positions: int,
+    training_state: dict,
+    runtime: dict,
 ):
     payload = None
     rank_state = None
@@ -166,45 +167,39 @@ def _save_checkpoint(
             "scheduler": scheduler.state_dict(),
             "global_step": int(global_step),
             "micro_step": int(micro_step),
-            "step_unit": "optimizer_update",
             "config": OmegaConf.to_container(cfg, resolve=True),
             "runtime": runtime,
-            "rng_state": _collect_rng_state(
-                device=accelerator.device if accelerator else torch.device("cpu")
-            ),
             "residues_seen": int(residues_seen),
             "executed_positions": int(executed_positions),
         }
         payload["optimizer_initialized"] = [
             key for key, state in payload["optimizer"]["state"].items() if state
         ]
-        # Minimal helper callers may still write initialization artifacts; production
-        # always supplies complete rank state and only v2 supports full resume.
-        if training_state is not None:
-            if any(p.grad is not None for p in model.parameters()):
-                raise ValueError(
-                    "Checkpoint requires a completed accumulation boundary with no pending gradients"
-                )
-            scaler = getattr(accelerator, "scaler", None)
-            rank_state = {
-                **training_state["local"],
-                "rank": accelerator.process_index if accelerator else 0,
-                "rng": payload["rng_state"],
-                "scaler": scaler.state_dict() if scaler is not None else None,
-            }
+        if any(p.grad is not None for p in model.parameters()):
+            raise ValueError(
+                "Checkpoint requires a completed accumulation boundary with no pending gradients"
+            )
+        scaler = getattr(accelerator, "scaler", None)
+        rank_state = {
+            **training_state["local"],
+            "rank": accelerator.process_index if accelerator else 0,
+            "rng": _collect_rng_state(
+                device=accelerator.device if accelerator else torch.device("cpu")
+            ),
+            "scaler": scaler.state_dict() if scaler is not None else None,
+        }
     except Exception as exc:
         if accelerator is None:
             raise
         error = f"{type(exc).__name__}: {exc}"
     _raise_rank_errors(error, accelerator, "Collecting checkpoint state failed")
     assert payload is not None
-    if training_state is not None:
-        payload.update(
-            format_version=2,
-            rank_states=gather_object([rank_state]) if accelerator else [rank_state],
-            signature=training_state["signature"],
-            wandb_run_id=training_state["wandb_run_id"],
-        )
+    payload.update(
+        format_version=3,
+        rank_states=gather_object([rank_state]) if accelerator else [rank_state],
+        signature=training_state["signature"],
+        wandb_run_id=training_state["wandb_run_id"],
+    )
     error = None
     if accelerator is None or accelerator.is_main_process:
         try:
@@ -374,7 +369,7 @@ def run_training(cfg: DictConfig) -> None:
                 cfg, "train.eval.mdlm.generation_cohort"
             ),
         )
-        runtime = {
+        runtime: dict[str, Any] = {
             "effective_precision": effective_precision,
             "mdlm_identity": mdlm_identity,
         }
@@ -491,6 +486,23 @@ def run_training(cfg: DictConfig) -> None:
             accelerator=accelerator,
             identity=mdlm_identity,
         )
+        runtime.update(
+            **{key: signature[key] for key in ("software", "execution", "source")},
+            components={
+                "objective": "mdlm",
+                "model": "stok_mdlm",
+                "sequence_tokenizer": "native",
+                "structure_representation": "frozen_vq",
+                "optimizer": "adamw",
+                "scheduler": cfg.train.scheduler,
+            },
+        )
+        if decoder is not None:
+            runtime["components"]["decoder"] = "geometric"
+            runtime["decoder"] = {
+                "sha256": state_sha256(decoder.state_dict()),
+                "codebook_sha256": mdlm_identity["codebook_sha256"],
+            }
         if cfg.train.get("resume_from"):
             resume_payload = read_training_checkpoint(Path(cfg.train.resume_from))
             validate_resume_signature(resume_payload, signature)
@@ -610,7 +622,7 @@ def run_training(cfg: DictConfig) -> None:
         is_main=is_main,
     )
 
-    # FLOPs tracking preserves each task's historical position accounting.
+    # FLOPs use globally forwarded padded positions.
     total_tokens = 0
     total_residues = 0
     task = MDLMTask(cfg, codebook_size=codebook_size)
@@ -627,7 +639,7 @@ def run_training(cfg: DictConfig) -> None:
             progress["executed_positions"],
             progress["residues_seen"],
         )
-        task.restore_logging_state(cast(dict, progress))
+        task.restore_logging_state(progress["logging"])
 
     def checkpoint_state():
         return {
@@ -758,27 +770,28 @@ def run_training(cfg: DictConfig) -> None:
                 )
             task.record_update(window_statistics, counts)
             # logging
-            if current_step % log_interval == 0 and is_main:
-                cumulative_flops = compute_flops_6n(num_params, total_tokens)
-                msg, payload = task.format_log(
-                    step=current_step,
-                    max_steps=max_steps,
-                    micro_step=micro_step,
-                    epoch=current_epoch,
-                    lr=scheduler.get_last_lr()[0],
-                    flops=cumulative_flops,
-                    residues_seen=total_residues,
-                    executed_positions=total_tokens,
-                )
-                console.train(msg)
-                if log_file_handle is not None:
-                    print(
-                        msg + f" (flops_actual={cumulative_flops})",
-                        file=log_file_handle,
-                        flush=True,
+            if current_step % log_interval == 0:
+                if is_main:
+                    cumulative_flops = compute_flops_6n(num_params, total_tokens)
+                    msg, payload = task.format_log(
+                        step=current_step,
+                        max_steps=max_steps,
+                        micro_step=micro_step,
+                        epoch=current_epoch,
+                        lr=scheduler.get_last_lr()[0],
+                        flops=cumulative_flops,
+                        residues_seen=total_residues,
+                        executed_positions=total_tokens,
                     )
-                if wb is not None:
-                    wb.log(payload, step=current_step)
+                    console.train(msg)
+                    if log_file_handle is not None:
+                        print(
+                            msg + f" (flops_actual={cumulative_flops})",
+                            file=log_file_handle,
+                            flush=True,
+                        )
+                    if wb is not None:
+                        wb.log(payload, step=current_step)
                 task.reset_log_window()
 
             denoising_due = mdlm_eval.enabled and current_step % eval_interval == 0
@@ -848,7 +861,7 @@ def run_training(cfg: DictConfig) -> None:
         if (
             not resumed_batches
             and global_step == updates_before_pass
-            and (not task.allow_skipped_only_pass or eligible_windows_in_pass == 0)
+            and eligible_windows_in_pass == 0
         ):
             raise RuntimeError("Training pass made no successful optimizer update")
         if global_step < max_steps:

@@ -62,14 +62,13 @@ if os.environ.get('RESUME_SKIP'):
         return mdlm_forward(self, *args, **kwargs)
     STokMDLM.forward = rank_forward
 if os.environ.get('CHECK_PROGRESS_CONTRACT'):
-    from typing import is_typeddict
-    from stok.utils.checkpoint import TrainingProgress
     original_restore = train.restore_training_state
     def restore(*args, **kwargs):
         result = original_restore(*args, **kwargs)
-        assert is_typeddict(TrainingProgress), 'TrainingProgress must be TypedDict'
         assert type(result) is dict, 'TrainingProgress must be an ordinary dict'
-        assert {'epoch', 'batches_in_epoch', 'global_step', 'micro_step', 'residues_seen', 'executed_positions', 'running_loss', 'running_updates', 'mdlm_running'} <= result.keys()
+        assert {'epoch', 'batches_in_epoch', 'global_step', 'micro_step', 'residues_seen', 'executed_positions', 'logging'} <= result.keys()
+        assert 'running_loss' not in result and 'rng' in result
+        assert result['logging']['running_updates'] == 1
         assert result['epoch'] == 0 and result['global_step'] == 1
         return result
     train.restore_training_state = restore
@@ -193,7 +192,7 @@ def test_resume_matches_uninterrupted_training(tmp_path, workers, source_kind, s
     execute(cfg, tmp_path / "resumed.yaml")
     full = torch.load(tmp_path / "full/model/final.pt", weights_only=True)
     resumed = torch.load(tmp_path / "interrupted/model/final.pt", weights_only=True)
-    assert full["format_version"] == resumed["format_version"] == 2
+    assert full["format_version"] == resumed["format_version"] == 3
     for key in (
         "model",
         "optimizer",
@@ -244,6 +243,9 @@ def test_two_rank_continuation_with_actual_cpu_scaler_skip(tmp_path, workers):
     execute(cfg, tmp_path / "resumed.yaml", distributed=True, extra_env=env)
     full = torch.load(tmp_path / "full/model/final.pt", weights_only=True)
     resumed = torch.load(tmp_path / "interrupted/model/final.pt", weights_only=True)
+    for rank_state in full["rank_states"]:
+        assert rank_state["logging"]["running_updates"] == 1
+    equal(full["rank_states"][0]["logging"], full["rank_states"][1]["logging"])
     for key in (
         "model",
         "optimizer",
@@ -380,6 +382,9 @@ def test_rank_local_checkpoint_failures_reach_all_ranks(tmp_path, failure):
     [
         "logging",
         "logging_value",
+        "logging_tensor",
+        "manifest_source",
+        "manifest_identity",
         "optimizer",
         "optimizer_partial",
         "optimizer_empty_entry",
@@ -399,6 +404,12 @@ def test_incomplete_rank_state_rejected_before_output(tmp_path, damage):
         del rank["logging"]["running_loss"]
     elif damage == "logging_value":
         rank["logging"]["running_loss"] = "broken"
+    elif damage == "logging_tensor":
+        rank["logging"]["mdlm_running"][0, 0] = float("nan")
+    elif damage == "manifest_source":
+        payload["runtime"]["source"] = {"sha256": "changed"}
+    elif damage == "manifest_identity":
+        payload["runtime"]["mdlm_identity"]["training_signature"] = "changed"
     elif damage == "optimizer":
         payload["optimizer"]["state"].clear()
     elif damage == "optimizer_partial":
@@ -648,7 +659,7 @@ def test_resume_allows_output_logging_evaluation_and_checkpoint_overrides(tmp_pa
     equal(full["rank_states"][0]["rng"], final["rank_states"][0]["rng"])
 
 
-def test_training_progress_is_flat_typed_dict(tmp_path):
+def test_resume_cursor_keeps_task_logging_separate(tmp_path):
     cfg = config_for(tmp_path)
     execute(cfg, tmp_path / "original.yaml", stop=1, ok=False)
     cfg.train.resume_from = str(
@@ -675,14 +686,6 @@ def test_optimizer_coverage_preserves_unused_and_frozen_parameters(tmp_path):
         [
             "running_loss",
             "running_updates",
-            "running_cls_loss",
-            "running_cls_count",
-            "running_fape_loss",
-            "running_fape_count",
-            "running_pred_nan_frac_sum",
-            "running_pred_nan_frac_count",
-            "running_masked_acc_sum",
-            "running_masked_acc_count",
             "total_missing_structure",
             "total_noncanonical_sequence",
         ],
@@ -697,6 +700,14 @@ def test_optimizer_coverage_preserves_unused_and_frozen_parameters(tmp_path):
         scheduler=scheduler,
         global_step=1,
         micro_step=1,
+        residues_seen=1,
+        executed_positions=1,
+        runtime={
+            "source": {},
+            "software": {},
+            "execution": {"world_size": 1, "device": "cpu", "cuda_rng_state_sizes": []},
+            "mdlm_identity": {"training_signature": "test"},
+        },
         cfg=OmegaConf.create(
             {
                 "train": {
@@ -707,7 +718,16 @@ def test_optimizer_coverage_preserves_unused_and_frozen_parameters(tmp_path):
         ),
         accelerator=None,
         training_state={
-            "signature": {},
+            "signature": {
+                "source": {},
+                "software": {},
+                "execution": {
+                    "world_size": 1,
+                    "device": "cpu",
+                    "cuda_rng_state_sizes": [],
+                },
+                "mdlm_identity": "test",
+            },
             "wandb_run_id": None,
             "local": {
                 "epoch": 0,
