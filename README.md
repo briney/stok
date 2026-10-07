@@ -1134,3 +1134,26 @@ dropout-zero model improved both available-target losses on its training subset.
 These are implementation diagnostics. Operational launch remains pending actual
 frozen pilot splits/cohorts, intended hardware/topology and explicit run budgets;
 the preset's 10,000 updates are not a measured or authorized scientific run.
+
+## Baseline extraction compatibility
+
+The October 6 extraction preserves `stok train`, `python -m stok.train`,
+`stok sample`, `load_training_config`, and
+`stok.cli.train.run_training`/its existing helper imports. Hydra groups, YAML
+and command-line keys/precedence, parameter names/order, tied MDLM embeddings
+and prediction heads, and the complete version-2 checkpoint/signature contract
+remain unchanged. The named baseline is `gcp_large_paired_mdlm_tied_v1`;
+its frozen GCP prototypes still provide representation identity and decoding.
+
+Developer instrumentation now targets `stok.models.build` for construction,
+`stok.training.tasks` for preparation/corruption/loss/decoder lookups,
+`stok.training.engine` for execution/checkpoint/Accelerator/W&B lookups, and
+`stok.data.loaders` for loading/alignment/mixture helpers. Patching an old
+compatibility reexport does not redirect the new owner's lookup.
+
+The [migration evidence](docs/experiments/refactor/baseline.md) separates exact
+software equivalence, bounded real-data CPU checks, and unchanged historical
+GPU evidence. These diagnostics add no scientific results. Scientific
+configuration, canonical evaluation IDs, offline attempt records/scoring,
+recipes, alternative heads/representations, and research extensions remain
+[C0–C6 follow-ups](docs/superpowers/plans/2026-10-06-baseline-extraction.md#companion-comparison-workstream).
