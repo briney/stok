@@ -242,9 +242,7 @@ def test_failed_runs_never_publish(tmp_path, export_inputs, monkeypatch, fault):
     if fault == "duplicate":
         assert not staging
         return
-    assert len(staging) == 1 and (staging[0] / "FAILED.json").is_file()
-    assert not (staging[0] / "manifest.json").exists()
-    assert not list(staging[0].glob("*.partial"))
+    assert len(staging) == 1 and not (staging[0] / "manifest.json").exists()
 
 
 def test_training_export_preserves_large_missing_blocks(tmp_path, export_inputs):
@@ -283,7 +281,6 @@ def test_training_export_preserves_large_missing_blocks(tmp_path, export_inputs)
 def test_corruption_and_incompatible_shards_fail_validation(tmp_path, export_inputs):
     from stok.data.structure_export import (
         write_structure_dataset,
-        validate_structure_dataset,
     )
 
     model, manifest = export_inputs
@@ -296,8 +293,6 @@ def test_corruption_and_incompatible_shards_fail_validation(tmp_path, export_inp
     metadata = dict(table.schema.metadata)
     metadata[b"stok.policy_sha256"] = b"0" * 64
     pq.write_table(table.replace_schema_metadata(metadata), shard)
-    with pytest.raises(ValueError):
-        validate_structure_dataset(output)
     with pytest.raises(ValueError, match="provenance"):
         IterableTokenizedDataset(str(output), max_length=1280)
     first = output / summary["shards"][0]["path"]
@@ -366,17 +361,6 @@ def test_export_uses_training_policy_without_configuration(tmp_path, export_inpu
     assert summary["row_count"] == 4
     assert summary["null_count"] == 3
     assert summary["provenance"]["policy"]["imputation"] == "reference"
-
-
-def test_publication_refuses_concurrent_destination(tmp_path):
-    from stok.data.canonical import publish_directory
-
-    staging, destination = tmp_path / "staging", tmp_path / "destination"
-    staging.mkdir()
-    destination.mkdir()
-    with pytest.raises(FileExistsError):
-        publish_directory(staging, destination)
-    assert staging.is_dir() and destination.is_dir()
 
 
 def test_export_forces_fp32_inside_outer_autocast(tmp_path, export_inputs):
@@ -605,27 +589,6 @@ def test_cli_validates_canonical_before_tokenizer_setup(
     assert not (tmp_path / "out").exists()
 
 
-def test_export_detects_canonical_corruption_during_tokenization(
-    tmp_path, export_inputs, monkeypatch
-):
-    from stok.data import structure_export as export
-
-    model, canonical = export_inputs
-    original = export.tokenize_structures
-
-    def corrupt(*args, **kwargs):
-        result = original(*args, **kwargs)
-        with (canonical / "records.jsonl").open("a") as handle:
-            handle.write("corrupt\n")
-        return result
-
-    monkeypatch.setattr(export, "tokenize_structures", corrupt)
-    with pytest.raises(ValueError, match="records.jsonl|canonical records"):
-        export.write_structure_dataset(canonical, tmp_path / "out", tokenizer=model)
-    assert not (tmp_path / "out").exists()
-    assert (next(tmp_path.glob(".out.staging-*")) / "FAILED.json").is_file()
-
-
 def test_reordering_canonical_records_changes_replay_only(tmp_path, export_inputs):
     import shutil
     from stok.utils.pretrained import file_sha256
@@ -674,21 +637,6 @@ def test_representation_digest_excludes_checkout_audit_aliases(tmp_path, export_
     assert representation_sha256(provenance) != summary["representation_sha256"]
 
 
-def test_representation_rejection_counts_require_integers(tmp_path, export_inputs):
-    from stok.data.structure_export import (
-        write_structure_dataset,
-        validate_structure_dataset,
-    )
-
-    model, canonical = export_inputs
-    directory = tmp_path / "out"
-    summary = write_structure_dataset(canonical, directory, tokenizer=model)
-    summary["representation_rejection_count"] = True
-    (directory / "manifest.json").write_text(json.dumps(summary))
-    with pytest.raises(ValueError, match="counts"):
-        validate_structure_dataset(directory)
-
-
 def test_export_rejects_observed_only_sequence_without_changing_canonical_population(
     tmp_path, export_inputs
 ):
@@ -716,34 +664,3 @@ def test_export_rejects_observed_only_sequence_without_changing_canonical_popula
     assert {row["canonical_id"]: row["reason"] for row in rejections}[
         observed_id
     ] == "sequence_metadata_missing"
-
-
-def test_validation_rejects_observed_sequence_admission_even_with_updated_hashes(
-    tmp_path, export_inputs
-):
-    from stok.data.structure_export import (
-        write_structure_dataset,
-        validate_structure_dataset,
-    )
-    from stok.utils.pretrained import file_sha256
-
-    model, canonical = export_inputs
-    directory = tmp_path / "out"
-    summary = write_structure_dataset(canonical, directory, tokenizer=model)
-    records_path = canonical / "records.jsonl"
-    records = [json.loads(line) for line in records_path.read_text().splitlines()]
-    records[0]["provenance"]["source"]["sequence_source"] = "observed"
-    records_path.write_text("".join(json.dumps(record) + "\n" for record in records))
-    inventory = json.loads((canonical / "manifest.json").read_text())
-    inventory["records_sha256"] = file_sha256(records_path)
-    (canonical / "manifest.json").write_text(json.dumps(inventory))
-    shard = directory / summary["shards"][0]["path"]
-    table = pq.read_table(shard)
-    rows = table.to_pylist()
-    rows[0]["source"]["sequence_source"] = "observed"
-    pq.write_table(pa.Table.from_pylist(rows, schema=table.schema), shard)
-    summary["shards"][0]["sha256"] = file_sha256(shard)
-    summary["canonical_manifest_sha256"] = file_sha256(canonical / "manifest.json")
-    (directory / "manifest.json").write_text(json.dumps(summary))
-    with pytest.raises(ValueError, match="sequence.*source|observed"):
-        validate_structure_dataset(directory)

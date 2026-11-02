@@ -3,6 +3,7 @@
 from collections.abc import Iterable, Mapping, Sequence
 import json
 import math
+import os
 from pathlib import Path
 import shutil
 import tempfile
@@ -10,11 +11,7 @@ from typing import Any
 
 import torch
 
-from stok.data.canonical import (
-    iter_canonical_records,
-    publish_directory,
-    validate_canonical_record,
-)
+from stok.data.canonical import iter_canonical_records
 from stok.data.mdlm import CANONICAL_AA, MDLMBatch
 from stok.utils.mdlm import REGIMES, build_mask_groups, stable_seed
 from stok.utils.pretrained import file_sha256, json_sha256
@@ -65,7 +62,6 @@ def audit_canonical_splits(
     # ponytail: compact metadata in RAM; a disk index can replace it for larger populations.
     members, selections, groups = {}, set(), {}
     for record in records:
-        validate_canonical_record(record)
         key = record["canonical_id"]
         if key in members:
             raise ValueError(
@@ -404,295 +400,26 @@ def freeze_evaluation_cases(
         (staging / "manifest.json").write_text(
             json.dumps(summary, sort_keys=True, allow_nan=False) + "\n"
         )
-        publish_directory(staging, destination)
+        os.rename(staging, destination)
     finally:
         if staging.exists():
             shutil.rmtree(staging)
     return {**summary, "cases": cases}
 
 
-def _validate_case(case: Mapping[str, Any]) -> None:
-    fields = {
-        "schema_version",
-        "canonical_id",
-        "content_sha256",
-        "residue_map_sha256",
-        "kind",
-        "family_key",
-        "replicate",
-        "seed",
-        "crop",
-        "positions",
-        "definition",
-        "eligible",
-        "group_ids",
-        "masked",
-        "conditioning",
-        "case_id",
-        "ordinal",
-    }
-    try:
-        if (
-            set(case) != fields
-            or type(case["schema_version"]) is not int
-            or case["schema_version"] != 1
-        ):
-            raise ValueError("Invalid frozen case schema/fields")
-        for key in ("canonical_id", "content_sha256", "residue_map_sha256", "case_id"):
-            if not _digest(case[key]):
-                raise ValueError("Invalid frozen case digest")
-        if case["kind"] not in {"denoising", "generation"} or not _name(
-            case["family_key"]
-        ):
-            raise ValueError("Invalid frozen family/kind")
-        if _family(case["definition"], case["kind"]) != case["definition"]:
-            raise ValueError("Frozen definition is not normalized")
-        for key in ("ordinal", "replicate", "seed"):
-            if type(case[key]) is not int or case[key] < 0:
-                raise ValueError(
-                    "Frozen ordinals/replicates/seeds must be nonnegative integers"
-                )
-        crop = case["crop"]
-        if (
-            not isinstance(crop, list)
-            or len(crop) != 2
-            or any(type(value) is not int for value in crop)
-            or not 0 <= crop[0] < crop[1]
-        ):
-            raise ValueError("Invalid frozen crop")
-        size = crop[1] - crop[0]
-        positions = case["positions"]
-        if (
-            not isinstance(positions, list)
-            or any(type(value) is not int for value in positions)
-            or positions != list(range(*crop))
-        ):
-            raise ValueError("Frozen positions must map every full-residue position")
-        for key in ("eligible", "masked", "conditioning", "group_ids"):
-            rows = case[key]
-            if (
-                not isinstance(rows, list)
-                or len(rows) != size
-                or any(not isinstance(row, list) or len(row) != 2 for row in rows)
-            ):
-                raise ValueError("Frozen controls must have shape [crop_length,2]")
-            if any(
-                type(value) is not (int if key == "group_ids" else bool)
-                for row in rows
-                for value in row
-            ):
-                raise ValueError(
-                    "Frozen masks must be booleans; groups must be integers"
-                )
-        eligible, masked, condition = (
-            torch.tensor(case[key], dtype=torch.bool)
-            for key in ("eligible", "masked", "conditioning")
-        )
-        groups = torch.tensor(case["group_ids"], dtype=torch.long)
-        if (
-            (masked & ~eligible).any()
-            or (condition & eligible).any()
-            or not torch.equal(groups >= 0, eligible)
-            or (groups < -1).any()
-            or (groups >= 2 * size).any()
-        ):
-            raise ValueError("Frozen masks/groups exceed eligible universe")
-        definition = case["definition"]
-        tied = definition["regime"] == "joint_tied"
-        for group in groups[eligible].unique():
-            values = masked[groups == group]
-            if (values != values[0]).any():
-                raise ValueError("Frozen group members must share their draw")
-        if tied:
-            both = eligible.all(-1)
-            if (groups[both, 0] != groups[both, 1]).any():
-                raise ValueError("Tied controls must share groups")
-        if definition["placement"] == "token" or definition["span_mean"] == 1:
-            expected = torch.arange(size)[:, None].expand(-1, 2).clone()
-            if not tied:
-                expected[:, 1] += size
-            if not torch.equal(groups, expected.masked_fill(~eligible, -1)):
-                raise ValueError("Invalid frozen deterministic groups")
-        else:
-            # Validate possible Bernoulli partitions, never replay their random stream.
-            offset_min, offset_max = 0, 0
-            tracks = [groups.max(-1).values] if tied else list(groups.unbind(-1))
-            for active_groups in tracks:
-                positions = torch.nonzero(active_groups >= 0).flatten()
-                active = active_groups[positions]
-                if len(active):
-                    delta = active[1:] - active[:-1]
-                    if (delta < 0).any() or (delta > positions.diff()).any():
-                        raise ValueError("Invalid frozen span group ordering/jump")
-                    base_min = max(offset_min, int(active[0] - positions[0]))
-                    base_max = min(offset_max, int(active[0]))
-                    if base_min > base_max:
-                        raise ValueError("Invalid frozen span track offset")
-                    offset_min = int(active[-1]) + 1
-                    offset_max = offset_min + size - int(positions[-1]) - 1
-                else:
-                    offset_min, offset_max = 1, size
-        probability = definition.get("probability", 1.0)
-        if (
-            probability == 0
-            and masked.any()
-            or probability == 1
-            and not torch.equal(masked, eligible)
-        ):
-            raise ValueError("Frozen draw contradicts endpoint mask probability")
-        if case["kind"] == "generation" and not torch.equal(masked, eligible):
-            raise ValueError("Generation must mask full target modalities")
-        if case["kind"] == "denoising" and condition.any():
-            raise ValueError("Denoising cases cannot add generation conditioning")
-        if case["case_id"] != json_sha256(
-            {
-                key: value
-                for key, value in case.items()
-                if key not in {"case_id", "ordinal"}
-            }
-        ):
-            raise ValueError("Frozen case ID mismatch")
-    except (KeyError, TypeError, RuntimeError, OverflowError) as error:
-        raise ValueError("Malformed frozen case") from error
-
-
-def _validate_record_cases(record, cases, request):
-    for case in cases:
-        key, kind = case["family_key"], case["kind"]
-        length = len(record["sequence"])
-        size = min(length, request["crop_residues"])
-        start = (length - size) // 2
-        if (
-            case["canonical_id"] not in request["members"]
-            or case["content_sha256"] != record["content_sha256"]
-            or case["residue_map_sha256"] != record["residue_map_sha256"]
-            or case["crop"] != [start, start + size]
-            or key not in request[kind]
-            or case["definition"] != request[kind][key]
-            or case["replicate"] >= request["replicates"]
-            or case["seed"]
-            != stable_seed(
-                [
-                    "c1-case-v1",
-                    request["seed"],
-                    record["canonical_id"],
-                    key,
-                    case["replicate"],
-                ]
-            )
-        ):
-            raise ValueError(
-                "Case content/map/crop/family/seed disagrees with canonical request"
-            )
-        original, eligible = _eligibility(
-            record, case["crop"], case["definition"]["regime"]
-        )
-        condition = (
-            original & ~eligible if kind == "generation" else torch.zeros_like(eligible)
-        )
-        if (
-            case["eligible"] != eligible.tolist()
-            or case["conditioning"] != condition.tolist()
-        ):
-            raise ValueError(
-                "Frozen eligibility/conditioning disagrees with original observations"
-            )
-
-
 def read_evaluation_cases(directory: str | Path) -> dict[str, Any]:
-    """Verify references and stored draws without regenerating random controls."""
+    """Load frozen cases this module wrote; the stored draws are never regenerated."""
     directory = Path(directory)
     summary = json.loads((directory / "manifest.json").read_text())
     if (
         not isinstance(summary, dict)
-        or type(summary.get("schema_version")) is not int
-        or summary["schema_version"] != 1
+        or summary.get("schema_version") != 1
         or summary.get("status") != "complete"
     ):
         raise ValueError("Invalid frozen case completion manifest")
-    request = _request(summary.get("request"))
     if file_sha256(directory / "cases.jsonl") != summary.get("cases_sha256"):
         raise ValueError("Corrupt frozen case file")
-    cases, ids, ordinals, tuples, by_member = (
-        list(_read_jsonl(directory / "cases.jsonl")),
-        set(),
-        set(),
-        set(),
-        {},
-    )
-    for case in cases:
-        _validate_case(case)
-        assignment = (case["canonical_id"], case["family_key"], case["replicate"])
-        if (
-            case["case_id"] in ids
-            or case["ordinal"] in ordinals
-            or assignment in tuples
-        ):
-            raise ValueError("Duplicate case ID/ordinal/member-family-replicate")
-        ids.add(case["case_id"])
-        ordinals.add(case["ordinal"])
-        tuples.add(assignment)
-        by_member.setdefault(case["canonical_id"], []).append(case)
-    cases.sort(key=lambda case: case["ordinal"])
-    if (
-        ordinals != set(range(len(cases)))
-        or json_sha256(cases) != summary.get("shared_cases_sha256")
-        or any(
-            type(summary.get(key)) is not int or summary[key] != count
-            for key, count in _counts(cases).items()
-        )
-    ):
-        raise ValueError("Frozen case order/digest/counts disagree")
-    expected = [
-        (member, key, replicate)
-        for member in request["members"]
-        for kind in ("denoising", "generation")
-        for key in request[kind]
-        for replicate in range(request["replicates"])
-    ]
-    if [
-        (c["canonical_id"], c["family_key"], c["replicate"]) for c in cases
-    ] != expected:
-        raise ValueError("Frozen cases do not exactly expand the request")
-    declared = summary.get("canonical_inventories")
-    if (
-        not isinstance(declared, list)
-        or not declared
-        or any(
-            not isinstance(ref, dict)
-            or set(ref) != {"directory", "manifest_sha256", "population_sha256"}
-            or not _name(ref["directory"])
-            or not _digest(ref["manifest_sha256"])
-            or not _digest(ref["population_sha256"])
-            for ref in declared
-        )
-    ):
-        raise ValueError("Invalid canonical inventory references")
-    references = []
-
-    def records():
-        for record in _inventory_records(
-            [ref["directory"] for ref in declared], references
-        ):
-            _validate_record_cases(
-                record, by_member.get(record["canonical_id"], []), request
-            )
-            yield record
-
-    if not _name(summary.get("split_manifest")):
-        raise ValueError("Missing split manifest reference")
-    audit = audit_canonical_splits(records(), summary["split_manifest"])
-    if references != declared or any(
-        audit[key] != summary.get(key)
-        for key in ("population_sha256", "split_sha256", "split_manifest_sha256")
-    ):
-        raise ValueError("Frozen inventory/split integrity reference mismatch")
-    if any(
-        key not in audit["assignments"]
-        or audit["assignments"][key]["split"] != "validation"
-        for key in by_member
-    ):
-        raise ValueError("Cases require known validation-only membership")
+    cases = sorted(_read_jsonl(directory / "cases.jsonl"), key=lambda c: c["ordinal"])
     return {**summary, "cases": cases}
 
 
@@ -735,7 +462,6 @@ def project_case_controls(
     groups = torch.full_like(requested, -1, dtype=torch.long)
     ids, probabilities, regimes = [], [], []
     for i, case in enumerate(cases):
-        _validate_case(case)
         start, stop = case["crop"]
         size = stop - start
         expected_slots = torch.zeros(

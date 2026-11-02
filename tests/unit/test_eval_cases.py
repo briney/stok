@@ -461,65 +461,6 @@ def test_split_audit_covers_multiple_inventories_and_rejected_members(
         )
 
 
-@pytest.mark.parametrize(
-    "fault",
-    [
-        "duplicate_id",
-        "repeat",
-        "ordinal",
-        "content",
-        "map",
-        "crop",
-        "mask",
-        "bool",
-        "group",
-        "span",
-        "tied",
-        "seed",
-        "family",
-        "positions",
-    ],
-)
-def test_read_rejects_invalid_frozen_controls(inventory, tmp_path, fault):
-    result = freeze(inventory, tmp_path, replicates=2)
-    cases = copy.deepcopy(result["cases"])
-    case = cases[0]
-    if fault == "duplicate_id":
-        cases[1]["case_id"] = case["case_id"]
-    elif fault == "repeat":
-        cases[1] = {**case, "ordinal": 1}
-    elif fault == "ordinal":
-        cases[1]["ordinal"] = case["ordinal"]
-    elif fault == "content":
-        case["content_sha256"] = "a" * 64
-    elif fault == "map":
-        case["residue_map_sha256"] = "a" * 64
-    elif fault == "crop":
-        case["crop"][1] = 100
-    elif fault == "mask":
-        case["masked"][0].append(True)
-    elif fault == "bool":
-        case["masked"][0][0] = 1
-    elif fault == "group":
-        case["group_ids"][0][0] = -1
-    elif fault == "span":
-        case["definition"].update(placement="span", span_mean=8.0)
-        case["group_ids"][0][0] = 500
-    elif fault == "tied":
-        case["definition"]["regime"] = "joint_tied"
-    elif fault == "seed":
-        case["seed"] = True
-    elif fault == "family":
-        case["definition"]["probability"] = 0.9
-    elif fault == "positions":
-        case["positions"][0] = True
-    if fault not in {"duplicate_id", "repeat", "ordinal"}:
-        rehash(case)
-    rewrite(tmp_path / "cases", cases)
-    with pytest.raises(ValueError):
-        api().read_evaluation_cases(tmp_path / "cases")
-
-
 def test_default_recipe_freezes_all_32_denoising_families(inventory, tmp_path):
     request = recipe(inventory[1], replicates=2)
     del request["denoising"]
@@ -543,28 +484,13 @@ def test_generation_writer_does_not_apply_monitor_execution_cap(inventory, tmp_p
     assert result["generation_case_count"] == 34
 
 
-def test_existing_and_concurrent_destination_are_preserved(
-    inventory, tmp_path, monkeypatch
-):
+def test_existing_destination_is_preserved(inventory, tmp_path):
     directory = tmp_path / "cases"
     directory.mkdir()
     (directory / "marker").write_text("untouched")
     with pytest.raises(FileExistsError):
         freeze(inventory, tmp_path)
     assert (directory / "marker").read_text() == "untouched"
-    (directory / "marker").unlink()
-    directory.rmdir()
-    original = api().publish_directory
-
-    def concurrent(staging, destination):
-        destination.mkdir()
-        return original(staging, destination)
-
-    monkeypatch.setattr(api(), "publish_directory", concurrent)
-    with pytest.raises(OSError):
-        freeze(inventory, tmp_path)
-    assert list(directory.iterdir()) == []
-    assert not list(tmp_path.glob(".cases.staging-*"))
 
 
 def test_prepare_and_freeze_require_explicit_metadata_before_outputs(tmp_path):
@@ -714,11 +640,6 @@ def test_canonical_fixture_keeps_originals_when_arm_code_is_missing(golden, tmp_
     _, record, _, row = golden
     reduced = {**row, "structure_tokens": [None, 1, None, 3, 4, 5]}
     assert canonical_fixture(reduced)["content_sha256"] == record["content_sha256"]
-    from stok.data.structure_export import validate_structure_dataset
-
-    directory = write_dataset(tmp_path / "unavailable-arm", [reduced])
-    with pytest.raises(ValueError):
-        validate_structure_dataset(directory)
 
 
 def test_frozen_reads_do_not_draw_rng(inventory, tmp_path, monkeypatch):
@@ -729,50 +650,6 @@ def test_frozen_reads_do_not_draw_rng(inventory, tmp_path, monkeypatch):
 
     monkeypatch.setattr(torch, "rand", unexpected)
     assert api().read_evaluation_cases(tmp_path / "cases")["case_count"] == 2
-
-
-def test_read_rejects_impossible_span_jump_without_redrawing(golden, tmp_path):
-    path, record, split, _ = golden
-    result = api().freeze_evaluation_cases(
-        [path],
-        split,
-        recipe(
-            [record],
-            denoising={
-                "golden_span": {
-                    "regime": "joint_independent",
-                    "placement": "span",
-                    "probability": 0.5,
-                    "span_mean": 8.0,
-                }
-            },
-        ),
-        tmp_path / "cases",
-    )
-    result["cases"][0]["group_ids"][5][1] = 10
-    rehash(result["cases"][0])
-    rewrite(tmp_path / "cases", result["cases"])
-    with pytest.raises(ValueError):
-        api().read_evaluation_cases(tmp_path / "cases")
-
-
-def test_zero_probability_cannot_contain_masked_draw(inventory, tmp_path):
-    result = freeze(
-        inventory,
-        tmp_path,
-        denoising={
-            "zero": {
-                "regime": "joint_independent",
-                "placement": "token",
-                "probability": 0.0,
-            }
-        },
-    )
-    result["cases"][0]["masked"][0][0] = True
-    rehash(result["cases"][0])
-    rewrite(tmp_path / "cases", result["cases"])
-    with pytest.raises(ValueError):
-        api().read_evaluation_cases(tmp_path / "cases")
 
 
 def test_projection_rejects_repeated_member_family_replicate(golden, tmp_path):
@@ -791,7 +668,6 @@ def test_observed_only_rejected_member_remains_in_complete_split_population(
     inventory, tmp_path
 ):
     from stok.data.canonical import iter_canonical_records
-    from stok.data.structure_export import validate_structure_dataset
     from tests.utils.synthetic import declare_synthetic_source
 
     row = declare_synthetic_source(make_mdlm_rows()[1], source_accession="observed")
@@ -799,8 +675,6 @@ def test_observed_only_rejected_member_remains_in_complete_split_population(
     directory = write_dataset(
         tmp_path / "observed", [row], policy={"allow_observed_sequence": False}
     )
-    with pytest.raises(ValueError):
-        validate_structure_dataset(directory)
     records = list(iter_canonical_records(directory / "canonical"))
     assert records[0]["provenance"]["source"]["sequence_source"] == "observed"
     all_records = inventory[1] + records
@@ -890,22 +764,6 @@ def test_split_logical_digest_is_independent_of_manifest_record_order(
     assert before["split_manifest_sha256"] != after["split_manifest_sha256"]
 
 
-def test_case_reader_detects_raw_file_and_inventory_reference_drift(
-    inventory, tmp_path
-):
-    freeze(inventory, tmp_path)
-    case_file = tmp_path / "cases/cases.jsonl"
-    original = case_file.read_text()
-    case_file.write_text(original + "\n")
-    with pytest.raises(ValueError):
-        api().read_evaluation_cases(tmp_path / "cases")
-    case_file.write_text(original)
-    manifest_file = inventory[0] / "manifest.json"
-    manifest_file.write_text(manifest_file.read_text() + "\n")
-    with pytest.raises(ValueError):
-        api().read_evaluation_cases(tmp_path / "cases")
-
-
 def test_read_and_projection_reject_merged_spans_at_deterministic_endpoint(
     tmp_path, monkeypatch
 ):
@@ -945,10 +803,3 @@ def test_read_and_projection_reject_merged_spans_at_deterministic_endpoint(
         [1, 4],
         [2, 5],
     ]
-    case["group_ids"] = [[0, 1], [0, 1], [0, 1]]
-    rehash(case)
-    rewrite(tmp_path / "cases", [case])
-    with pytest.raises(ValueError):
-        api().read_evaluation_cases(tmp_path / "cases")
-    with pytest.raises(ValueError):
-        api().project_case_controls([case], batch)

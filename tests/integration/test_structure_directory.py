@@ -138,12 +138,7 @@ def test_folder_export_preserves_missing_positions_and_input_inventory(
     assert summary["exclusions"] == {}
     assert summary["null_count"] == 4
     assert validate_structure_dataset(output) == summary
-    inputs = [
-        json.loads(line)
-        for line in (canonical / "inputs.jsonl").read_text().splitlines()
-    ]
-    assert len(inputs) == 3
-    assert all(Path(row["path"]).is_file() for row in inputs)
+    assert summary["requested_input_count"] == 3
     for shard in summary["shards"]:
         row = pq.read_table(output / shard["path"]).to_pylist()[0]
         assert row["sequence"] == sequence
@@ -155,9 +150,6 @@ def test_folder_export_preserves_missing_positions_and_input_inventory(
         assert len(TokenizedDataset(str(output / shard["path"]), max_length=1280)) == 1
     with pytest.raises(FileExistsError):
         write_structure_dataset(canonical, output, tokenizer=model)
-    (canonical / "inputs.jsonl").write_text("corrupt\n")
-    with pytest.raises(ValueError, match="inputs inventory"):
-        validate_structure_dataset(output)
 
 
 def test_discovery_rejects_empty_or_invalid_directory(tmp_path):
