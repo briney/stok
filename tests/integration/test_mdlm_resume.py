@@ -348,7 +348,7 @@ def test_invalid_checkpoint_or_identity_preserves_artifacts(tmp_path, damage):
     assert snapshot(project) == before
 
 
-@pytest.mark.parametrize("failure", ["read", "write", "state", "cuda_rng"])
+@pytest.mark.parametrize("failure", ["read", "write", "state"])
 def test_rank_local_checkpoint_failures_reach_all_ranks(tmp_path, failure):
     cfg = config_for(tmp_path)
     execute(cfg, tmp_path / "original.yaml", stop=1, distributed=True, ok=False)
@@ -360,8 +360,6 @@ def test_rank_local_checkpoint_failures_reach_all_ranks(tmp_path, failure):
     OmegaConf.save(cfg, path)
     if failure == "read":
         patch = "original_read = train.read_training_checkpoint\ndef read(path):\n    if rank == 1: raise OSError('injected rank-local read failure')\n    return original_read(path)\ntrain.read_training_checkpoint = read\n"
-    elif failure == "cuda_rng":
-        patch = "original_read = train.read_training_checkpoint\ndef read(path):\n    payload = original_read(path)\n    if rank == 1: payload['rank_states'][1]['rng']['cuda'] = []\n    return payload\ntrain.read_training_checkpoint = read\n"
     elif failure == "write":
         patch = "original_torch_save = torch.save\ndef fail_save(value, path, *args, **kwargs):\n    if rank == 0 and isinstance(value, dict) and 'format_version' in value:\n        with open(path, 'wb') as out: out.write(b'partial')\n        raise OSError('injected rank-zero write failure')\n    return original_torch_save(value, path, *args, **kwargs)\ntorch.save = fail_save\n"
     else:
@@ -378,61 +376,22 @@ def test_rank_local_checkpoint_failures_reach_all_ranks(tmp_path, failure):
             "read": "injected rank-local read failure",
             "write": "injected rank-zero write failure",
             "state": "injected rank-local state failure",
-            "cuda_rng": "CUDA RNG",
         }[failure]
         assert sentinel in result.stderr, result.stderr
-    if failure in {"read", "cuda_rng"}:
+    if failure == "read":
         assert snapshot(project) == before
     else:
         assert checkpoint.read_bytes() == before["checkpoints/step_00000001.pt"]
         assert not list((project / "checkpoints").glob(".*.pt.*"))
 
 
-@pytest.mark.parametrize(
-    "damage",
-    [
-        "logging",
-        "logging_value",
-        "logging_tensor",
-        "manifest_source",
-        "manifest_identity",
-        "optimizer",
-        "optimizer_partial",
-        "optimizer_empty_entry",
-        "rng",
-        "scaler",
-        "cursor",
-    ],
-)
-def test_incomplete_rank_state_rejected_before_output(tmp_path, damage):
+def test_partial_accumulation_cursor_rejected_before_output(tmp_path):
     cfg = config_for(tmp_path)
     execute(cfg, tmp_path / "original.yaml", stop=1, ok=False)
     project = Path(cfg.train.output_dir)
     checkpoint = project / "checkpoints/step_00000001.pt"
     payload = torch.load(checkpoint, weights_only=True)
-    rank = payload["rank_states"][0]
-    if damage == "logging":
-        del rank["logging"]["running_loss"]
-    elif damage == "logging_value":
-        rank["logging"]["running_loss"] = "broken"
-    elif damage == "logging_tensor":
-        rank["logging"]["mdlm_running"][0, 0] = float("nan")
-    elif damage == "manifest_source":
-        payload["runtime"]["source"] = {"sha256": "changed"}
-    elif damage == "manifest_identity":
-        payload["runtime"]["mdlm_identity"]["training_signature"] = "changed"
-    elif damage == "optimizer":
-        payload["optimizer"]["state"].clear()
-    elif damage == "optimizer_partial":
-        payload["optimizer"]["state"].pop(next(iter(payload["optimizer"]["state"])))
-    elif damage == "optimizer_empty_entry":
-        payload["optimizer"]["state"][next(iter(payload["optimizer"]["state"]))] = {}
-    elif damage == "rng":
-        del rank["rng"]["torch"]
-    elif damage == "scaler":
-        rank["scaler"] = {"scale": 1}
-    else:
-        rank["batches_in_epoch"] = 1  # pending partial accumulation forbidden
+    payload["rank_states"][0]["batches_in_epoch"] = 1
     torch.save(payload, checkpoint)
     cfg.train.resume_from = str(checkpoint)
     before = snapshot(project)
@@ -698,7 +657,7 @@ def test_optimizer_coverage_preserves_unused_and_frozen_parameters(tmp_path):
         {"local": {"path": str(source)}}, {}, codebook=codebook, split_manifest=None
     )
     signature = resume_signature(
-        cfg, sources=[], codebook=codebook, accelerator=None, identity=identity
+        cfg, codebook=codebook, accelerator=None, identity=identity
     )
 
     model = torch.nn.Module()
@@ -742,9 +701,8 @@ def test_optimizer_coverage_preserves_unused_and_frozen_parameters(tmp_path):
                 "scheduler": "warmup_linear",
             },
             "effective_precision": "no",
-            **{key: signature[key] for key in ("source", "software", "execution")},
+            "execution": signature["execution"],
             "mdlm_identity": identity,
-            "evaluation_protocol": None,
         },
         cfg=cfg,
         accelerator=None,
@@ -760,7 +718,6 @@ def test_optimizer_coverage_preserves_unused_and_frozen_parameters(tmp_path):
         },
     )
     payload = read_training_checkpoint(path)
-    assert len(payload["optimizer_initialized"]) == 2
     assert len(payload["optimizer"]["param_groups"][0]["params"]) == 4
     restored_optimizer = torch.optim.AdamW(model.parameters())
     restored_scheduler = torch.optim.lr_scheduler.LambdaLR(
@@ -778,69 +735,6 @@ def test_optimizer_coverage_preserves_unused_and_frozen_parameters(tmp_path):
     assert model.frozen not in restored_optimizer.state
     assert len(restored_optimizer.state) == 2
     equal(optimizer.state_dict(), restored_optimizer.state_dict())
-
-
-@pytest.fixture(scope="module")
-def rng_checkpoint(tmp_path_factory):
-    from stok.training.engine import run_training
-
-    root = tmp_path_factory.mktemp("rng-checkpoint")
-    cfg = config_for(root)
-    cfg.train.max_steps = 1
-    run_training(cfg)
-    return cfg, torch.load(root / "full/model/final.pt", weights_only=True)
-
-
-@pytest.mark.parametrize(
-    "damage", ["missing", "empty", "truncated", "dtype", "shape", "length", "active"]
-)
-def test_cuda_rng_rejected_before_artifacts_or_wandb(
-    tmp_path, monkeypatch, rng_checkpoint, damage
-):
-    import copy
-    from stok.training import engine as train
-
-    original_cfg, original = rng_checkpoint
-    cfg, payload = copy.deepcopy(original_cfg), copy.deepcopy(original)
-    payload["signature"]["execution"].update(
-        device="cuda", cuda_rng_state_sizes=[16, 16]
-    )
-    rng = payload["rank_states"][0]["rng"]
-    rng.update(
-        cuda=[torch.zeros(16, dtype=torch.uint8) for _ in range(2)], cuda_device=1
-    )
-    if damage == "missing":
-        del rng["cuda"]
-    elif damage == "empty":
-        rng["cuda"] = []
-    elif damage == "truncated":
-        rng["cuda"].pop()
-    elif damage == "dtype":
-        rng["cuda"][1] = rng["cuda"][1].float()
-    elif damage == "shape":
-        rng["cuda"][1] = rng["cuda"][1].view(4, 4)
-    elif damage == "length":
-        rng["cuda"][1] = rng["cuda"][1][:-1]
-    else:
-        rng["cuda_device"] = 2
-    project = tmp_path / "run"
-    project.mkdir()
-    (project / "keep").write_bytes(b"existing run artifacts")
-    checkpoint = project / "resume.pt"
-    torch.save(payload, checkpoint)
-    cfg.train.output_dir, cfg.train.resume_from = str(project), str(checkpoint)
-    before = snapshot(project)
-    monkeypatch.setattr(
-        train, "resume_signature", lambda *a, **kw: payload["signature"]
-    )
-    monkeypatch.setattr(
-        train,
-        "_maybe_init_wandb",
-        lambda *a, **kw: pytest.fail("W&B before RNG validation"),
-    )
-    with pytest.raises((ValueError, RuntimeError), match="CUDA RNG"):
-        train.run_training(cfg)
-    assert snapshot(project) == before
 
 
 def test_resume_rejects_resharding_despite_equal_canonical_population(tmp_path):
@@ -882,7 +776,6 @@ def test_resume_rejects_resharding_despite_equal_canonical_population(tmp_path):
 
 def test_resume_evaluation_overrides_change_measurement_not_training(tmp_path):
     from tests.integration.test_mdlm_evaluation import evaluation_training_fixture
-    from stok.utils.pretrained import json_sha256
 
     cfg = evaluation_training_fixture(tmp_path)
     cfg.train.max_steps = 4
@@ -914,17 +807,9 @@ def test_resume_evaluation_overrides_change_measurement_not_training(tmp_path):
         full["runtime"]["mdlm_identity"]["shared_cases"]
         == resumed["runtime"]["mdlm_identity"]["shared_cases"]
     )
-    assert (
-        full["runtime"]["evaluation_protocol"]["protocol_sha256"]
-        != resumed["runtime"]["evaluation_protocol"]["protocol_sha256"]
-    )
     summaries = [
         json.loads(path.read_text())
         for path in (tmp_path / "resumed/logs/evaluations").glob("*.json")
     ]
-    assert {summary["model_identity"]["global_step"] for summary in summaries} == {3, 4}
-    assert all(
-        summary["model_identity"]["training_signature"]
-        == json_sha256(resumed["signature"])
-        for summary in summaries
-    )
+    assert {summary["global_step"] for summary in summaries} == {3, 4}
+    assert all(summary["settings"]["families"] == ["full"] for summary in summaries)

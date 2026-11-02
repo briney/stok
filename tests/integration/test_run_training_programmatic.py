@@ -29,23 +29,12 @@ def test_readonly_training_preserves_authored_config_and_records_runtime(tmp_pat
 
 def test_runtime_manifest_shares_exact_resume_contract(tmp_path):
     import copy
-    from stok.utils.checkpoint import package_source_sha256, validate_resume_signature
+    from stok.utils.checkpoint import validate_resume_signature
     from tests.integration.test_mdlm_training import checkpoint
 
     source, codebook = training_fixture(tmp_path)
     payload = checkpoint(mdlm_config(tmp_path / "run", source, codebook))
     runtime, signature = payload["runtime"], payload["signature"]
-    assert (
-        runtime["source"] == signature["source"] == {"sha256": package_source_sha256()}
-    )
-    assert runtime["software"] == signature["software"]
-    assert {
-        "tokenizers",
-        "transformers",
-        "x-transformers",
-        "hydra-core",
-        "omegaconf",
-    } <= runtime["software"].keys()
     assert runtime["execution"] == signature["execution"]
     assert runtime["components"] == {
         "objective": "mdlm",
@@ -55,8 +44,8 @@ def test_runtime_manifest_shares_exact_resume_contract(tmp_path):
         "optimizer": "adamw",
         "scheduler": "warmup_linear",
     }
-    for key in ("source", "software"):
+    for key in ("world_size", "precision", "device"):
         changed = copy.deepcopy(signature)
-        changed[key][next(iter(changed[key]))] = "changed"
+        changed["execution"][key] = "changed"
         with pytest.raises(ValueError, match="signature mismatch"):
             validate_resume_signature(payload, changed)

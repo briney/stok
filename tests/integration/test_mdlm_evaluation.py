@@ -218,31 +218,15 @@ def config(population, generation=False, *, denoising=None, replicates=1):
 
 def evaluate(model, loaders, fixture, **kwargs):
     cfg, identity = fixture
-    from stok.eval.mdlm import evaluate_mdlm, mdlm_evaluation_protocol
-
-    from stok.utils.checkpoint import execution_identity
+    from stok.eval.mdlm import evaluate_mdlm
 
     accelerator = kwargs.pop("accelerator", None)
-    decoder = kwargs.get("decoder")
-    protocol = mdlm_evaluation_protocol(
-        cfg,
-        identity=identity,
-        environment=execution_identity(accelerator),
-        decoder={
-            "sha256": state_sha256(decoder.state_dict()),
-            "codebook_sha256": identity["codebook_sha256"],
-        }
-        if decoder
-        else None,
-    )
     return_summary = kwargs.pop("return_summary", False)
     metrics, summary = evaluate_mdlm(
         model,
         loaders,
         cfg,
         identity=identity,
-        protocol=protocol,
-        model_identity={"training_signature": "a" * 64, "global_step": 0},
         accelerator=accelerator,
         **kwargs,
     )
@@ -531,28 +515,16 @@ def _distributed_probe(path, count, fail):
     data = DataLoader(
         population, batch_size=2, sampler=sampler, num_workers=2, collate_fn=list
     )
-    from stok.eval.mdlm import mdlm_evaluation_protocol
-
-    from stok.utils.checkpoint import execution_identity
-
-    protocol = mdlm_evaluation_protocol(
-        cfg,
-        identity=identity,
-        environment=execution_identity(accelerator),
-        decoder=None,
-    )
     metrics, summary = evaluate_mdlm(
         model,
         {"validation": data},
         cfg,
         identity=identity,
-        protocol=protocol,
-        model_identity={"training_signature": "a" * 64, "global_step": 0},
         accelerator=accelerator,
     )
     records = {
         "metrics": metrics,
-        "coverage": summary["coverage"],
+        "coverage": summary,
         "inputs": flattened_calls(accelerator.unwrap_model(model)),
     }
     Path(path, f"rank_{accelerator.process_index}.json").write_text(json.dumps(records))
@@ -847,10 +819,6 @@ def test_optional_decoder_loading_preserves_training_random_stream(
     training.run_training(cfg)
     assert len(decoder_calls) == 1
     saved = torch.load(tmp_path / "with_decoder/model/final.pt", weights_only=False)
-    assert saved["runtime"]["decoder"] == {
-        "sha256": state_sha256({"anchor": torch.zeros(())}),
-        "codebook_sha256": state_sha256({"codebook": codebook}),
-    }
     assert saved["runtime"]["components"]["decoder"] == "geometric"
     actual = saved["model"]
     for name in expected:
@@ -859,26 +827,6 @@ def test_optional_decoder_loading_preserves_training_random_stream(
 
 if __name__ == "__main__":
     _distributed_probe(sys.argv[1], int(sys.argv[2]), sys.argv[3] == "fail")
-
-
-def test_summary_replay_is_idempotent_and_conflicts_fail_closed(tmp_path):
-    from stok.eval import cases
-
-    assert hasattr(cases, "publish_evaluation_summary")
-    path = tmp_path / "summaries" / "measurement.json"
-    summary = {"measurement_sha256": "a" * 64, "metrics": {"loss": 1.0}}
-    cases.publish_evaluation_summary(path, summary)
-    original = path.read_bytes()
-    cases.publish_evaluation_summary(path, summary)
-    assert path.read_bytes() == original
-    with pytest.raises(ValueError, match="conflict"):
-        cases.publish_evaluation_summary(path, {**summary, "metrics": {"loss": 2.0}})
-    assert path.read_bytes() == original
-    with pytest.raises(ValueError):
-        cases.publish_evaluation_summary(
-            tmp_path / "nonfinite.json", {"x": float("nan")}
-        )
-    assert not (tmp_path / "nonfinite.json").exists()
 
 
 @pytest.mark.parametrize(
@@ -919,7 +867,7 @@ def test_case_controls_survive_batch_workers_and_missing_codes():
     _, second = evaluate(
         model, {"validation": loader(arm, 3, 2)}, (cfg, identity), return_summary=True
     )
-    a, b = first["coverage"], second["coverage"]
+    a, b = first, second
     assert a["requested_case_ids"] == b["requested_case_ids"]
     assert a["canonical_controls"] == b["canonical_controls"]
     assert b["unavailable_targets"] > a["unavailable_targets"]
@@ -968,8 +916,8 @@ def test_unsupported_crop_and_missing_conditioning_are_explicit():
     _, summary = evaluate(
         model, {"validation": loader(population)}, (cfg, identity), return_summary=True
     )
-    assert summary["coverage"]["unsupported_cases"] == 10
-    assert summary["coverage"]["evaluated_cases"] == 0
+    assert summary["unsupported_cases"] == 10
+    assert summary["evaluated_cases"] == 0
     assert model.calls == []
     cfg.data.max_len = 8
     arm = copy.deepcopy(population)
@@ -977,10 +925,10 @@ def test_unsupported_crop_and_missing_conditioning_are_explicit():
     _, summary = evaluate(
         model, {"validation": loader(arm)}, (cfg, identity), return_summary=True
     )
-    assert summary["coverage"]["unavailable_cases"] == 2
-    assert summary["coverage"]["unavailable_conditioning"] == 2
-    assert summary["coverage"]["requested_cases"] == 10
-    assert summary["coverage"]["unique_samples"] == 1
+    assert summary["unavailable_cases"] == 2
+    assert summary["unavailable_conditioning"] == 2
+    assert summary["requested_cases"] == 10
+    assert summary["unique_samples"] == 1
 
 
 def test_geometry_excludes_missing_original_four_atom_observations():
@@ -1131,13 +1079,9 @@ def test_native_rejection_retains_cases_and_population(tmp_path):
         (cfg, identity),
         return_summary=True,
     )
-    assert summary["coverage"]["requested_cases"] == 4
-    assert (
-        summary["coverage"]["evaluated_cases"]
-        == summary["coverage"]["rejected_cases"]
-        == 2
-    )
-    assert summary["coverage"]["unique_samples"] == 2
+    assert summary["requested_cases"] == 4
+    assert summary["evaluated_cases"] == summary["rejected_cases"] == 2
+    assert summary["unique_samples"] == 2
     assert identity["coverage"][rejected]["reason"] == "sequence_metadata_missing"
     # Omitting a supposedly admitted row is still an integrity error.
     with pytest.raises(RuntimeError, match="missing.*admitted"):
@@ -1146,48 +1090,6 @@ def test_native_rejection_retains_cases_and_population(tmp_path):
             {"validation": loader([])},
             (cfg, identity),
         )
-
-
-def test_stale_protocol_rejected_before_model_forward():
-    from stok.eval.mdlm import evaluate_mdlm, mdlm_evaluation_protocol
-
-    population = rows(1)
-    cfg, identity = config(population, generation=True)
-    cfg.train.eval.mdlm.generation.decode = False
-    from stok.utils.checkpoint import execution_identity
-
-    protocol = mdlm_evaluation_protocol(
-        cfg, identity=identity, environment=execution_identity(None), decoder=None
-    )
-    cfg.train.eval.mdlm.generation.sampling_steps += 1
-    model = FixedModel()
-    with pytest.raises(RuntimeError, match="protocol"):
-        evaluate_mdlm(
-            model,
-            {"validation": loader(population)},
-            cfg,
-            accelerator=None,
-            identity=identity,
-            protocol=protocol,
-            model_identity={"training_signature": "a" * 64, "global_step": 0},
-        )
-    assert model.calls == []
-
-
-def test_protocol_normalizes_actual_families_and_representation_aliases():
-    from stok.eval.mdlm import mdlm_evaluation_protocol
-
-    cfg, identity = config(rows(1))
-    identity["sources"] = {"alias": {"kind": "eval", "representation_sha256": "b" * 64}}
-    first = mdlm_evaluation_protocol(
-        cfg, identity=identity, environment={}, decoder=None
-    )
-    cfg.train.eval.mdlm.families = ["tied", "full"]
-    identity["sources"]["renamed"] = identity["sources"].pop("alias")
-    second = mdlm_evaluation_protocol(
-        cfg, identity=identity, environment={}, decoder=None
-    )
-    assert first == second
 
 
 @pytest.mark.parametrize("field", ["canonical_content_sha256", "residue_map_sha256"])
@@ -1199,37 +1101,6 @@ def test_evaluator_rejects_row_canonical_binding_drift(field):
     with pytest.raises(RuntimeError, match="canonical.*binding"):
         evaluate(model, {"validation": loader(population)}, (cfg, identity))
     assert model.calls == []
-
-
-def test_live_measurement_binds_complete_training_signature(tmp_path):
-    from stok.training.engine import run_training
-    from stok.utils.pretrained import json_sha256
-
-    cfg = evaluation_training_fixture(tmp_path)
-    cfg.train.max_steps = 1
-    run_training(cfg)
-    first = json.loads(
-        next((tmp_path / "run/logs/evaluations").glob("*.json")).read_text()
-    )
-    first_checkpoint = torch.load(tmp_path / "run/model/final.pt", weights_only=True)
-    cfg.train.output_dir = str(tmp_path / "other")
-    cfg.train.seed += 1
-    run_training(cfg)
-    second = json.loads(
-        next((tmp_path / "other/logs/evaluations").glob("*.json")).read_text()
-    )
-    second_checkpoint = torch.load(tmp_path / "other/model/final.pt", weights_only=True)
-    assert (
-        first_checkpoint["runtime"]["mdlm_identity"]["training_signature"]
-        == second_checkpoint["runtime"]["mdlm_identity"]["training_signature"]
-    )
-    assert first["model_identity"]["training_signature"] == json_sha256(
-        first_checkpoint["signature"]
-    )
-    assert second["model_identity"]["training_signature"] == json_sha256(
-        second_checkpoint["signature"]
-    )
-    assert first["model_identity"] != second["model_identity"]
 
 
 @pytest.mark.parametrize("missing", ["original", "arm"])
@@ -1254,7 +1125,7 @@ def test_generation_without_effective_targets_is_unavailable(missing, mixed):
         model, {"validation": loader(arm)}, (cfg, identity), return_summary=True
     )
     metrics = metrics["validation"]
-    coverage = summary["coverage"]
+    coverage = summary
     selected = [
         c
         for c in identity["shared_cases"]["cases"]

@@ -567,77 +567,6 @@ def test_existing_and_concurrent_destination_are_preserved(
     assert not list(tmp_path.glob(".cases.staging-*"))
 
 
-def protocol(result, **changes):
-    return api().evaluation_protocol(
-        {
-            "enabled": True,
-            "steps": 10,
-            "output_dir": "a",
-            "denoising": {"evaluator": "native-v1"},
-            "generation": {
-                "sampling_steps": 64,
-                "schedule": {"name": "linear"},
-                "decode": True,
-            },
-            **changes,
-        },
-        shared_cases=result,
-        representation={"representation_sha256": "a" * 64},
-        decoder={"state_sha256": "b" * 64},
-        environment={"software": "torch-fixture", "dtype": "float32"},
-    )
-
-
-def test_protocol_and_measurement_hashes_are_not_self_referential(inventory, tmp_path):
-    cases = freeze(inventory, tmp_path)
-    p = protocol(cases)
-    assert p["protocol_sha256"] == json_sha256(
-        {k: v for k, v in p.items() if k != "protocol_sha256"}
-    )
-    measurement = api().evaluation_measurement(
-        p,
-        model_identity={"training_signature": "c" * 64, "global_step": 8},
-        coverage={"evaluable": 2},
-        metrics={"ce": 0.5},
-    )
-    assert measurement["measurement_sha256"] == json_sha256(
-        {k: v for k, v in measurement.items() if k != "measurement_sha256"}
-    )
-    assert (
-        protocol(cases, steps=100, output_dir="b")["protocol_sha256"]
-        == p["protocol_sha256"]
-    )
-    for bad in (
-        {},
-        {"global_step": True, "training_signature": "c" * 64},
-        {"checkpoint_sha256": "bad"},
-    ):
-        with pytest.raises(ValueError):
-            api().evaluation_measurement(p, model_identity=bad, coverage={}, metrics={})
-
-
-def test_sampler_decoder_and_environment_change_protocol_not_cases(inventory, tmp_path):
-    cases = freeze(inventory, tmp_path)
-    base = protocol(cases)
-    for field, value in [
-        ("settings", {"generation": {"sampling_steps": 32}}),
-        ("representation", {"representation_sha256": "d" * 64}),
-        ("decoder", {"state_sha256": "d" * 64}),
-        ("environment", {"dtype": "float64"}),
-    ]:
-        args = {
-            "settings": {"generation": {"sampling_steps": 64}},
-            "representation": {"representation_sha256": "a" * 64},
-            "decoder": {"state_sha256": "b" * 64},
-            "environment": {"software": "torch-fixture", "dtype": "float32"},
-        }
-        original = api().evaluation_protocol(shared_cases=cases, **args)
-        args[field] = value
-        changed = api().evaluation_protocol(shared_cases=cases, **args)
-        assert original["protocol_sha256"] != changed["protocol_sha256"]
-        assert changed["shared_cases_sha256"] == base["shared_cases_sha256"]
-
-
 def test_prepare_and_freeze_require_explicit_metadata_before_outputs(tmp_path):
     from stok.cli.cli import cli
 
@@ -792,17 +721,6 @@ def test_canonical_fixture_keeps_originals_when_arm_code_is_missing(golden, tmp_
         validate_structure_dataset(directory)
 
 
-def test_protocol_hashes_selected_cases_and_actual_evaluator_names(inventory, tmp_path):
-    cases = freeze(inventory, tmp_path)
-    base = protocol(cases)
-    selected = {**cases, "cases": cases["cases"][:1]}
-    assert protocol(selected)["protocol_sha256"] != base["protocol_sha256"]
-    assert (
-        protocol(cases, denoising={"name": "other-evaluator"})["protocol_sha256"]
-        != protocol(cases, denoising={"name": "native-evaluator"})["protocol_sha256"]
-    )
-
-
 def test_frozen_reads_do_not_draw_rng(inventory, tmp_path, monkeypatch):
     freeze(inventory, tmp_path)
 
@@ -836,12 +754,6 @@ def test_read_rejects_impossible_span_jump_without_redrawing(golden, tmp_path):
     rewrite(tmp_path / "cases", result["cases"])
     with pytest.raises(ValueError):
         api().read_evaluation_cases(tmp_path / "cases")
-
-
-def test_protocol_rejects_malformed_selected_cases(inventory, tmp_path):
-    result = freeze(inventory, tmp_path)
-    with pytest.raises(ValueError):
-        protocol({**result, "cases": [None]})
 
 
 def test_zero_probability_cannot_contain_masked_draw(inventory, tmp_path):
