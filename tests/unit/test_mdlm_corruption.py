@@ -32,6 +32,7 @@ def batch(tokenizer=None):
         [
             {
                 "dataset": "fixture",
+                "canonical_id": "a" * 64,
                 "sequence_id": "one",
                 "sequence": "AXCDEFGH",
                 "structure_tokens": [0, 1, None, 3, 4, 5, 6, 7],
@@ -441,6 +442,7 @@ def test_two_member_composite_corruption_matches_absorbing_reference():
         [
             {
                 "dataset": "binary",
+                "canonical_id": "b" * 64,
                 "sequence_id": "known",
                 "sequence": "A",
                 "structure_tokens": [1],

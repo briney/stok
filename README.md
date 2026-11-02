@@ -147,78 +147,138 @@ experiment evidence; their snapshots live under
 [historical-policies](docs/experiments/gcp-vqvae/historical-policies/).
 Native inputs make these structure tokens sequence-conditioned.
 
-Convert a local directory on the machine holding your structures:
-
-```bash
-stok tokenize-structures /data/pdbs /data/stok-mdlm/train \
-  --preset large --device cuda:0 --recursive --rows-per-shard 2000
-```
-
-The command works from an installed package without cloning the repository.
-Default loading downloads the pinned tokenizer archive once into the local
-cache. Add `--checkpoint /weights/best_valid.pth` for offline use. Directory
-input supports uncompressed `.pdb`, `.ent`, `.cif`, and `.mmcif` files, selects the
-first model, and exports every protein chain independently without deduplication.
-Use `--recursive` for nested directories. Sequence IDs include relative filenames
-and escaped chain IDs, e.g. `nested/sample.cif:A`; CIF selection uses label IDs.
-Nonprotein chains are skipped; malformed files abort discovery.
-
-PDBs require SEQRES sequence metadata; mmCIFs use their deposited polymer sequence.
-Coordinate-only predicted structures need a manifest with supplied construct
-sequences. STok does not silently infer the full sequence from observed atoms.
-Keep chains from the same source structure and homologous clusters together when
-creating training/validation splits. Encoding does not infer biological
-assemblies or supply assembly-context tokens.
-
-JSONL is an optional convenience for selecting chains, supplying construct
-sequences, or recording bounded export jobs. One line selects one chain with a
-unique caller-supplied ID:
+Prepare a JSONL manifest with explicit source identities, then encode its frozen
+canonical inventory:
 
 ```json
-{"sequence_id":"sample-A","path":"structures/sample.pdb","chain_id":"A","model_index":0}
+{"sequence_id":"sample-A","source_namespace":"pdb","source_accession":"1ABC","path":"structures/sample.pdb","chain_id":"A","model_index":0}
 ```
 
-Pass this file instead of the input directory. Paths resolve relative to the
-manifest directory; `chain_namespace` defaults to `author`, `model_index` to 0.
-An optional `sequence` supplies the full construct sequence. Unknown fields,
-duplicate IDs, malformed rows, and missing files are fatal.
+```bash
+stok prepare-structures /data/inputs.jsonl /data/canonical
+stok tokenize-structures /data/canonical /data/stok-mdlm/train \
+  --preset large --device cuda:0 --rows-per-shard 2000
+```
 
-Outputs contain numbered Zstd-compressed Parquet shards, `inputs.jsonl`,
-`rejections.jsonl`, and a completed `manifest.json`. Required columns are
-`sequence_id`, `sequence`, and nullable `list<int64>` `structure_tokens`.
-Additional `residue_map` and `source` structs retain residue correspondence,
-source hashes, chain/entity/model and sequence-source metadata. Coordinates are
-omitted by default; `--include-coordinates` retains original-frame `[L,3,3]`
-N/CA/C observations with NaNs, never imputed targets.
+Paths resolve relative to the input manifest; `chain_namespace` defaults to
+`author`, `model_index` to 0. An optional `sequence` supplies the full construct
+sequence. PDBs otherwise require SEQRES; mmCIF uses deposited polymer sequence.
+STok does not infer the full sequence from observed atoms. Namespace/accession
+are explicit case-sensitive identifiers; the verified raw-file SHA-256 is the
+source revision. Optional `parent_ids` declares unique canonical parent IDs.
+Display labels may repeat for distinct records; repeated resolved selections,
+unknown fields, malformed rows, and missing files are fatal.
 
-Every shard records tokenizer and codebook identities, the fixed semantic policy,
-and actual execution provenance. Device, dependency versions and source revision
-are recorded as execution details, not selectable policies. MDLM requires the
-whole completed export directory; copying bare shards does not preserve its
-completion inventory. Older exports remain readable, but their recorded policy
-identities can differ; do not mix them with new exports in one MDLM run.
+The canonical directory contains `records.jsonl`, `inputs.jsonl`, categorized
+parser `rejections.jsonl`, and a completed integrity `manifest.json`. Records
+retain original float32 N/CA/C/O observations, boolean masks, complete residue
+correspondence, source declarations, and identity/content/map hashes. Missing
+coordinates are JSON null. Its sorted population digest excludes paths, labels,
+physical order, tokenizer state and shards. Parsed records remain canonical even
+if a tokenizer later rejects them. Consumers verify frozen artifacts without
+requiring the original structure files. A zero-record inventory can retain a
+complete parser-failure audit, but cannot produce a representation dataset.
 
-The directory Python API shares the same policy:
+Representation exports contain numbered Zstd-compressed schema-2 Parquet shards,
+representation `rejections.jsonl`, and a completed `manifest.json` referencing the
+shared canonical inventory. Each row carries `canonical_id`,
+`canonical_content_sha256`, `residue_map_sha256`, `canonical_identity`, `parent_ids`,
+`sequence_id`, `sequence`, nullable `list<int64>` `structure_tokens`, `residue_map`,
+and `source`. `--include-coordinates` retains original-frame `[L,3,3]` N/CA/C with
+null missing observations, never imputed targets. The reader converts missing
+values to NaNs for geometry masks.
+
+The representation digest binds population, encoder/quantizer/codebook state,
+preparation, conditioning, context/alignment and numerical execution settings.
+Physical shard order/layout and runtime remain separate replay/audit details.
+MDLM requires the completed export directory and its referenced canonical
+inventory. Schema-1 representation exports are rejected.
+
+The installed command downloads the pinned tokenizer archive once into its local
+cache. Use `--checkpoint /weights/best_valid.pth` for offline encoding. Canonical
+validation precedes tokenizer/device setup.
+
+Freeze validation evaluation controls using all canonical inventories covered by
+the split manifest, including train/test and representation-rejected records:
+
+```bash
+stok freeze-eval-cases /data/evaluation.yaml /data/evaluation-cases \
+  --canonical-dir /data/train-canonical \
+  --canonical-dir /data/validation-canonical \
+  --canonical-dir /data/test-canonical \
+  --split-manifest /data/splits.jsonl
+```
+
+Split JSONL rows contain exactly `canonical_id`, `split` (`train`, `validation`,
+or `test`), and nonempty `cluster_id`. Every canonical record needs exactly one
+assignment. Cluster labels are supplied; source families, identical raw revisions
+and declared parent lineage cannot cross splits. Selected monitoring members must
+be validation records. Repeated references to one inventory are read once;
+overlapping records or raw-revision/model/chain selections in distinct inventories
+are rejected.
+
+```yaml
+schema_version: 1
+seed: 1729
+crop_residues: 128
+members: ["<validation canonical_id>"]
+replicates: 2
+denoising:
+  joint_token:
+    regime: joint_independent
+    placement: token
+    probability: 0.5
+generation:
+  folding:
+    regime: structure_only
+    placement: token
+```
+
+Omitting `denoising` freezes the 32 native regime/token-or-span/probability
+families (probabilities 0.15, 0.5, 0.85, 1.0; span mean 8.0). An empty map disables
+that kind; `generation` defaults to empty. At least one family is required. Family
+keys are unique across both kinds. Expansion preserves member order, then
+denoising/generation order, sorted family keys, and ascending replicate indices.
+The command reports exact denoising/generation case counts and unique biological
+sample counts; it does not apply the monitoring execution cap of 16 generation
+cases.
+
+The completed directory contains `manifest.json` and `cases.jsonl`. Cases retain
+explicit ordinals, canonical content/map digests, center crops, full-residue
+positions, original eligibility, group IDs and realized boolean masks. Case and
+shared-case identities exclude representation and filesystem paths; physical file
+hashes and per-inventory references separately verify integrity. Readers verify
+stored controls without redrawing them. `stok.eval.cases.project_case_controls`
+pairs one case with each batch row, keeps replicates distinct, applies the BOS
+offset, and intersects controls with available targets. Missing generation
+conditioning is reported explicitly. Protocol identity adds selected cases,
+resolved evaluator/sampler settings, representation, decoder and execution
+metadata; measurement identity also binds a checkpoint digest or training
+signature plus successful update count.
+
+The Python API uses the same two stages:
 
 ```python
-from stok.data.structure_directory import write_structure_folder_dataset
+from stok.data.canonical import prepare_canonical_dataset
+from stok.data.structure_export import write_structure_dataset
 from stok.models.gcp_vqvae import load_pretrained_tokenizer
 
+prepare_canonical_dataset("/data/inputs.jsonl", "/data/canonical")
 tokenizer = load_pretrained_tokenizer("large", device="cuda:0")
-summary = write_structure_folder_dataset(
-    "/data/pdbs",
+summary = write_structure_dataset(
+    "/data/canonical",
     "/data/stok-mdlm/train",
     tokenizer=tokenizer,
-    recursive=True,
     rows_per_shard=2000,
 )
 ```
 
-`stok.data.structure_export.write_structure_dataset()` accepts a JSONL manifest
-for the same export path; neither API accepts a policy argument. Inspect a
-completed dataset with `validate_structure_dataset(path)` from that module to
-verify hashes, inventory, counts, and the reader contract. Export also validates
-these properties before publication.
+`iter_structure_directory(directory, recursive=True)` remains available for
+uncompressed `.pdb`, `.ent`, `.cif`, and `.mmcif` discovery. It selects protein
+chains from the first model; callers must add explicit source namespace/accession
+before writing a preparation manifest. Neither API accepts a policy argument.
+Use `validate_canonical_dataset(path)` and `validate_structure_dataset(path)` to
+audit completed artifacts. Export validates both before publication.
 
 `--rows-per-shard` bounds each output shard; the default is 1000 chain rows.
 `--batch-size` groups chains using independent singleton forwards, preserving
@@ -228,7 +288,7 @@ sorts paths in memory. For large collections, use bounded manifests or input
 directories and separate completed exports. There is no automatic export resume.
 Training crops paired windows later without changing the stored full-chain tokens.
 
-Mapping and admission exclusions have stable reasons in `rejections.jsonl`;
+Parser and representation admission exclusions have separate stable reason audits;
 unexpected numerical/model errors abort. Existing destinations are refused,
 including concurrent publication. Failed runs leave a marked hidden sibling
 staging directory without advertising a completed dataset. Atomic no-replace
@@ -335,32 +395,44 @@ stok train model=mdlm_150m train=mdlm_pilot \
   +data.train.pilot.path=/data/stok-mdlm/completed/train \
   +data.eval.validation.path=/data/stok-mdlm/completed/validation \
   data.split_manifest=/data/stok-mdlm/splits-v1.jsonl \
-  train.eval.mdlm.cohort=/data/stok-mdlm/denoising-v1.jsonl \
-  train.eval.mdlm.generation_cohort=/data/stok-mdlm/generation-v1.jsonl \
+  train.eval.mdlm.case_manifest=/data/stok-mdlm/cases-v1 \
   train.output_dir=/runs/stok-mdlm/baseline-001
 ```
 
-Split JSONL rows use `dataset`, `sequence_id`, `split` (`train`, `validation`,
-`test`), and `cluster_id`. Dataset names must match the Hydra source names
-(`pilot`/`validation` above); keep source chains and homologous clusters in one
-split. Cohort JSONL rows use `dataset` and `sequence_id`; members must be unique
-and present in the **validation** split. The generation cohort is frozen at at
-most 16 members. Exported tokenizer/policy/codebook identities must agree across
-sources. The `base`/`large` codebook aliases have the same semantics; `lite` is a
-different tokenizer/codebook and must match the actual export. For a custom
-export use `model.codebook.path=/data/stok-mdlm/tokenizer-full.pt` (or a matching
-codebook archive), independently of the selected encoder size.
+Split JSONL rows contain exactly `canonical_id`, `split` (`train`, `validation`,
+`test`), and `cluster_id`. Full canonical inventories, including representation
+rejections and test members, are audited for cluster/source/parent leakage.
+Monitoring cases select validation members only. Source names and display aliases
+do not identify biological samples. Exported tokenizer/policy/codebook identities
+must agree across sources. A custom export requires its matching
+`model.codebook.path`, independently of encoder size.
 
-The preset evaluates 32 fixed named denoising cases every 250 updates: four
-regimes × probabilities `[0.15,0.5,0.85,1.0]` × token/span placement, span mean 8,
-evaluation seed 1729. Generation runs every 1000 updates with 64 reverse steps,
-linear schedule, and no coordinate decoding by default. `train.eval.mdlm.cases`
-is an explicit named map that replaces the default matrix; for example:
+Freeze family definitions, manifest seed, crops and residue controls with
+`stok freeze-eval-cases` before launching. The preset runs denoising every 250
+successful updates and generation every 1000 updates, using 64 reverse steps and
+a linear schedule. `train.eval.mdlm.families` and
+`train.eval.mdlm.generation.families` select unique family keys from that artifact;
+null selects all families of that kind. Generation is capped at **16 expanded
+cases**, including families and replicates, by `generation.max_cases`.
+The old cohort paths, live `cases` maps, `train.eval.seed` and `max_samples` fields
+are rejected. For example, select an already frozen denoising family with:
 
 ```bash
-# Add to a launch command with its required dataset/cohort/project arguments.
-'+train.eval.mdlm.cases={probe:{regime:joint_tied,probability:0.5,placement:span,span_mean:8}}'
+train.eval.mdlm.families=[probe]
 ```
+
+Cases retain canonical positions, group IDs and realized masks when an arm lacks
+codes. Unavailable targets affect coverage and denominators; missing conditional
+inputs and unsupported crops are explicitly reported. Evaluation never silently
+recrops or redraws a case. Numeric metrics and separate finite JSON measurement
+summaries are written under `logs/evaluations/step-<update>-<measurement-sha>.json`.
+Summaries distinguish case counts from unique proteins and bind controls, actual
+protocol/execution, and the live successful-update boundary. Their live model
+`training_signature` hashes the complete native resume signature (model, seed,
+optimizer and execution included); the data identity’s same-named field hashes
+only training sources/population/splits/representation/replay. Evaluation-only
+overrides preserve both training identities. Identical replay is
+idempotent; conflicting summary bytes fail closed.
 
 For a bounded one-source overfit diagnostic, supply an actual completed export,
 a new run directory, a small budget, and disable both benchmark controls:
@@ -375,7 +447,7 @@ stok train model=mdlm_150m train=mdlm_pilot \
 ```
 
 `train.eval.mdlm.generation.steps=null` also disables generation and removes its
-cohort requirement. `stok smoke-test model=mdlm_150m train=mdlm_pilot` is an
+case requirement. `stok smoke-test model=mdlm_150m train=mdlm_pilot` is an
 explicit synthetic paired forward check; training has no dummy-data fallback.
 
 Use Hydra overrides for each isolated experiment; they retain normal override
@@ -401,10 +473,14 @@ The checkpoint records the deterministic stream, optimizer/scheduler/rank state,
 identities, precision/topology, and regime provenance. Keep model, training
 objective/masking, dataset contents/order, seed, workers, batch/accumulation,
 execution, learning rate, and original budget unchanged. Output/log/evaluation/
-checkpoint cadence changes are allowed. Populated MDLM run directories require
-an explicit complete version-3 resume checkpoint.
+checkpoint cadence changes are allowed. Scientific evaluation overrides create a new
+protocol identity while retaining exact training replay; changed sharding/order
+is rejected even when the canonical population matches. Saved readers recompute
+format-4 canonical, case, representation and protocol bindings without reopening
+original artifacts. Previous training formats are unsupported. Populated MDLM run directories require
+an explicit complete version-4 resume checkpoint.
 
-Generate biological tokens using a complete version-3 MDLM checkpoint:
+Generate biological tokens using a complete version-4 MDLM checkpoint:
 
 ```bash
 stok sample --checkpoint /runs/stok-mdlm/baseline-001/model/final.pt \
@@ -450,7 +526,7 @@ records bounded real-data BF16 Radeon diagnostics: the full architecture at
 denoising/generation and matching frozen FP32 geometry decode. A separate tiny
 dropout-zero model improved both available-target losses on its training subset.
 These are implementation diagnostics. Operational launch remains pending actual
-frozen pilot splits/cohorts, intended hardware/topology and explicit run budgets;
+frozen pilot splits/cases, intended hardware/topology and explicit run budgets;
 the preset's 10,000 updates are not a measured or authorized scientific run.
 
 ## Research contract

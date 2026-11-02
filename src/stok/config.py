@@ -168,7 +168,6 @@ def validate_training_config(cfg: DictConfig) -> None:
         ("train.stable_steps", train.stable_steps, 0),
         ("train.decay_steps", train.decay_steps, 0),
         ("train.seed", train.seed, 0),
-        ("train.eval.seed", train.eval.seed, 0),
         ("train.eval.steps", train.eval.steps, 1),
         ("data.num_workers", data.num_workers, 0),
         ("data.max_len", data.max_len, 3),

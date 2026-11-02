@@ -144,7 +144,10 @@ def main():
         root / ("eval_shards" if args.source == "iterable" else "eval.parquet")
     )
     names = [item["name"] for item in _parse_train_configs(cfg)]
-    identity = {"sample_key_namespaces": {name: name for name in names + ["default"]}}
+    identity = {
+        "sources": {name: {"replay_sha256": name} for name in names + ["default"]},
+        "shared_cases": None,
+    }
     train, evaluations = _build_dataloaders(cfg, identity=identity)
     loader = train if args.case == "coverage" else evaluations["default"]
     ids, batches = [], 0

@@ -12,7 +12,11 @@ from omegaconf import OmegaConf
 from tests.integration.test_mdlm_training import mdlm_config, training_fixture
 from tests.integration.test_training_progress import training_env
 from tests.integration.test_distributed_training import run_distributed
-from tests.utils.synthetic import make_mdlm_rows, write_dataset
+from tests.utils.synthetic import (
+    make_mdlm_rows,
+    write_dataset,
+    declare_synthetic_source,
+)
 
 PROBE = r"""
 import os, sys, torch
@@ -150,22 +154,29 @@ def config_for(tmp_path, source_kind="sharded", workers=0):
     )
     if source_kind == "mixed":
         rows = [{**make_mdlm_rows()[i % 2], "sequence_id": f"b{i}"} for i in range(20)]
+        rows = [
+            declare_synthetic_source(row, source_accession=f"second-{i}")
+            for i, row in enumerate(rows)
+        ]
         second = write_dataset(tmp_path / "second", rows)
         cfg.data.train.other = {"path": str(second), "fraction": 0.4}
         split = tmp_path / "split.jsonl"
+        import pyarrow.parquet as pq
+
         split.write_text(
             "".join(
                 json.dumps(
                     {
-                        "dataset": name,
-                        "sequence_id": f"{prefix}{i}",
+                        "canonical_id": row["canonical_id"],
                         "split": "train",
-                        "cluster_id": f"{i % 2}",
+                        "cluster_id": row["canonical_id"],
                     }
                 )
                 + "\n"
-                for name, prefix in [("local", ""), ("other", "b")]
-                for i in range(20)
+                for directory in (source, second)
+                for row in pq.read_table(
+                    directory / "part-000000.parquet", columns=["canonical_id"]
+                ).to_pylist()
             )
         )
         cfg.data.split_manifest = str(split)
@@ -192,7 +203,7 @@ def test_resume_matches_uninterrupted_training(tmp_path, workers, source_kind, s
     execute(cfg, tmp_path / "resumed.yaml")
     full = torch.load(tmp_path / "full/model/final.pt", weights_only=True)
     resumed = torch.load(tmp_path / "interrupted/model/final.pt", weights_only=True)
-    assert full["format_version"] == resumed["format_version"] == 3
+    assert full["format_version"] == resumed["format_version"] == 4
     for key in (
         "model",
         "optimizer",
@@ -565,6 +576,10 @@ def test_no_eligible_windows_are_in_resume_cursor(tmp_path):
         }
         for i in range(12)
     ]
+    rows = [
+        declare_synthetic_source(row, source_accession=f"training-{i}")
+        for i, row in enumerate(rows)
+    ]
     source, codebook = training_fixture(tmp_path, rows=rows)
     cfg = mdlm_config(
         tmp_path / "full",
@@ -642,7 +657,6 @@ def test_resume_allows_output_logging_evaluation_and_checkpoint_overrides(tmp_pa
     cfg.train.log_every = 1
     cfg.train.save_every = 3
     cfg.train.eval.steps = 999
-    cfg.train.eval.seed = 88
     cfg.train.wandb.tags = ["resumed"]
     execute(cfg, tmp_path / "resumed.yaml")
     full = torch.load(tmp_path / "full/model/final.pt", weights_only=True)
@@ -730,6 +744,7 @@ def test_optimizer_coverage_preserves_unused_and_frozen_parameters(tmp_path):
             "effective_precision": "no",
             **{key: signature[key] for key in ("source", "software", "execution")},
             "mdlm_identity": identity,
+            "evaluation_protocol": None,
         },
         cfg=cfg,
         accelerator=None,
@@ -826,3 +841,90 @@ def test_cuda_rng_rejected_before_artifacts_or_wandb(
     with pytest.raises((ValueError, RuntimeError), match="CUDA RNG"):
         train.run_training(cfg)
     assert snapshot(project) == before
+
+
+def test_resume_rejects_resharding_despite_equal_canonical_population(tmp_path):
+    from stok.data.mdlm import validate_mdlm_sources
+
+    cfg = config_for(tmp_path)
+    execute(cfg, tmp_path / "before.yaml", stop=2, ok=False)
+    saved_path = tmp_path / "full/checkpoints/step_00000002.pt"
+    saved = torch.load(saved_path, weights_only=True)
+    source = Path(cfg.data.train.local.path)
+    manifest = json.loads((source / "manifest.json").read_text())
+    previous = source / manifest["shards"][0]["path"]
+    current = source / "resharded-000000.parquet"
+    previous.rename(current)
+    manifest["shards"][0]["path"] = current.name
+    (source / "manifest.json").write_text(json.dumps(manifest))
+    identity = validate_mdlm_sources(
+        {"local": {"path": str(source)}},
+        {},
+        codebook=saved["model"]["structure_codebook"],
+        split_manifest=None,
+    )
+    old = saved["runtime"]["mdlm_identity"]
+    assert identity["canonical_population_sha256"] == old["canonical_population_sha256"]
+    assert (
+        identity["sources"]["local"]["representation_sha256"]
+        == old["sources"]["local"]["representation_sha256"]
+    )
+    assert (
+        identity["sources"]["local"]["replay_sha256"]
+        != old["sources"]["local"]["replay_sha256"]
+    )
+    cfg.train.resume_from = str(saved_path)
+    cfg.train.output_dir = str(tmp_path / "rejected")
+    result = execute(cfg, tmp_path / "after.yaml", ok=False)[0]
+    assert "signature mismatch" in result.stdout + result.stderr
+    assert not (tmp_path / "rejected").exists()
+
+
+def test_resume_evaluation_overrides_change_measurement_not_training(tmp_path):
+    from tests.integration.test_mdlm_evaluation import evaluation_training_fixture
+    from stok.utils.pretrained import json_sha256
+
+    cfg = evaluation_training_fixture(tmp_path)
+    cfg.train.max_steps = 4
+    cfg.model.encoder.dropout = 0.2
+    cfg.train.output_dir = str(tmp_path / "full")
+    execute(cfg, tmp_path / "full.yaml")
+    cfg.train.output_dir = str(tmp_path / "interrupted")
+    execute(cfg, tmp_path / "interrupted.yaml", stop=2, ok=False)
+    cfg.train.resume_from = str(tmp_path / "interrupted/checkpoints/step_00000002.pt")
+    cfg.train.output_dir = str(tmp_path / "resumed")
+    cfg.train.eval.mdlm.generation.sampling_steps = 2
+    cfg.train.eval.mdlm.families = ["full"]
+    execute(cfg, tmp_path / "resumed.yaml")
+    full = torch.load(tmp_path / "full/model/final.pt", weights_only=True)
+    resumed = torch.load(tmp_path / "resumed/model/final.pt", weights_only=True)
+    for key in (
+        "model",
+        "optimizer",
+        "scheduler",
+        "rank_states",
+        "global_step",
+        "micro_step",
+        "residues_seen",
+        "executed_positions",
+        "signature",
+    ):
+        equal(full[key], resumed[key])
+    assert (
+        full["runtime"]["mdlm_identity"]["shared_cases"]
+        == resumed["runtime"]["mdlm_identity"]["shared_cases"]
+    )
+    assert (
+        full["runtime"]["evaluation_protocol"]["protocol_sha256"]
+        != resumed["runtime"]["evaluation_protocol"]["protocol_sha256"]
+    )
+    summaries = [
+        json.loads(path.read_text())
+        for path in (tmp_path / "resumed/logs/evaluations").glob("*.json")
+    ]
+    assert {summary["model_identity"]["global_step"] for summary in summaries} == {3, 4}
+    assert all(
+        summary["model_identity"]["training_signature"]
+        == json_sha256(resumed["signature"])
+        for summary in summaries
+    )

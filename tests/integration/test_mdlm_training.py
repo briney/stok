@@ -14,7 +14,11 @@ from stok.data.mdlm import CANONICAL_AA, prepare_mdlm_batch
 from stok.models.mdlm import STokMDLM
 from stok.utils.mdlm import corrupt_mdlm_batch
 from stok.utils.tokenizer import Tokenizer
-from tests.utils.synthetic import make_mdlm_rows, write_dataset
+from tests.utils.synthetic import (
+    make_mdlm_rows,
+    write_dataset,
+    declare_synthetic_source,
+)
 
 
 def mdlm_config(project, source, codebook_path, **options):
@@ -69,7 +73,7 @@ def training_fixture(tmp_path, n=8, rows=None):
         for i in range(n):
             row = originals[i % 2].copy()
             row["sequence_id"] = str(i)
-            rows.append(row)
+            rows.append(declare_synthetic_source(row, source_accession=f"training-{i}"))
     return write_dataset(tmp_path / "data", rows, codebook=codebook), path
 
 
@@ -168,7 +172,7 @@ def test_raw_loader_defers_crop_and_reads_full_coordinates_when_requested(tmp_pa
     assert isinstance(batch, list) and isinstance(batch[0], dict)
     assert loader.collate_fn is list
     assert batch[0]["coords"].shape[0] == len(batch[0]["sequence"])
-    assert batch[0]["dataset"] == identity["sample_key_namespaces"]["local"]
+    assert batch[0]["dataset"] == identity["sources"]["local"]["replay_sha256"]
     cfg.data.load_coords = False
     loader, _ = _build_dataloaders(cfg, identity=identity)
     assert "coords" not in next(iter(loader))[0]
@@ -230,6 +234,10 @@ def test_tiny_paired_subset_learns(tmp_path):
             "sequence_id": str(i),
         }
         for i in range(2)
+    ]
+    rows = [
+        declare_synthetic_source(row, source_accession=f"training-{i}")
+        for i, row in enumerate(rows)
     ]
     source, codebook = training_fixture(tmp_path, rows=rows)
     states = []
@@ -369,6 +377,10 @@ def test_no_eligible_window_skips_but_preserves_consumed_cursor(tmp_path):
         }
         for i in range(4)
     ]
+    rows = [
+        declare_synthetic_source(row, source_accession=f"training-{i}")
+        for i, row in enumerate(rows)
+    ]
     source, codebook = training_fixture(tmp_path, rows=rows)
     state = checkpoint(
         mdlm_config(
@@ -394,6 +406,10 @@ def test_all_unusable_mdlm_pass_fails_without_update(tmp_path):
     rows = [
         {**make_mdlm_rows()[1], "sequence_id": str(i), "structure_tokens": [None] * 3}
         for i in range(4)
+    ]
+    rows = [
+        declare_synthetic_source(row, source_accession=f"training-{i}")
+        for i, row in enumerate(rows)
     ]
     source, codebook = training_fixture(tmp_path, rows=rows)
     cfg = mdlm_config(
@@ -466,24 +482,51 @@ def test_real_zero_mask_draw_still_updates_adamw(tmp_path):
         }
         for i in range(2)
     ]
+    rows = [
+        declare_synthetic_source(row, source_accession=f"training-{i}")
+        for i, row in enumerate(rows)
+    ]
     source, codebook = training_fixture(tmp_path, rows=rows)
+    from stok.data.mdlm import validate_mdlm_sources
+    from stok.training.tasks import MDLMTask
+
+    cfg = mdlm_config(
+        tmp_path / "run",
+        source,
+        codebook,
+        **{"train.max_steps": 1, "train.mdlm.regime_weights": {"sequence_only": 1}},
+    )
+    identity = validate_mdlm_sources(
+        {"local": str(source)},
+        {},
+        codebook=torch.load(codebook, weights_only=True)["codebook"],
+        split_manifest=None,
+    )
+    loader, _ = _build_dataloaders(cfg, identity=identity)
+    rows = next(iter(loader))
+    # Exact replay includes this export's provenance path, so find an actual empty
+    # draw for this fixture. The training run below must reproduce it unchanged.
+    for seed in range(100):
+        cfg.train.seed = seed
+        window = MDLMTask(cfg, codebook_size=32).prepare_window(
+            [rows],
+            epoch=0,
+            micro_step=0,
+            global_step=0,
+            rank=0,
+            world_size=1,
+        )
+        if not window.batches[0][1]["masked"].any():
+            break
+    else:
+        pytest.fail("No real empty mask draw found")
     initial = checkpoint(
         mdlm_config(
             tmp_path / "initial",
             source,
             codebook,
-            **{"train.max_steps": 0, "train.seed": 1},
+            **{"train.max_steps": 0, "train.seed": seed},
         )
-    )
-    cfg = mdlm_config(
-        tmp_path / "run",
-        source,
-        codebook,
-        **{
-            "train.max_steps": 1,
-            "train.seed": 1,
-            "train.mdlm.regime_weights": {"sequence_only": 1},
-        },
     )
     state = checkpoint(cfg)
     log = (tmp_path / "run/logs/train.log").read_text()

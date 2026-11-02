@@ -61,7 +61,9 @@ def test_discovery_preserves_copies_paths_and_label_chain_ids(tmp_path):
 def test_folder_export_preserves_missing_positions_and_input_inventory(
     tmp_path, export_inputs, monkeypatch, entrypoint
 ):
-    from stok.data.structure_directory import write_structure_folder_dataset
+    from stok.data.structure_directory import iter_structure_directory
+    from stok.data.canonical import prepare_canonical_dataset
+    from stok.data.structure_export import write_structure_dataset
     from stok.data.structure_export import validate_structure_dataset
 
     model, _ = export_inputs
@@ -91,9 +93,21 @@ def test_folder_export_preserves_missing_positions_and_input_inventory(
     # Missing sequence metadata is an exclusion, not an observed-only fallback.
     shutil.copy(FIXTURES / "inputs/complete_pdb.pdb", folder / "no-seqres.pdb")
     output = tmp_path / "dataset"
+    manifest = tmp_path / "discovered.jsonl"
+    entries = [
+        {
+            **row,
+            "source_namespace": "local-test",
+            "source_accession": "explicit-example",
+        }
+        for row in iter_structure_directory(folder, recursive=True)
+    ]
+    manifest.write_text("".join(json.dumps(row) + "\n" for row in entries))
+    canonical = tmp_path / "discovered-canonical"
+    prepare_canonical_dataset(manifest, canonical)
     if entrypoint == "api":
-        summary = write_structure_folder_dataset(
-            folder, output, tokenizer=model, recursive=True, rows_per_shard=1
+        summary = write_structure_dataset(
+            canonical, output, tokenizer=model, rows_per_shard=1
         )
     else:
         from click.testing import CliRunner
@@ -107,11 +121,10 @@ def test_folder_export_preserves_missing_positions_and_input_inventory(
             cli,
             [
                 "tokenize-structures",
-                str(folder),
+                str(canonical),
                 str(output),
                 "--preset",
                 "lite",
-                "--recursive",
                 "--rows-per-shard",
                 "1",
                 "--no-include-coordinates",
@@ -120,12 +133,14 @@ def test_folder_export_preserves_missing_positions_and_input_inventory(
         assert result.exit_code == 0, result.output
         summary = validate_structure_dataset(output)
     assert summary["row_count"] == 2
-    assert summary["rejection_count"] == 1
-    assert summary["exclusions"] == {"sequence_metadata_missing": 1}
+    assert summary["parser_rejection_count"] == 1
+    assert summary["rejection_count"] == 0
+    assert summary["exclusions"] == {}
     assert summary["null_count"] == 4
     assert validate_structure_dataset(output) == summary
     inputs = [
-        json.loads(line) for line in (output / "inputs.jsonl").read_text().splitlines()
+        json.loads(line)
+        for line in (canonical / "inputs.jsonl").read_text().splitlines()
     ]
     assert len(inputs) == 3
     assert all(Path(row["path"]).is_file() for row in inputs)
@@ -139,9 +154,9 @@ def test_folder_export_preserves_missing_positions_and_input_inventory(
         assert row["source"]["path"] == str(nested / "copies.pdb")
         assert len(TokenizedDataset(str(output / shard["path"]), max_length=1280)) == 1
     with pytest.raises(FileExistsError):
-        write_structure_folder_dataset(folder, output, tokenizer=model)
-    (output / "inputs.jsonl").write_text("corrupt\n")
-    with pytest.raises(ValueError, match="input inventory"):
+        write_structure_dataset(canonical, output, tokenizer=model)
+    (canonical / "inputs.jsonl").write_text("corrupt\n")
+    with pytest.raises(ValueError, match="inputs inventory"):
         validate_structure_dataset(output)
 
 

@@ -391,11 +391,11 @@ def run_experiments(
             try:
                 source = replace(
                     parse_polymer_structure(
-                        **{
-                            key: value
-                            for key, value in entry.items()
-                            if key != "sequence_id"
-                        },
+                        entry["path"],
+                        chain_id=entry.get("chain_id"),
+                        chain_namespace=entry["chain_namespace"],
+                        model_index=entry["model_index"],
+                        sequence=entry.get("sequence"),
                         allow_observed_sequence=allow_observed_sequence,
                     ),
                     sequence_id=entry["sequence_id"],

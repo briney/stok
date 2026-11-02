@@ -17,7 +17,11 @@ from omegaconf import OmegaConf
 
 from stok.config import validate_training_config
 from stok.data.dataset import set_dataset_epoch
-from stok.data.mdlm import mdlm_training_signature, mdlm_vocabulary
+from stok.data.mdlm import (
+    mdlm_training_signature,
+    mdlm_vocabulary,
+    validate_mdlm_identity,
+)
 from stok.training.tasks import validate_logging_state
 from stok.utils.pretrained import file_sha256, state_sha256
 
@@ -112,6 +116,58 @@ def scientific_config(cfg):
     return config
 
 
+def execution_identity(accelerator) -> dict:
+    """One owner for actual native numerical/distributed execution metadata."""
+    execution = {
+        "world_size": accelerator.num_processes if accelerator else 1,
+        "precision": accelerator.mixed_precision if accelerator else "no",
+        "device": accelerator.device.type if accelerator else "cpu",
+        "distributed": accelerator.distributed_type.name if accelerator else "NO",
+        "threads": torch.get_num_threads(),
+        "cuda_rng_state_sizes": [
+            state.numel() for state in torch.cuda.get_rng_state_all()
+        ]
+        if accelerator and accelerator.device.type == "cuda"
+        else [],
+        "cuda": torch.version.cuda,
+        "cudnn": torch.backends.cudnn.version()
+        if accelerator and accelerator.device.type == "cuda"
+        else None,
+        "deterministic": torch.are_deterministic_algorithms_enabled(),
+        "tf32": torch.backends.cuda.matmul.allow_tf32,
+        "sdpa": {
+            "flash": torch.backends.cuda.flash_sdp_enabled(),
+            "math": torch.backends.cuda.math_sdp_enabled(),
+            "memory_efficient": torch.backends.cuda.mem_efficient_sdp_enabled(),
+            "cudnn": torch.backends.cuda.cudnn_sdp_enabled(),
+            "math_low_precision_reduction": torch.backends.cuda.fp16_bf16_reduction_math_sdp_allowed(),
+        },
+    }
+
+    return {
+        "source": {"sha256": package_source_sha256()},
+        "software": {
+            "python": platform.python_version(),
+            **{
+                name: version(name)
+                for name in (
+                    "torch",
+                    "accelerate",
+                    "numpy",
+                    "pyarrow",
+                    "hydra-core",
+                    "omegaconf",
+                    "tokenizers",
+                    "transformers",
+                    "x-transformers",
+                    "vector-quantize-pytorch",
+                )
+            },
+        },
+        "execution": execution,
+    }
+
+
 def resume_signature(cfg, *, sources, codebook, accelerator, identity):
     config = scientific_config(cfg)
     identities = []
@@ -136,60 +192,17 @@ def resume_signature(cfg, *, sources, codebook, accelerator, identity):
         "codebook": state_sha256({"codebook": codebook})
         if codebook is not None
         else None,
-        "source": {"sha256": package_source_sha256()},
-        "software": {
-            "python": platform.python_version(),
-            **{
-                name: version(name)
-                for name in (
-                    "torch",
-                    "accelerate",
-                    "numpy",
-                    "pyarrow",
-                    "hydra-core",
-                    "omegaconf",
-                    "tokenizers",
-                    "transformers",
-                    "x-transformers",
-                    "vector-quantize-pytorch",
-                )
-            },
-        },
-        "execution": {
-            "world_size": accelerator.num_processes if accelerator else 1,
-            "precision": accelerator.mixed_precision if accelerator else "no",
-            "device": accelerator.device.type if accelerator else "cpu",
-            "distributed": accelerator.distributed_type.name if accelerator else "NO",
-            "threads": torch.get_num_threads(),
-            "cuda_rng_state_sizes": [
-                state.numel() for state in torch.cuda.get_rng_state_all()
-            ]
-            if accelerator and accelerator.device.type == "cuda"
-            else [],
-            "cuda": torch.version.cuda,
-            "cudnn": torch.backends.cudnn.version()
-            if accelerator and accelerator.device.type == "cuda"
-            else None,
-            "deterministic": torch.are_deterministic_algorithms_enabled(),
-            "tf32": torch.backends.cuda.matmul.allow_tf32,
-            "sdpa": {
-                "flash": torch.backends.cuda.flash_sdp_enabled(),
-                "math": torch.backends.cuda.math_sdp_enabled(),
-                "memory_efficient": torch.backends.cuda.mem_efficient_sdp_enabled(),
-                "cudnn": torch.backends.cuda.cudnn_sdp_enabled(),
-                "math_low_precision_reduction": torch.backends.cuda.fp16_bf16_reduction_math_sdp_allowed(),
-            },
-        },
+        **execution_identity(accelerator),
     }
 
 
 def read_training_checkpoint(path: Path) -> dict:
     payload = torch.load(path, map_location="cpu", weights_only=True)
     if not isinstance(payload, dict) or (
-        type(payload.get("format_version")) is not int or payload["format_version"] != 3
+        type(payload.get("format_version")) is not int or payload["format_version"] != 4
     ):
         raise ValueError(
-            "STok requires a complete version 3 training checkpoint; unsupported versions and weights-only checkpoints cannot load"
+            "STok requires a complete version 4 training checkpoint; unsupported versions and weights-only checkpoints cannot load"
         )
     required = {
         "model",
@@ -229,6 +242,7 @@ def validate_resume_signature(payload: dict, expected: dict) -> None:
         "software",
         "execution",
         "source",
+        "evaluation_protocol",
     }
     if not isinstance(runtime, dict) or required_runtime - runtime.keys():
         raise ValueError("Incomplete runtime manifest")
@@ -264,6 +278,19 @@ def validate_resume_signature(payload: dict, expected: dict) -> None:
         raise ValueError("Checkpoint structure codebook disagrees with resume identity")
     if identity.get("vocabulary") != mdlm_vocabulary(codebook):
         raise ValueError("Checkpoint vocabulary identity is incompatible")
+    validate_mdlm_identity(identity)
+    from stok.eval.mdlm import mdlm_evaluation_protocol
+
+    protocol = mdlm_evaluation_protocol(
+        cfg,
+        identity=identity,
+        environment={key: runtime[key] for key in ("software", "execution", "source")},
+        decoder=runtime.get("decoder"),
+    )
+    if runtime["evaluation_protocol"] != protocol:
+        raise ValueError(
+            "Checkpoint evaluation protocol disagrees with saved configuration/runtime"
+        )
     try:
         training_signature = mdlm_training_signature(identity)
     except (KeyError, TypeError, ValueError) as exc:

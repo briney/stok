@@ -31,7 +31,7 @@ max_grad_norm: 1.0
 
 # IO paths
 output_dir: null
-resume_from: null  # complete version-3 continuation with the original budget
+resume_from: null  # complete version-4 continuation with the original budget
 
 # logging
 wandb:
@@ -63,17 +63,16 @@ mdlm:
   structure_loss_weight: 1.0
 
 eval:
-  seed: 1729
   steps: 1000
   mdlm:
     enabled: false
-    cohort: null
-    generation_cohort: null
-    # Omitted cases resolve to the fixed 32-case denoising matrix.
+    case_manifest: null
+    families: null
     generation:
       enabled: false
       steps: 10000
       sampling_steps: 64
-      max_samples: 16
+      max_cases: 16
+      families: null
       decode: false
       schedule: {name: linear}

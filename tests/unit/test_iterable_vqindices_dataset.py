@@ -81,6 +81,7 @@ def test_mixed_optional_columns_and_required_schema(tmp_path):
     batch = list(ds)
     for row in batch:
         row["dataset"] = "mixed-columns"
+        row["canonical_id"] = "a" * 64
     coords = prepare_mdlm_batch(
         batch, Tokenizer(), max_len=8, codebook_size=32, crop="center", seeds=[0, 0]
     )["coords"]
@@ -92,3 +93,15 @@ def test_mixed_optional_columns_and_required_schema(tmp_path):
     )
     with pytest.raises(ValueError, match="bad.parquet.*structure_tokens"):
         IterableTokenizedDataset(str(tmp_path), max_length=8)
+
+
+def test_schema_two_shards_require_canonical_columns(tmp_path):
+    import pyarrow.parquet as pq
+    from tests.utils.synthetic import make_mdlm_rows, write_dataset
+
+    directory = write_dataset(tmp_path / "current", make_mdlm_rows())
+    shard = directory / "part-000000.parquet"
+    table = pq.read_table(shard)
+    pq.write_table(table.drop_columns(["canonical_id"]), shard)
+    with pytest.raises(ValueError, match="canonical_id"):
+        IterableTokenizedDataset(str(directory), max_length=None)
