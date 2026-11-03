@@ -4,7 +4,3 @@ defaults:
   - data: base
   - train: base
   - _self_
-
-# Runtime overrides shared across entries
-print_model_summary: true
-

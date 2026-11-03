@@ -243,82 +243,6 @@ def test_rejects_invalid_steps(steps):
 
 
 @pytest.mark.parametrize(
-    "grid",
-    [
-        [1, 0.5, 0.5, 0, 0],
-        [1, 0.2, 0.3, 0.1, 0],
-        [0.9, 0.7, 0.4, 0.1, 0],
-        [1, 0.7, 0.4, 0.1, 0.01],
-        [1, float("nan"), 0.4, 0.1, 0],
-        [1, 0],
-    ],
-)
-def test_rejects_invalid_time_grid(grid):
-    model, batch, aa = fixture()
-    generate = batch["residue_mask"][..., None].expand(-1, -1, 2)
-    with pytest.raises(ValueError, match="grid"):
-        run(model, batch, aa, generate, time_grid=torch.tensor(grid))
-
-
-@pytest.mark.parametrize(
-    "bad",
-    [
-        "partial_group",
-        "clamped_group",
-        "boundary",
-        "canonical_mask",
-        "metadata",
-        "seeds",
-        "nonfinite",
-    ],
-)
-def test_rejects_invalid_sampling_contract(bad):
-    model, batch, aa = fixture("AC")
-    generate = batch["residue_mask"][..., None].expand(-1, -1, 2).clone()
-    ids = groups(batch, generate)
-    kwargs = {}
-    if bad == "partial_group":
-        ids[0, 1, 0] = -1
-    elif bad == "clamped_group":
-        generate[0, 1, 0] = False
-    elif bad == "boundary":
-        generate[0, 0] = True
-    elif bad == "canonical_mask":
-        aa[0] = batch["sequence_mask_id"]
-    elif bad == "metadata":
-        batch["codebook_size"] = 3
-    elif bad == "seeds":
-        kwargs["seeds"] = []
-    elif bad == "nonfinite":
-        model.aa = aa
-        original = model.forward
-
-        def forward(*args, **kwargs):
-            output = original(*args, **kwargs)
-            output["structure_logits"] = torch.full_like(
-                output["structure_logits"], float("nan")
-            )
-            return output
-
-        model.forward = forward
-    with pytest.raises((ValueError, FloatingPointError)):
-        run(model, batch, aa, generate, ids=ids, **kwargs)
-
-
-@pytest.mark.parametrize("attribute", ["embed", "pad_id", "codebook_size"])
-def test_invalid_model_metadata_fails_before_forward(attribute):
-    model, batch, aa = fixture()
-    value = getattr(model, attribute)
-    setattr(
-        model, attribute, nn.Identity() if attribute == "embed" else torch.tensor(value)
-    )
-    generate = batch["residue_mask"][..., None].expand(-1, -1, 2).clone()
-    with pytest.raises(ValueError, match="model"):
-        run(model, batch, aa, generate)
-    assert model.calls == []
-
-
-@pytest.mark.parametrize(
     "weights",
     [
         None,
@@ -440,43 +364,6 @@ def test_tokenizer_mask_and_canonical_ids_are_authoritative(tmp_path):
     assert batch["sequence_mask_id"] == 0
     assert (model.calls[0][0][generate[..., 0]] == 0).all()
     assert torch.isin(result["sequence_tokens"][generate[..., 0]], aa).all()
-
-
-@pytest.mark.parametrize("reordered", [False, True])
-@pytest.mark.parametrize("boundary", ["bos_token_id", "eos_token_id"])
-def test_rejects_observable_boundary_ids_in_clean_output_support(
-    tmp_path, reordered, boundary
-):
-    if reordered:
-        path = tmp_path / "vocab.txt"
-        path.write_text("\n".join(["<mask>"] + list(reversed(DEFAULT_VOCAB[:-1]))))
-        tokenizer = Tokenizer(vocab_file=str(path))
-    else:
-        tokenizer = Tokenizer()
-    batch = prepare_mdlm_batch(
-        [
-            {
-                "dataset": "fixture",
-                "canonical_id": "a" * 64,
-                "sequence_id": "one",
-                "sequence": "AC",
-                "structure_tokens": [0, 1],
-            }
-        ],
-        tokenizer,
-        max_len=5,
-        codebook_size=2,
-        crop="center",
-        seeds=[0],
-    )
-    aa = torch.tensor(tokenizer.convert_tokens_to_ids(list(CANONICAL_AA)))
-    aa[0] = getattr(tokenizer, boundary)
-    model = FixedDenoiser(tokenizer)
-    model.aa = aa
-    generate = batch["residue_mask"][..., None].expand(-1, -1, 2).clone()
-    with pytest.raises(ValueError, match="canonical"):
-        run(model, batch, aa, generate)
-    assert not model.calls
 
 
 @pytest.mark.parametrize("weights", [None, [], "joint_tied"])

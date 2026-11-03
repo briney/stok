@@ -56,7 +56,7 @@ def resolve_mdlm_eval_config(
     provided = OmegaConf.to_container(cfg.train.eval.get("mdlm", {}), resolve=True)
     if not isinstance(provided, dict):
         raise ValueError("MDLM evaluation config must be a mapping")
-    from stok.config import _check_fields
+    from stok.config import reject_unknown_keys
 
     contract = OmegaConf.create(defaults)
     contract.generation.steps = None
@@ -68,7 +68,7 @@ def resolve_mdlm_eval_config(
         raise ValueError("train.eval.mdlm.generation.schedule must be a mapping")
     if schedule.get("name") == "power":
         contract.generation.schedule.power = 2.0
-    _check_fields(OmegaConf.create(provided), contract, "train.eval.mdlm")
+    reject_unknown_keys(OmegaConf.create(provided), contract, "train.eval.mdlm")
     for key in ("conditioning_policy", "label_context"):
         if key in provided and provided[key] != defaults[key]:
             raise ValueError(f"train.eval.mdlm.{key} must declare {defaults[key]}")
@@ -142,12 +142,6 @@ def validate_mdlm_decoder(decoder, codebook, expected_digest: str) -> None:
         raise ValueError("MDLM geometric decoder must be frozen")
 
 
-def _raise_errors(error, accelerator, context):
-    errors = gather_object([error]) if accelerator else [error]
-    if any(errors):
-        raise RuntimeError(f"MDLM evaluation {context}: {errors}")
-
-
 def _geometry_scores(state, predicted, batch):
     for index, metric in enumerate((LDDTMetric(), RMSDMetric(), TMScoreMetric())):
         score = (
@@ -201,25 +195,20 @@ def evaluate_mdlm(
     """Execute frozen cases on their row owner, preserving controls and coverage."""
     from stok.eval.cases import project_case_controls
 
-    error = None
-    try:
-        settings = resolve_mdlm_eval_config(cfg, identity=identity)
-        run_denoising = run_denoising and settings.enabled
-        run_generation = run_generation and settings.generation.enabled
-        eval_model = _unwrap_model(model, accelerator)
-        device = _get_model_device(model, accelerator)
-        model_codebook_size = getattr(eval_model, "codebook_size", None)
-        if type(model_codebook_size) is not int or model_codebook_size < 1:
-            raise ValueError("MDLM evaluation codebook_size must be a positive integer")
-        codebook_size = cast(int, model_codebook_size)
-        selected = selected_mdlm_cases(settings, identity.get("shared_cases"))
-        if run_generation and settings.generation.decode:
-            validate_mdlm_decoder(
-                decoder, eval_model.structure_codebook, identity["codebook_sha256"]
-            )
-    except Exception as exc:
-        error = f"{type(exc).__name__}: {exc}"
-    _raise_errors(error, accelerator, "configuration")
+    settings = resolve_mdlm_eval_config(cfg, identity=identity)
+    run_denoising = run_denoising and settings.enabled
+    run_generation = run_generation and settings.generation.enabled
+    eval_model = _unwrap_model(model, accelerator)
+    device = _get_model_device(model, accelerator)
+    model_codebook_size = getattr(eval_model, "codebook_size", None)
+    if type(model_codebook_size) is not int or model_codebook_size < 1:
+        raise ValueError("MDLM evaluation codebook_size must be a positive integer")
+    codebook_size = cast(int, model_codebook_size)
+    selected = selected_mdlm_cases(settings, identity.get("shared_cases"))
+    if run_generation and settings.generation.decode:
+        validate_mdlm_decoder(
+            decoder, eval_model.structure_codebook, identity["codebook_sha256"]
+        )
     cases = [
         case
         for case in selected
@@ -282,190 +271,177 @@ def evaluate_mdlm(
                 (len(generation_cases) + 1, 3, 3), device=device, dtype=torch.float64
             )
             populations = torch.zeros(2, device=device, dtype=torch.float64)
-            error = None
-            try:
-                for raw in loader:
-                    for row in raw:
-                        key = row["canonical_id"]
-                        if key not in requested:
-                            continue
-                        entry = identity["coverage"][key]
-                        if entry["status"] != "admitted" or entry["source"] != dataset:
+            for raw in loader:
+                for row in raw:
+                    key = row["canonical_id"]
+                    if key not in requested:
+                        continue
+                    entry = identity["coverage"][key]
+                    if entry["status"] != "admitted" or entry["source"] != dataset:
+                        raise ValueError(
+                            "Frozen case row disagrees with admitted source coverage"
+                        )
+                    seen[key] += 1
+                    control_crops = set()
+                    for case in by_member[key]:
+                        if (
+                            row.get("canonical_content_sha256")
+                            != case["content_sha256"]
+                            or row.get("residue_map_sha256")
+                            != case["residue_map_sha256"]
+                        ):
                             raise ValueError(
-                                "Frozen case row disagrees with admitted source coverage"
+                                "canonical row binding disagrees with frozen case"
                             )
-                        seen[key] += 1
-                        control_crops = set()
-                        for case in by_member[key]:
-                            if (
-                                row.get("canonical_content_sha256")
-                                != case["content_sha256"]
-                                or row.get("residue_map_sha256")
-                                != case["residue_map_sha256"]
-                            ):
-                                raise ValueError(
-                                    "canonical row binding disagrees with frozen case"
-                                )
-                            record = {
-                                "case_id": case["case_id"],
-                                "status": "evaluated",
-                                "reason": None,
-                                "unavailable_targets": 0,
-                                "unavailable_conditioning": 0,
-                            }
-                            records.append(record)
-                            if case["crop"][1] - case["crop"][0] > cfg.data.max_len - 2:
-                                record.update(
-                                    status="unsupported", reason="crop_capacity"
-                                )
-                                continue
-                            batch = prepare_mdlm_batch(
-                                [row],
-                                tokenizer,
-                                max_len=int(cfg.data.max_len),
-                                codebook_size=codebook_size,
-                                crop="center",
-                                seeds=[case["seed"]],
-                                crop_intervals=[tuple(case["crop"])],
-                            )
-                            batch = cast(
-                                MDLMBatch,
-                                {
-                                    name: value.to(device)
-                                    if isinstance(value, torch.Tensor)
-                                    else value
-                                    for name, value in batch.items()
-                                },
-                            )
-                            corruption = project_case_controls([case], batch)
-                            record["unavailable_targets"] = int(
-                                (
-                                    corruption["requested_eligible"]
-                                    & ~corruption["eligible"]
-                                ).sum()
-                            )
-                            record["unavailable_conditioning"] = int(
-                                corruption["unavailable_conditioning"].sum()
-                            )
-                            if not bool(corruption["case_available"].all()):
-                                record.update(
-                                    status="unavailable", reason="conditioning"
-                                )
-                                continue
-                            if case["kind"] == "denoising":
-                                index = [name for name, _ in denoising_cases].index(
-                                    case["family_key"]
-                                )
-                                populations[0] += 1
-                                outputs = eval_model(
-                                    sequence_tokens=corruption["sequence_tokens"],
-                                    structure_tokens=corruption["structure_tokens"],
-                                )
-                                terms = mdlm_loss_terms(
-                                    outputs,
-                                    batch,
-                                    cast(MDLMCorruption, corruption),
-                                    canonical_aa_ids=canonical,
-                                )
-                                denoising[index] += torch.stack(
-                                    [
-                                        terms[name].double()
-                                        for name in (
-                                            "ce_sum",
-                                            "correct",
-                                            "masked_count",
-                                            "eligible_count",
-                                        )
-                                    ]
-                                )
-                                continue
-                            if not bool(corruption["eligible"].any()):
-                                record.update(status="unavailable", reason="no_targets")
-                                continue
-                            populations[1] += 1
-                            index = [name for name, _ in generation_cases].index(
+                        record = {
+                            "case_id": case["case_id"],
+                            "status": "evaluated",
+                            "reason": None,
+                            "unavailable_targets": 0,
+                            "unavailable_conditioning": 0,
+                        }
+                        records.append(record)
+                        if case["crop"][1] - case["crop"][0] > cfg.data.max_len - 2:
+                            record.update(status="unsupported", reason="crop_capacity")
+                            continue
+                        batch = prepare_mdlm_batch(
+                            [row],
+                            tokenizer,
+                            max_len=int(cfg.data.max_len),
+                            codebook_size=codebook_size,
+                            crop="center",
+                            seeds=[case["seed"]],
+                            crop_intervals=[tuple(case["crop"])],
+                        )
+                        batch = cast(
+                            MDLMBatch,
+                            {
+                                name: value.to(device)
+                                if isinstance(value, torch.Tensor)
+                                else value
+                                for name, value in batch.items()
+                            },
+                        )
+                        corruption = project_case_controls([case], batch)
+                        record["unavailable_targets"] = int(
+                            (
+                                corruption["requested_eligible"]
+                                & ~corruption["eligible"]
+                            ).sum()
+                        )
+                        record["unavailable_conditioning"] = int(
+                            corruption["unavailable_conditioning"].sum()
+                        )
+                        if not bool(corruption["case_available"].all()):
+                            record.update(status="unavailable", reason="conditioning")
+                            continue
+                        if case["kind"] == "denoising":
+                            index = [name for name, _ in denoising_cases].index(
                                 case["family_key"]
                             )
-                            if (
-                                case["definition"]["regime"].startswith("joint")
-                                and not joint_qualified
-                            ):
-                                record.update(
-                                    status="unsupported", reason="joint_exposure"
-                                )
-                                continue
-                            generate = corruption["eligible"]
-                            groups = corruption["group_ids"].masked_fill(~generate, -1)
-                            sampled = sample_mdlm(
-                                eval_model,
+                            populations[0] += 1
+                            outputs = eval_model(
+                                sequence_tokens=corruption["sequence_tokens"],
+                                structure_tokens=corruption["structure_tokens"],
+                            )
+                            terms = mdlm_loss_terms(
+                                outputs,
                                 batch,
-                                generate_mask=generate,
-                                group_ids=groups,
-                                schedule=settings.generation.schedule,
-                                steps=settings.generation.sampling_steps,
-                                seeds=[case["seed"]],
+                                cast(MDLMCorruption, corruption),
                                 canonical_aa_ids=canonical,
                             )
-                            for track, tokens in enumerate(
-                                ("sequence_tokens", "structure_tokens")
-                            ):
-                                condition = corruption["requested_conditioning"][
-                                    ..., track
-                                ]
-                                generation[index, 0] += (
-                                    sampled[tokens][condition]
-                                    == (
-                                        batch["sequence_tokens"]
-                                        if track == 0
-                                        else batch["structure_tokens"]
-                                    )[condition]
-                                ).sum()
-                                generation[index, 1] += condition.sum()
-                                completed = (
-                                    torch.isin(sampled[tokens], canonical)
-                                    if track == 0
-                                    else (
-                                        (sampled[tokens] >= 0)
-                                        & (sampled[tokens] < codebook_size)
+                            denoising[index] += torch.stack(
+                                [
+                                    terms[name].double()
+                                    for name in (
+                                        "ce_sum",
+                                        "correct",
+                                        "masked_count",
+                                        "eligible_count",
                                     )
-                                )
-                                generation[index, 2] += (
-                                    completed & generate[..., track]
-                                ).sum()
-                                generation[index, 3] += generate[..., track].sum()
-                            valid = generate[..., 0] & batch["sequence_valid"]
-                            generation[index, 4] += (
-                                sampled["sequence_tokens"][valid]
-                                == batch["sequence_tokens"][valid]
+                                ]
+                            )
+                            continue
+                        if not bool(corruption["eligible"].any()):
+                            record.update(status="unavailable", reason="no_targets")
+                            continue
+                        populations[1] += 1
+                        index = [name for name, _ in generation_cases].index(
+                            case["family_key"]
+                        )
+                        if (
+                            case["definition"]["regime"].startswith("joint")
+                            and not joint_qualified
+                        ):
+                            record.update(status="unsupported", reason="joint_exposure")
+                            continue
+                        generate = corruption["eligible"]
+                        groups = corruption["group_ids"].masked_fill(~generate, -1)
+                        sampled = sample_mdlm(
+                            eval_model,
+                            batch,
+                            generate_mask=generate,
+                            group_ids=groups,
+                            schedule=settings.generation.schedule,
+                            steps=settings.generation.sampling_steps,
+                            seeds=[case["seed"]],
+                            canonical_aa_ids=canonical,
+                        )
+                        for track, tokens in enumerate(
+                            ("sequence_tokens", "structure_tokens")
+                        ):
+                            condition = corruption["requested_conditioning"][..., track]
+                            generation[index, 0] += (
+                                sampled[tokens][condition]
+                                == (
+                                    batch["sequence_tokens"]
+                                    if track == 0
+                                    else batch["structure_tokens"]
+                                )[condition]
                             ).sum()
-                            generation[index, 5] += valid.sum()
-                            generation[index, 6] += 1
-                            if settings.generation.decode and generate[..., 1].any():
+                            generation[index, 1] += condition.sum()
+                            completed = (
+                                torch.isin(sampled[tokens], canonical)
+                                if track == 0
+                                else (
+                                    (sampled[tokens] >= 0)
+                                    & (sampled[tokens] < codebook_size)
+                                )
+                            )
+                            generation[index, 2] += (
+                                completed & generate[..., track]
+                            ).sum()
+                            generation[index, 3] += generate[..., track].sum()
+                        valid = generate[..., 0] & batch["sequence_valid"]
+                        generation[index, 4] += (
+                            sampled["sequence_tokens"][valid]
+                            == batch["sequence_tokens"][valid]
+                        ).sum()
+                        generation[index, 5] += valid.sum()
+                        generation[index, 6] += 1
+                        if settings.generation.decode and generate[..., 1].any():
+                            predicted = _decode(
+                                decoder,
+                                eval_model.structure_codebook,
+                                sampled["structure_tokens"],
+                                batch,
+                            )
+                            _geometry_scores(geometry[index], predicted, batch)
+                        crop = tuple(case["crop"])
+                        if settings.generation.decode and crop not in control_crops:
+                            control_crops.add(crop)
+                            if (
+                                batch["structure_valid"] | ~batch["residue_mask"]
+                            ).all():
                                 predicted = _decode(
                                     decoder,
                                     eval_model.structure_codebook,
-                                    sampled["structure_tokens"],
+                                    batch["structure_tokens"],
                                     batch,
                                 )
-                                _geometry_scores(geometry[index], predicted, batch)
-                            crop = tuple(case["crop"])
-                            if settings.generation.decode and crop not in control_crops:
-                                control_crops.add(crop)
-                                if (
-                                    batch["structure_valid"] | ~batch["residue_mask"]
-                                ).all():
-                                    predicted = _decode(
-                                        decoder,
-                                        eval_model.structure_codebook,
-                                        batch["structure_tokens"],
-                                        batch,
-                                    )
-                                    _geometry_scores(geometry[-1], predicted, batch)
-                                else:
-                                    geometry[-1, :, 2] += 1
-            except Exception as exc:
-                error = f"{type(exc).__name__}: {exc}"
-            _raise_errors(error, accelerator, f"dataset {dataset}")
+                                _geometry_scores(geometry[-1], predicted, batch)
+                            else:
+                                geometry[-1, :, 2] += 1
             if accelerator:
                 denoising, generation, geometry, populations = [
                     accelerator.reduce(state, reduction="sum")

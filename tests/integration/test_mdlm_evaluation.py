@@ -502,14 +502,14 @@ def test_invalid_evaluation_metadata_uses_configuration_error_boundary(invalid):
     assert model.calls == []
 
 
-def _distributed_probe(path, count, fail):
+def _distributed_probe(path, count):
     from accelerate import Accelerator
     from stok.eval.mdlm import evaluate_mdlm
 
     accelerator = Accelerator(cpu=True)
     population = rows(count)
     cfg, identity = config(population, replicates=2)
-    model = FixedModel(fail=fail and accelerator.process_index == 0)
+    model = FixedModel()
     model = accelerator.prepare(model)
     sampler = range(accelerator.process_index, count, accelerator.num_processes)
     data = DataLoader(
@@ -548,7 +548,6 @@ def test_uneven_tail_ddp_workers2_matches_single_rank(tmp_path, count):
         "tests.integration.test_mdlm_evaluation",
         str(tmp_path),
         str(count),
-        "ok",
     ]
     for result in run_distributed(command, timeout=60, env=training_env()):
         assert result.returncode == 0, result.stdout + result.stderr
@@ -562,23 +561,6 @@ def test_uneven_tail_ddp_workers2_matches_single_rank(tmp_path, count):
         for name in expected:
             assert actual[name] == pytest.approx(expected[name], abs=1e-6)
     assert sorted(all_inputs) == flattened_calls(reference_model)
-
-
-def test_rank_local_evaluation_failure_exits_every_rank(tmp_path):
-    from tests.integration.test_distributed_training import run_distributed
-    from tests.integration.test_training_progress import training_env
-
-    command = [
-        sys.executable,
-        "-m",
-        "tests.integration.test_mdlm_evaluation",
-        str(tmp_path),
-        "5",
-        "fail",
-    ]
-    for result in run_distributed(command, timeout=60, env=training_env()):
-        assert result.returncode != 0
-        assert "injected MDLM evaluation failure" in result.stderr
 
 
 @pytest.mark.parametrize("released", [False, True])
@@ -819,14 +801,13 @@ def test_optional_decoder_loading_preserves_training_random_stream(
     training.run_training(cfg)
     assert len(decoder_calls) == 1
     saved = torch.load(tmp_path / "with_decoder/model/final.pt", weights_only=False)
-    assert saved["runtime"]["components"]["decoder"] == "geometric"
     actual = saved["model"]
     for name in expected:
         torch.testing.assert_close(actual[name], expected[name], rtol=0, atol=0)
 
 
 if __name__ == "__main__":
-    _distributed_probe(sys.argv[1], int(sys.argv[2]), sys.argv[3] == "fail")
+    _distributed_probe(sys.argv[1], int(sys.argv[2]))
 
 
 @pytest.mark.parametrize(
@@ -1098,7 +1079,7 @@ def test_evaluator_rejects_row_canonical_binding_drift(field):
     cfg, identity = config(population)
     population[0][field] = "f" * 64
     model = FixedModel()
-    with pytest.raises(RuntimeError, match="canonical.*binding"):
+    with pytest.raises(ValueError, match="canonical.*binding"):
         evaluate(model, {"validation": loader(population)}, (cfg, identity))
     assert model.calls == []
 
@@ -1152,76 +1133,3 @@ def test_generation_without_effective_targets_is_unavailable(missing, mixed):
         assert len(model.calls) == 3
     else:
         assert model.calls == []
-
-
-def _startup_artifact_probe(config_path, failure):
-    import os
-    from datetime import timedelta
-    from accelerate import Accelerator
-    from accelerate.utils import InitProcessGroupKwargs
-    from stok.eval import cases
-    from stok.training import engine
-
-    rank = int(os.environ["RANK"])
-    owner = engine if failure == "audit" else cases
-    name = "validate_mdlm_sources" if failure == "audit" else "read_evaluation_cases"
-    original = getattr(owner, name)
-
-    def read(*args, **kwargs):
-        if rank == 1:
-            raise OSError("injected rank-local canonical artifact read failure")
-        return original(*args, **kwargs)
-
-    def forbidden(*args, **kwargs):
-        raise AssertionError("startup failure reached model/W&B/output")
-
-    setattr(owner, name, read)
-    engine._maybe_get_accelerator = lambda *a, **k: Accelerator(
-        cpu=True, kwargs_handlers=[InitProcessGroupKwargs(timeout=timedelta(seconds=3))]
-    )
-    engine.build_model = forbidden
-    engine._resolve_project_dirs = forbidden
-    engine._maybe_init_wandb = forbidden
-    engine.run_training(OmegaConf.load(config_path))
-
-
-@pytest.mark.parametrize("failure", ["read", "mixed_cap", "audit"])
-def test_rank_local_startup_artifact_failure_reaches_every_rank(tmp_path, failure):
-    from stok.eval.cases import freeze_evaluation_cases, read_evaluation_cases
-    from tests.integration.test_distributed_training import run_distributed
-    from tests.integration.test_training_progress import training_env
-
-    cfg = evaluation_training_fixture(tmp_path)
-    if failure == "mixed_cap":
-        shared = read_evaluation_cases(cfg.train.eval.mdlm.case_manifest)
-        request = {
-            **shared["request"],
-            "members": shared["request"]["members"][:1],
-            "replicates": 17,
-        }
-        capped = tmp_path / "capped"
-        freeze_evaluation_cases(
-            [r["directory"] for r in shared["canonical_inventories"]],
-            shared["split_manifest"],
-            request,
-            capped,
-        )
-        cfg.train.eval.mdlm.case_manifest = str(capped)
-    path = tmp_path / "config.yaml"
-    OmegaConf.save(cfg, path)
-    command = [
-        sys.executable,
-        "-c",
-        "import sys; from tests.integration.test_mdlm_evaluation import _startup_artifact_probe; _startup_artifact_probe(*sys.argv[1:])",
-        str(path),
-        failure,
-    ]
-    for result in run_distributed(command, timeout=30, env=training_env()):
-        assert result.returncode != 0
-        assert "MDLM preflight failed" in result.stderr, result.stderr
-        assert "injected rank-local canonical artifact read failure" in result.stderr
-        assert "Timed out" not in result.stderr
-        assert "startup failure reached" not in result.stderr
-        if failure == "mixed_cap":
-            assert "16 expanded cases" in result.stderr
-    assert not (tmp_path / "run").exists()

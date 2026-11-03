@@ -13,7 +13,6 @@ from typing import Any, Optional, cast
 import torch
 import torch.nn as nn
 from accelerate.utils import gather_object, set_seed
-from accelerate.utils.environment import get_cpu_distributed_information
 from omegaconf import DictConfig, OmegaConf
 from torch.optim import AdamW
 from stok.data.loaders import (
@@ -34,13 +33,11 @@ from stok.utils.checkpoint import (
     atomic_destination as _atomic_destination,
     collect_rng_state as _collect_rng_state,
     epoch_iterator,
-    rank_errors as _raise_rank_errors,
     read_training_checkpoint,
     restore_rng_state,
     restore_training_state,
     resume_signature,
     validate_resume_signature,
-    ResumeWandb,
 )
 
 
@@ -158,11 +155,19 @@ def _save_checkpoint(
     training_state: dict,
     runtime: dict,
 ):
-    payload = None
-    rank_state = None
-    error = None
-    try:
+    scaler = getattr(accelerator, "scaler", None)
+    rank_state = {
+        **training_state["local"],
+        "rank": accelerator.process_index if accelerator else 0,
+        "rng": _collect_rng_state(
+            device=accelerator.device if accelerator else torch.device("cpu")
+        ),
+        "scaler": scaler.state_dict() if scaler is not None else None,
+    }
+    rank_states = gather_object([rank_state]) if accelerator else [rank_state]
+    if accelerator is None or accelerator.is_main_process:
         payload = {
+            "format_version": 4,
             "model": _unwrap_model(model, accelerator).state_dict(),
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
@@ -172,42 +177,12 @@ def _save_checkpoint(
             "runtime": runtime,
             "residues_seen": int(residues_seen),
             "executed_positions": int(executed_positions),
+            "rank_states": rank_states,
+            "signature": training_state["signature"],
+            "wandb_run_id": training_state["wandb_run_id"],
         }
-        if any(p.grad is not None for p in model.parameters()):
-            raise ValueError(
-                "Checkpoint requires a completed accumulation boundary with no pending gradients"
-            )
-        scaler = getattr(accelerator, "scaler", None)
-        rank_state = {
-            **training_state["local"],
-            "rank": accelerator.process_index if accelerator else 0,
-            "rng": _collect_rng_state(
-                device=accelerator.device if accelerator else torch.device("cpu")
-            ),
-            "scaler": scaler.state_dict() if scaler is not None else None,
-        }
-    except Exception as exc:
-        if accelerator is None:
-            raise
-        error = f"{type(exc).__name__}: {exc}"
-    _raise_rank_errors(error, accelerator, "Collecting checkpoint state failed")
-    assert payload is not None
-    payload.update(
-        format_version=4,
-        rank_states=gather_object([rank_state]) if accelerator else [rank_state],
-        signature=training_state["signature"],
-        wandb_run_id=training_state["wandb_run_id"],
-    )
-    error = None
-    if accelerator is None or accelerator.is_main_process:
-        try:
-            with _atomic_destination(path) as temporary:
-                torch.save(payload, temporary)
-        except Exception as exc:
-            if accelerator is None:
-                raise
-            error = f"{type(exc).__name__}: {exc}"
-    _raise_rank_errors(error, accelerator, "Checkpoint failed")
+        with _atomic_destination(path) as temporary:
+            torch.save(payload, temporary)
 
 
 def _maybe_init_wandb(
@@ -243,44 +218,19 @@ def _maybe_init_wandb(
     )
     if run is None or (run_id and run.id != run_id):
         raise RuntimeError("W&B did not resume the recorded run ID")
-    watermark = -1
-    if resume_payload:
-        watermark = max(int(run.step) - 1, int(run.summary.get("_step", -1)))
-        run.summary["resume/rollback"] = {
-            "checkpoint_step": resume_payload["global_step"],
-            "history_watermark": watermark,
-        }
-    return ResumeWandb(wandb, watermark)
+    return wandb
 
 
-def iter_windows(loader, size: int, accelerator=None):
+def iter_windows(loader, size: int):
     if size < 1:
         raise ValueError("Accumulation window size must be positive")
-    iterator = None
-    while True:
-        error = None
-        window = []
-        try:
-            if iterator is None:
-                iterator = iter(loader)
-            window = list(islice(iterator, size))
-        except Exception as exc:
-            error = f"{type(exc).__name__}: {exc}"
-        _raise_rank_errors(error, accelerator, "Loading training window failed")
-        if accelerator:
-            sizes = gather_object([len(window)])
-            if len(set(sizes)) != 1:
-                raise RuntimeError(
-                    f"Unequal accumulation window lengths across ranks: {sizes}"
-                )
-        if not window:
-            return
+    iterator = iter(loader)
+    while window := list(islice(iterator, size)):
         yield window
 
 
 def run_training(cfg: DictConfig) -> None:
     validate_training_config(cfg)
-    authored = OmegaConf.create(OmegaConf.to_container(cfg, resolve=False))
     cfg = cast(DictConfig, OmegaConf.create(OmegaConf.to_container(cfg, resolve=True)))
     from stok.eval.mdlm import (
         evaluate_mdlm,
@@ -292,31 +242,15 @@ def run_training(cfg: DictConfig) -> None:
 
     for regime in REGIMES:
         cfg.train.mdlm.regime_weights.setdefault(regime, 0.0)
-    if cfg.train.mdlm.placement == "span":
-        cfg.train.mdlm.setdefault("span_mean", 8.0)
-    if cfg.train.mdlm.noise.name == "power":
-        cfg.train.mdlm.noise.setdefault("power", 2.0)
     cfg.train.eval.mdlm = resolve_mdlm_eval_config(cfg)
     from stok.eval.cases import read_evaluation_cases
 
-    case_error = None
-    try:
-        shared = (
-            read_evaluation_cases(cfg.train.eval.mdlm.case_manifest)
-            if cfg.train.eval.mdlm.case_manifest
-            else None
-        )
-        resolve_mdlm_eval_config(cfg, identity={"shared_cases": shared})
-    except Exception as exc:
-        # Single-process case/cap errors stay before device setup. Launched peers
-        # must initialize communication to exchange even rank-local read errors.
-        distributed = get_cpu_distributed_information().world_size > 1 or (
-            torch.distributed.is_initialized()
-            and torch.distributed.get_world_size() > 1
-        )
-        if not distributed:
-            raise
-        case_error = f"{type(exc).__name__}: {exc}"
+    shared = (
+        read_evaluation_cases(cfg.train.eval.mdlm.case_manifest)
+        if cfg.train.eval.mdlm.case_manifest
+        else None
+    )
+    resolve_mdlm_eval_config(cfg, identity={"shared_cases": shared})
     OmegaConf.set_readonly(cfg, True)
     objective = "mdlm"
     project = cfg.train.output_dir
@@ -351,81 +285,67 @@ def run_training(cfg: DictConfig) -> None:
         if precision is not None
         else _maybe_get_accelerator()
     )
-    _raise_rank_errors(case_error, accelerator, "MDLM preflight failed")
     is_main = accelerator.is_main_process if accelerator else True
     printer = accelerator.print if accelerator else print
 
     decoder = None
-    preflight_error = None
-    try:
-        device = accelerator.device if accelerator else torch.device("cpu")
-        effective_precision = accelerator.mixed_precision if accelerator else "no"
-        requested_precision = cfg.train.get("mixed_precision")
-        if effective_precision not in {"no", "fp16", "bf16"} or (
-            requested_precision is not None
-            and requested_precision != effective_precision
-        ):
-            raise ValueError("Unsupported requested/effective MDLM precision")
-        if effective_precision == "fp16" and device.type != "cuda":
-            raise ValueError("MDLM fp16 precision requires CUDA")
-        if effective_precision == "bf16" and (
-            device.type not in {"cpu", "cuda"}
-            or (device.type == "cuda" and not torch.cuda.is_bf16_supported())
-        ):
-            raise ValueError("MDLM bf16 precision is unsupported on this device")
-        codebook = load_codebook(
-            preset=cfg.model.codebook.get("preset"),
-            path=cfg.model.codebook.get("path"),
-        )
-        codebook_size = codebook.shape[0]
-        mdlm_identity = validate_mdlm_sources(
-            train_sources,
-            _parse_eval_configs(cfg),
-            codebook=codebook,
-            split_manifest=cfg.data.get("split_manifest"),
-            case_manifest=cfg.train.eval.mdlm.case_manifest,
-        )
-        runtime: dict[str, Any] = {
-            "effective_precision": effective_precision,
-            "mdlm_identity": mdlm_identity,
-        }
-        mdlm_eval = resolve_mdlm_eval_config(cfg, identity=mdlm_identity)
-    except Exception as exc:
-        preflight_error = f"{type(exc).__name__}: {exc}"
-    _raise_rank_errors(preflight_error, accelerator, "MDLM preflight failed")
+    device = accelerator.device if accelerator else torch.device("cpu")
+    effective_precision = accelerator.mixed_precision if accelerator else "no"
+    requested_precision = cfg.train.get("mixed_precision")
+    if effective_precision not in {"no", "fp16", "bf16"} or (
+        requested_precision is not None and requested_precision != effective_precision
+    ):
+        raise ValueError("Unsupported requested/effective MDLM precision")
+    if effective_precision == "fp16" and device.type != "cuda":
+        raise ValueError("MDLM fp16 precision requires CUDA")
+    if effective_precision == "bf16" and (
+        device.type not in {"cpu", "cuda"}
+        or (device.type == "cuda" and not torch.cuda.is_bf16_supported())
+    ):
+        raise ValueError("MDLM bf16 precision is unsupported on this device")
+    codebook = load_codebook(
+        preset=cfg.model.codebook.get("preset"),
+        path=cfg.model.codebook.get("path"),
+    )
+    codebook_size = codebook.shape[0]
+    mdlm_identity = validate_mdlm_sources(
+        train_sources,
+        _parse_eval_configs(cfg),
+        codebook=codebook,
+        split_manifest=cfg.data.get("split_manifest"),
+        case_manifest=cfg.train.eval.mdlm.case_manifest,
+    )
+    runtime: dict[str, Any] = {
+        "effective_precision": effective_precision,
+        "mdlm_identity": mdlm_identity,
+    }
+    mdlm_eval = resolve_mdlm_eval_config(cfg, identity=mdlm_identity)
+    train_loader, eval_loaders = _build_dataloaders(
+        cfg,
+        identity=mdlm_identity,
+    )
+    model = build_model(cfg, codebook=codebook)
+    if mdlm_eval.generation.enabled and mdlm_eval.generation.decode:
+        from stok.utils.sampling import inference_context
 
-    try:
-        train_loader, eval_loaders = _build_dataloaders(
-            cfg,
-            identity=mdlm_identity,
-        )
-        model = build_model(cfg, codebook=codebook)
-        if mdlm_eval.generation.enabled and mdlm_eval.generation.decode:
-            from stok.utils.sampling import inference_context
-
-            with inference_context(model):
-                decoder = load_pretrained_decoder(
-                    preset=cfg.model.decoder.get("preset")
-                    or cfg.model.codebook.get("preset")
-                    or "base",
-                    path=cfg.model.decoder.get("path"),
-                    device=accelerator.device if accelerator else "cpu",
-                    freeze=True,
-                    progress=is_main,
-                )
-                validate_mdlm_decoder(
-                    decoder, codebook, mdlm_identity["codebook_sha256"]
-                )
-        optimizer = AdamW(
-            model.parameters(),
-            lr=cfg.train.lr,
-            betas=(cfg.train.adam_beta1, cfg.train.adam_beta2),
-            eps=cfg.train.adam_eps,
-            weight_decay=cfg.train.weight_decay,
-        )
-    except Exception as exc:
-        preflight_error = f"{type(exc).__name__}: {exc}"
-    _raise_rank_errors(preflight_error, accelerator, "MDLM preflight failed")
+        with inference_context(model):
+            decoder = load_pretrained_decoder(
+                preset=cfg.model.decoder.get("preset")
+                or cfg.model.codebook.get("preset")
+                or "base",
+                path=cfg.model.decoder.get("path"),
+                device=accelerator.device if accelerator else "cpu",
+                freeze=True,
+                progress=is_main,
+            )
+            validate_mdlm_decoder(decoder, codebook, mdlm_identity["codebook_sha256"])
+    optimizer = AdamW(
+        model.parameters(),
+        lr=cfg.train.lr,
+        betas=(cfg.train.adam_beta1, cfg.train.adam_beta2),
+        eps=cfg.train.adam_eps,
+        weight_decay=cfg.train.weight_decay,
+    )
 
     if (
         accelerator
@@ -498,95 +418,53 @@ def run_training(cfg: DictConfig) -> None:
     resume_payload = None
     progress = None
     resume_stream = None
-    resume_error = None
-    try:
-        signature = resume_signature(
-            cfg,
-            codebook=codebook,
+    signature = resume_signature(
+        cfg,
+        codebook=codebook,
+        accelerator=accelerator,
+        identity=mdlm_identity,
+    )
+    runtime["execution"] = signature["execution"]
+    if cfg.train.get("resume_from"):
+        resume_payload = read_training_checkpoint(Path(cfg.train.resume_from))
+        validate_resume_signature(resume_payload, signature)
+        progress = restore_training_state(
+            resume_payload,
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
             accelerator=accelerator,
-            identity=mdlm_identity,
         )
-        runtime.update(
-            execution=signature["execution"],
-            components={
-                "objective": "mdlm",
-                "model": "stok_mdlm",
-                "sequence_tokenizer": "native",
-                "structure_representation": "frozen_vq",
-                "optimizer": "adamw",
-                "scheduler": cfg.train.scheduler,
-            },
+        cursor = progress["batches_in_epoch"]
+        if cursor > len(train_loader) or (
+            cursor != len(train_loader) and cursor % grad_accum_steps
+        ):
+            raise ValueError(
+                "Resume cursor is not a completed local accumulation boundary"
+            )
+        resume_stream, _ = epoch_iterator(
+            train_loader,
+            epoch=progress["epoch"],
+            consumed=cursor,
+            seed=seed,
+            rank=accelerator.process_index if accelerator else 0,
+            loader_state=progress["loader_generator_state"],
         )
-        if decoder is not None:
-            runtime["components"]["decoder"] = "geometric"
-        if cfg.train.get("resume_from"):
-            resume_payload = read_training_checkpoint(Path(cfg.train.resume_from))
-            validate_resume_signature(resume_payload, signature)
-            progress = restore_training_state(
-                resume_payload,
-                model=model,
-                optimizer=optimizer,
-                scheduler=scheduler,
-                accelerator=accelerator,
-            )
-            if progress["global_step"] > max_steps:
-                raise ValueError("Resume counter exceeds original update budget")
-            cursor = progress["batches_in_epoch"]
-            if cursor > len(train_loader) or (
-                cursor != len(train_loader) and cursor % grad_accum_steps
-            ):
-                raise ValueError(
-                    "Resume cursor is not a completed local accumulation boundary"
-                )
-            resume_stream, _ = epoch_iterator(
-                train_loader,
-                epoch=progress["epoch"],
-                consumed=cursor,
-                seed=seed,
-                rank=accelerator.process_index if accelerator else 0,
-                loader_state=progress["loader_generator_state"],
-            )
-    except Exception as exc:
-        resume_error = f"{type(exc).__name__}: {exc}"
-    _raise_rank_errors(resume_error, accelerator, "Resume preflight failed")
 
-    output_error = None
     if is_main:
-        try:
-            _ensure_dirs(list(io_dirs.values()))
-        except Exception as exc:
-            output_error = f"{type(exc).__name__}: {exc}"
-    _raise_rank_errors(output_error, accelerator, "Creating project directories failed")
-    wb = None
-    logging_error = None
-    try:
-        wb = _maybe_init_wandb(
-            cfg,
-            is_main_process=is_main,
-            logs_dir=io_dirs["logs"],
-            resume_payload=resume_payload,
-        )
-    except Exception as exc:
-        logging_error = f"{type(exc).__name__}: {exc}"
-    _raise_rank_errors(logging_error, accelerator, "W&B initialization failed")
-    output_error = None
+        _ensure_dirs(list(io_dirs.values()))
+    wb = _maybe_init_wandb(
+        cfg,
+        is_main_process=is_main,
+        logs_dir=io_dirs["logs"],
+        resume_payload=resume_payload,
+    )
     if is_main:
-        try:
-            _save_config_snapshot(cfg, io_dirs["configs"] / "run.yaml")
-            OmegaConf.save(
-                authored, io_dirs["configs"] / "authored.yaml", resolve=False
-            )
-            OmegaConf.save(
-                OmegaConf.create(runtime), io_dirs["configs"] / "runtime.yaml"
-            )
-        except Exception as exc:
-            output_error = f"{type(exc).__name__}: {exc}"
-    _raise_rank_errors(output_error, accelerator, "Saving configuration failed")
+        _save_config_snapshot(cfg, io_dirs["configs"] / "run.yaml")
+    # Only the main process writes checkpoints, and only it knows a fresh run's ID.
     wandb_run_id = getattr(getattr(wb, "run", None), "id", None) or (
         resume_payload["wandb_run_id"] if resume_payload else None
     )
-    if accelerator:
-        wandb_run_id = gather_object([wandb_run_id])[0]
 
     # train loop
     model.train()
@@ -603,27 +481,20 @@ def run_training(cfg: DictConfig) -> None:
         console_enabled = bool(console_cfg.get("enabled", True))
     # console progbar renders to stdout only, text lines are also logged separately to file
     log_file_handle = None
-    output_error = None
     if is_main:
-        try:
-            log_file_handle = (io_dirs["logs"] / "train.log").open(
-                "a", encoding="utf-8"
-            )
+        log_file_handle = (io_dirs["logs"] / "train.log").open("a", encoding="utf-8")
+        print(
+            f"Training started. Objective: {objective}",
+            file=log_file_handle,
+            flush=True,
+        )
+        print("\n".join(mdlm_startup), file=log_file_handle, flush=True)
+        if resume_payload:
             print(
-                f"Training started. Objective: {objective}",
+                f"Resumed from checkpoint step {global_step}",
                 file=log_file_handle,
                 flush=True,
             )
-            print("\n".join(mdlm_startup), file=log_file_handle, flush=True)
-            if resume_payload:
-                print(
-                    f"Resume/rollback: checkpoint step {global_step}; remote history watermark {getattr(wb, 'watermark', -1)}",
-                    file=log_file_handle,
-                    flush=True,
-                )
-        except Exception as exc:
-            output_error = f"{type(exc).__name__}: {exc}"
-    _raise_rank_errors(output_error, accelerator, "Opening training log failed")
     console = ConsoleLogger(
         total_steps=max_steps,
         initial_step=global_step,
@@ -674,48 +545,34 @@ def run_training(cfg: DictConfig) -> None:
     world_size = accelerator.num_processes if accelerator else 1
     optimizer.zero_grad(set_to_none=True)
     while global_step < max_steps and (epoch_limit is None or epoch < int(epoch_limit)):
-        replay_error = None
-        try:
-            if progress:
-                stream = resume_stream
-                restore_rng_state(progress["rng"])
-                progress = None
-                resume_stream = None
-            else:
-                stream, loader_generator_state = epoch_iterator(
-                    train_loader,
-                    epoch=epoch,
-                    consumed=0,
-                    seed=seed,
-                    rank=accelerator.process_index if accelerator else 0,
-                )
-        except Exception as exc:
-            replay_error = f"{type(exc).__name__}: {exc}"
-        _raise_rank_errors(replay_error, accelerator, "Replaying training data failed")
+        if progress:
+            stream = resume_stream
+            restore_rng_state(progress["rng"])
+            progress = None
+            resume_stream = None
+        else:
+            stream, loader_generator_state = epoch_iterator(
+                train_loader,
+                epoch=epoch,
+                consumed=0,
+                seed=seed,
+                rank=accelerator.process_index if accelerator else 0,
+            )
         resumed_batches = batches_in_pass
         updates_before_pass = global_step
         eligible_windows_in_pass = 0
-        for window in iter_windows(stream, grad_accum_steps, accelerator):
+        for window in iter_windows(stream, grad_accum_steps):
             batches_in_pass += len(window)
             current_step = global_step + 1
             current_epoch = epoch + batches_in_pass / max(1, len(train_loader))
             # Tasks prepare CPU payloads/counts; collectives remain in the driver.
-            prepare_error = None
-            try:
-                prepared = task.prepare_window(
-                    window,
-                    epoch=epoch,
-                    micro_step=micro_step,
-                    global_step=global_step,
-                    rank=accelerator.process_index if accelerator else 0,
-                    world_size=world_size,
-                )
-            except Exception as exc:
-                prepare_error = f"{type(exc).__name__}: {exc}"
-            _raise_rank_errors(
-                prepare_error,
-                accelerator,
-                "Preparing MDLM window failed",
+            prepared = task.prepare_window(
+                window,
+                epoch=epoch,
+                micro_step=micro_step,
+                global_step=global_step,
+                rank=accelerator.process_index if accelerator else 0,
+                world_size=world_size,
             )
             window = prepared.batches
             counts = prepared.counts.to(device)
@@ -737,30 +594,23 @@ def run_training(cfg: DictConfig) -> None:
                     else nullcontext()
                 )
                 with sync:
-                    error = None
-                    try:
-                        result = task.forward(
-                            model, batch, device=device, global_step=global_step
-                        )
-                        # Normalize the weighted diffusion sum over the full global window.
-                        losses = iter(result.loss_sums.items())
-                        name, numerator = next(losses)
-                        loss = numerator * (
+                    result = task.forward(
+                        model, batch, device=device, global_step=global_step
+                    )
+                    # Normalize the weighted diffusion sum over the full global window.
+                    losses = iter(result.loss_sums.items())
+                    name, numerator = next(losses)
+                    loss = numerator * (
+                        world_size / denominators[name] if denominators[name] else 0.0
+                    )
+                    for name, numerator in losses:
+                        loss = loss + numerator * (
                             world_size / denominators[name]
                             if denominators[name]
                             else 0.0
                         )
-                        for name, numerator in losses:
-                            loss = loss + numerator * (
-                                world_size / denominators[name]
-                                if denominators[name]
-                                else 0.0
-                            )
-                        if not torch.isfinite(loss):
-                            raise FloatingPointError("Nonfinite training loss")
-                    except Exception as exc:
-                        error = f"{type(exc).__name__}: {exc}"
-                    _raise_rank_errors(error, accelerator, "Training forward failed")
+                    if not torch.isfinite(loss):
+                        raise FloatingPointError("Nonfinite training loss")
                     if accelerator:
                         accelerator.backward(loss)
                     else:
@@ -826,35 +676,28 @@ def run_training(cfg: DictConfig) -> None:
                     run_denoising=denoising_due,
                     run_generation=generation_due,
                 )
-                summary_error = None
                 if is_main:
-                    try:
-                        summaries = io_dirs["logs"] / "evaluations"
-                        summaries.mkdir(parents=True, exist_ok=True)
-                        (summaries / f"step-{current_step}.json").write_text(
-                            json.dumps(
-                                {
-                                    "global_step": current_step,
-                                    # Enabled evaluation requires frozen cases.
-                                    "shared_cases_sha256": cast(
-                                        dict, mdlm_identity["shared_cases"]
-                                    )["shared_cases_sha256"],
-                                    "settings": OmegaConf.to_container(
-                                        mdlm_eval, resolve=True
-                                    ),
-                                    "coverage": coverage,
-                                    "metrics": all_eval_metrics,
-                                },
-                                sort_keys=True,
-                                allow_nan=False,
-                            )
-                            + "\n"
+                    summaries = io_dirs["logs"] / "evaluations"
+                    summaries.mkdir(parents=True, exist_ok=True)
+                    (summaries / f"step-{current_step}.json").write_text(
+                        json.dumps(
+                            {
+                                "global_step": current_step,
+                                # Enabled evaluation requires frozen cases.
+                                "shared_cases_sha256": cast(
+                                    dict, mdlm_identity["shared_cases"]
+                                )["shared_cases_sha256"],
+                                "settings": OmegaConf.to_container(
+                                    mdlm_eval, resolve=True
+                                ),
+                                "coverage": coverage,
+                                "metrics": all_eval_metrics,
+                            },
+                            sort_keys=True,
+                            allow_nan=False,
                         )
-                    except Exception as exc:
-                        summary_error = f"{type(exc).__name__}: {exc}"
-                _raise_rank_errors(
-                    summary_error, accelerator, "Publishing evaluation summary failed"
-                )
+                        + "\n"
+                    )
                 metric_logger.log_eval_all(
                     all_eval_metrics,
                     current_step,
@@ -862,9 +705,6 @@ def run_training(cfg: DictConfig) -> None:
                     compute_flops_6n(num_params, total_tokens),
                 )
 
-            _raise_rank_errors(
-                getattr(wb, "error", None), accelerator, "W&B logging failed"
-            )
             global_step += 1
             console.step(1)
             # checkpointing
@@ -889,16 +729,11 @@ def run_training(cfg: DictConfig) -> None:
                     training_state=checkpoint_state(),
                     runtime=runtime,
                 )
-                checkpoint_error = None
                 if is_main:
-                    try:
-                        with _atomic_destination(
-                            io_dirs["checkpoints"] / "latest.pt"
-                        ) as temporary:
-                            shutil.copyfile(step_path, temporary)
-                    except Exception as exc:
-                        checkpoint_error = f"{type(exc).__name__}: {exc}"
-                _raise_rank_errors(checkpoint_error, accelerator, "Checkpoint failed")
+                    with _atomic_destination(
+                        io_dirs["checkpoints"] / "latest.pt"
+                    ) as temporary:
+                        shutil.copyfile(step_path, temporary)
             if global_step >= max_steps:
                 break
         if batches_in_pass == 0:

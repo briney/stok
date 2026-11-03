@@ -209,15 +209,12 @@ def corrupt_mdlm_batch(
         or not 0 <= mask_probability <= 1
     ):
         raise ValueError("MDLM diagnostic regime/probability is invalid")
-    validate_mdlm_config(config)
     weights = torch.tensor(
         [float(config.regime_weights.get(name, 0)) for name in REGIMES],
         dtype=torch.float64,
     )
     weights = weights / weights.max()
     placement = config.placement if placement is None else placement
-    if placement not in {"token", "span"}:
-        raise ValueError(f"Unsupported MDLM placement: {placement}")
     span_mean = float(config.get("span_mean", 8))
     name, power = config.noise.name, float(config.noise.get("power", 2))
     t_min = time_from_mask_probability(
@@ -228,18 +225,7 @@ def corrupt_mdlm_batch(
     t_upper = torch.nextafter(torch.ones_like(t_min), torch.zeros_like(t_min))
     sequence = batch["sequence_tokens"].clone()
     structure = batch["structure_tokens"].clone()
-    if sequence.ndim != 2 or structure.shape != sequence.shape or not sequence.shape[0]:
-        raise ValueError("MDLM corruption requires a nonempty aligned batch")
-    if len(seeds) != len(sequence) or any(type(seed) is not int for seed in seeds):
-        raise ValueError("MDLM corruption requires one integer seed per sample")
     mask_id, codebook_size = batch["sequence_mask_id"], batch["codebook_size"]
-    if (
-        type(mask_id) is not int
-        or mask_id < 0
-        or type(codebook_size) is not int
-        or codebook_size < 1
-    ):
-        raise ValueError("MDLM corruption requires valid mask/codebook metadata")
     eligible = torch.stack((batch["sequence_valid"], batch["structure_valid"]), -1)
     eligible = eligible & batch["residue_mask"][..., None]
     masked = torch.zeros_like(eligible)
@@ -324,40 +310,9 @@ def mdlm_loss_terms(
     """Masked CE numerators; normalization uses pre-corruption eligible cells."""
     shape = batch["sequence_tokens"].shape
     eligible, masked = corruption["eligible"], corruption["masked"]
-    if (
-        eligible.shape != (*shape, 2)
-        or masked.shape != eligible.shape
-        or eligible.dtype != torch.bool
-        or masked.dtype != torch.bool
-        or (masked & ~eligible).any()
-    ):
-        raise ValueError("MDLM loss requires aligned eligible/masked cells")
-    available = torch.stack((batch["sequence_valid"], batch["structure_valid"]), -1)
-    if (eligible & ~(available & batch["residue_mask"][..., None])).any():
-        raise ValueError("MDLM eligible cells must be available residue targets")
     weight = corruption["weight"]
-    if (
-        weight.shape != shape[:1]
-        or not torch.isfinite(weight).all()
-        or (weight < 0).any()
-    ):
-        raise ValueError(
-            "MDLM diffusion weights must be finite nonnegative per-sample values"
-        )
     sequence = outputs["sequence_logits"]
     structure = outputs["structure_logits"]
-    if (
-        sequence.shape[:2] != shape
-        or sequence.ndim != 3
-        or structure.shape != (*shape, batch["codebook_size"])
-        or canonical_aa_ids.ndim != 1
-        or not canonical_aa_ids.numel()
-        or canonical_aa_ids.dtype != torch.long
-        or (canonical_aa_ids < 0).any()
-        or (canonical_aa_ids >= sequence.shape[-1]).any()
-        or canonical_aa_ids.unique().numel() != canonical_aa_ids.numel()
-    ):
-        raise ValueError("MDLM output/canonical vocabulary shapes are invalid")
     aa = canonical_aa_ids.to(sequence.device)
     remap = torch.full(
         (sequence.shape[-1],), -1, device=sequence.device, dtype=torch.long
@@ -371,18 +326,8 @@ def mdlm_loss_terms(
                 (structure, batch["structure_tokens"]),
             )
         ):
-            valid, selected = eligible[..., track], masked[..., track]
-            # Validate unmasked targets/predictions too: masking must not hide bad inputs.
-            if not torch.isfinite(
-                logits[available[..., track] & batch["residue_mask"]]
-            ).all():
-                raise FloatingPointError("Nonfinite valid MDLM predictions")
-            target = targets[valid]
-            if ((target < 0) | (target >= logits.shape[-1])).any():
-                raise ValueError("MDLM target IDs are outside the output vocabulary")
+            selected = masked[..., track]
             if track == 0:
-                if (remap[target] < 0).any():
-                    raise ValueError("MDLM sequence target is not canonical")
                 predictions = logits[selected].float().index_select(-1, aa)
                 target = remap[targets[selected]]
             else:

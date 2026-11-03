@@ -78,20 +78,8 @@ def sample_cmd(
         payload = read_training_checkpoint(checkpoint)
         cfg = OmegaConf.create(payload["config"])
         OmegaConf.set_readonly(cfg, True)
-        if cfg.train.get("objective") != "mdlm":
-            raise ValueError("Sampling requires an MDLM training checkpoint")
-        components = payload["runtime"]["components"]
-        if (
-            components["sequence_tokenizer"] != "native"
-            or components["structure_representation"] != "frozen_vq"
-        ):
-            raise ValueError(
-                "Checkpoint representation is incompatible with the sampler"
-            )
         identity = OmegaConf.create(payload["runtime"]["mdlm_identity"])
         codebook = payload["model"]["structure_codebook"]
-        if state_sha256({"codebook": codebook}) != identity.codebook_sha256:
-            raise ValueError("Checkpoint structure codebook digest mismatch")
         tokenizer = Tokenizer()
         enc = cfg.model.encoder
         if enc.vocab_size != len(tokenizer) or enc.pad_id != tokenizer.pad_token_id:

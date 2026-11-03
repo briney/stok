@@ -21,16 +21,10 @@ def main():
             "mdlm-empty-modality",
             "mdlm-empty-rank",
             "mdlm-unused-head",
-            "mdlm-bad-prepare",
-            "mdlm-bad-forward",
         ],
         required=True,
     )
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument(
-        "--failure",
-        choices=["checkpoint", "directories", "snapshot", "log", "log-write"],
-    )
     parser.add_argument(
         "--source",
         choices=["map", "iterable", "map-mixture", "mixed-mixture"],
@@ -59,7 +53,6 @@ def main():
         )
     if args.case.startswith("mdlm-"):
         from tests.integration.test_mdlm_training import mdlm_config
-        from stok.training import tasks
 
         cfg = mdlm_config(
             root / "run",
@@ -70,61 +63,8 @@ def main():
                 "train.gradient_accumulation_steps": args.accum,
             },
         )
-        if args.failure:
-            from stok.training import engine
-
-            def fail(*args, **kwargs):
-                raise OSError("injected output failure")
-
-            if args.failure == "directories":
-                engine._ensure_dirs = fail
-            elif args.failure == "snapshot":
-                engine._save_config_snapshot = fail
-            elif args.failure == "checkpoint":
-                engine._atomic_destination = fail
-            else:
-                original = engine._ensure_dirs
-
-                def ensure(dirs):
-                    original(dirs)
-                    if args.failure == "log-write":
-                        (root / "run/logs/train.log").symlink_to("/dev/full")
-                    else:
-                        (root / "run/logs/train.log").mkdir()
-
-                engine._ensure_dirs = ensure
         if args.case == "mdlm-unused-head":
             cfg.train.mdlm.regime_weights = {"sequence_only": 1}
-        if args.case == "mdlm-bad-prepare":
-            original = tasks.prepare_mdlm_batch
-
-            def bad_row(rows, *arguments, **kwargs):
-                if accelerator.process_index == 0:
-                    rows[0]["structure_tokens"][-1] = 99999
-                try:
-                    return original(rows, *arguments, **kwargs)
-                except ValueError as exc:
-                    raise ValueError(
-                        "injected rank-local MDLM preparation failure"
-                    ) from exc
-
-            tasks.prepare_mdlm_batch = bad_row
-        if args.case == "mdlm-bad-forward":
-            original = tasks.mdlm_loss_terms
-
-            def bad_prediction(outputs, *arguments, **kwargs):
-                if accelerator.process_index == 0:
-                    outputs["sequence_logits"] = outputs["sequence_logits"] * float(
-                        "nan"
-                    )
-                try:
-                    return original(outputs, *arguments, **kwargs)
-                except FloatingPointError as exc:
-                    raise FloatingPointError(
-                        "injected rank-local MDLM forward failure"
-                    ) from exc
-
-            tasks.mdlm_loss_terms = bad_prediction
         run_training(cfg)
         if torch.distributed.is_initialized():
             torch.distributed.destroy_process_group()

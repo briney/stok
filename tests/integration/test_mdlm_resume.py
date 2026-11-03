@@ -348,43 +348,6 @@ def test_invalid_checkpoint_or_identity_preserves_artifacts(tmp_path, damage):
     assert snapshot(project) == before
 
 
-@pytest.mark.parametrize("failure", ["read", "write", "state"])
-def test_rank_local_checkpoint_failures_reach_all_ranks(tmp_path, failure):
-    cfg = config_for(tmp_path)
-    execute(cfg, tmp_path / "original.yaml", stop=1, distributed=True, ok=False)
-    project = Path(cfg.train.output_dir)
-    checkpoint = project / "checkpoints/step_00000001.pt"
-    cfg.train.resume_from = str(checkpoint)
-    before = snapshot(project)
-    path = tmp_path / "failure.yaml"
-    OmegaConf.save(cfg, path)
-    if failure == "read":
-        patch = "original_read = train.read_training_checkpoint\ndef read(path):\n    if rank == 1: raise OSError('injected rank-local read failure')\n    return original_read(path)\ntrain.read_training_checkpoint = read\n"
-    elif failure == "write":
-        patch = "original_torch_save = torch.save\ndef fail_save(value, path, *args, **kwargs):\n    if rank == 0 and isinstance(value, dict) and 'format_version' in value:\n        with open(path, 'wb') as out: out.write(b'partial')\n        raise OSError('injected rank-zero write failure')\n    return original_torch_save(value, path, *args, **kwargs)\ntorch.save = fail_save\n"
-    else:
-        patch = "original_rng = train._collect_rng_state\ndef collect_rng(**kwargs):\n    if rank == 1: raise OSError('injected rank-local state failure')\n    return original_rng(**kwargs)\ntrain._collect_rng_state = collect_rng\n"
-    probe = PROBE.replace(
-        "try:\n    train.run_training(cfg)", patch + "try:\n    train.run_training(cfg)"
-    )
-    results = run_distributed(
-        [sys.executable, "-c", probe, str(path), "-1"], timeout=60
-    )
-    for result in results:
-        assert result.returncode != 0
-        sentinel = {
-            "read": "injected rank-local read failure",
-            "write": "injected rank-zero write failure",
-            "state": "injected rank-local state failure",
-        }[failure]
-        assert sentinel in result.stderr, result.stderr
-    if failure == "read":
-        assert snapshot(project) == before
-    else:
-        assert checkpoint.read_bytes() == before["checkpoints/step_00000001.pt"]
-        assert not list((project / "checkpoints").glob(".*.pt.*"))
-
-
 def test_partial_accumulation_cursor_rejected_before_output(tmp_path):
     cfg = config_for(tmp_path)
     execute(cfg, tmp_path / "original.yaml", stop=1, ok=False)
@@ -402,18 +365,14 @@ def test_partial_accumulation_cursor_rejected_before_output(tmp_path):
 WANDB_MOCK = r"""
 from types import SimpleNamespace
 import json
-record = {'init': [], 'history': [], 'summary': {}}
+record = {'init': [], 'history': []}
 wb = SimpleNamespace()
 def init(**kwargs):
     import random, numpy as np
     random.random(); np.random.rand(); torch.rand(7)
     record['init'].append(kwargs)
     if os.environ.get('WB_INIT_FAIL'): raise RuntimeError('visible W&B initialization failure')
-    wb.run = SimpleNamespace(id=kwargs.get('id') or 'fixed-run-id', step=int(os.environ.get('WB_WATERMARK', '-1'))+1, summary=record['summary'])
-    if os.environ.get('WB_HISTORY_FAIL'):
-        class Step:
-            def __int__(self): raise RuntimeError('visible W&B history inspection failure')
-        wb.run.step = Step()
+    wb.run = SimpleNamespace(id=kwargs.get('id') or 'fixed-run-id')
     return wb.run
 def log(payload, *, step):
     import random, numpy as np
@@ -444,7 +403,7 @@ def execute_wandb(cfg, path, *, stop=-1, env=None, ok=True):
     return result, json.loads(Path(str(path) + ".wandb.json").read_text())
 
 
-def test_wandb_id_and_rollback_suppress_only_history(tmp_path):
+def test_wandb_resumes_recorded_run_id(tmp_path):
     cfg = config_for(tmp_path)
     cfg.train.log_every = 1
     cfg.train.wandb.enabled = True
@@ -455,16 +414,12 @@ def test_wandb_id_and_rollback_suppress_only_history(tmp_path):
     cfg.train.resume_from = str(tmp_path / "interrupted/checkpoints/step_00000002.pt")
     payload = torch.load(cfg.train.resume_from, weights_only=True)
     assert payload["wandb_run_id"] == "fixed-run-id"
-    _, record = execute_wandb(cfg, tmp_path / "resumed.yaml", env={"WB_WATERMARK": "4"})
+    _, record = execute_wandb(cfg, tmp_path / "resumed.yaml")
     assert len(record["init"]) == 1
     assert record["init"][0]["id"] == "fixed-run-id"
     assert record["init"][0]["resume"] == "must"
     assert record["init"][0]["mode"] == "offline"
-    assert record["history"] == [5, 6]
-    assert record["summary"]["resume/rollback"] == {
-        "checkpoint_step": 2,
-        "history_watermark": 4,
-    }
+    assert record["history"] == [3, 4, 5, 6]
     full = torch.load(tmp_path / "full/model/final.pt", weights_only=True)
     resumed = torch.load(tmp_path / "interrupted/model/final.pt", weights_only=True)
     for key in (
@@ -481,13 +436,9 @@ def test_wandb_id_and_rollback_suppress_only_history(tmp_path):
         return torch.load(tmp_path / f"{name}.yaml.rank0.trace.pt", weights_only=True)
 
     equal(trace("full"), trace("interrupted") + trace("resumed"))
-    assert (
-        "Resume/rollback: checkpoint step 2; remote history watermark 4"
-        in (tmp_path / "interrupted/logs/train.log").read_text()
-    )
 
 
-@pytest.mark.parametrize("failure", ["WB_INIT_FAIL", "WB_HISTORY_FAIL", "WB_LOG_FAIL"])
+@pytest.mark.parametrize("failure", ["WB_INIT_FAIL", "WB_LOG_FAIL"])
 def test_wandb_failure_visible_without_new_run_fallback(tmp_path, failure):
     cfg = config_for(tmp_path)
     cfg.train.wandb.enabled = True

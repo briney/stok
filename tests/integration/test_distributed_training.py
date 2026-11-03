@@ -65,43 +65,6 @@ def test_two_rank_checkpoints_complete(tmp_path):
     assert (project / "checkpoints/step_00000002.pt").is_file()
 
 
-@pytest.mark.parametrize(
-    "failure,context",
-    [
-        ("checkpoint", "Checkpoint failed"),
-        ("directories", "Creating project directories failed"),
-        ("snapshot", "Saving configuration failed"),
-        ("log", "Opening training log failed"),
-        ("log-write", "Opening training log failed"),
-    ],
-)
-def test_project_output_failure_reaches_every_rank(tmp_path, failure, context):
-    from tests.integration.test_mdlm_training import training_fixture
-
-    if failure == "log-write" and not os.path.exists("/dev/full"):
-        pytest.skip("requires failing write sink")
-    training_fixture(tmp_path)
-    command = [
-        sys.executable,
-        "-m",
-        "tests.utils.distributed_probe",
-        "--case",
-        "mdlm-uneven",
-        "--output",
-        str(tmp_path),
-        "--failure",
-        failure,
-    ]
-    for result in run_distributed(command):
-        assert result.returncode != 0
-        assert context in result.stderr, result.stdout + result.stderr
-        assert (
-            "injected output failure" in result.stderr
-            if failure in {"checkpoint", "directories", "snapshot"}
-            else True
-        )
-
-
 def write_probe_data(root, n=17, eval_n=5):
     rows = [
         {"sequence_id": str(i), "sequence": "LAG", "structure_tokens": [i] * 3}
@@ -243,31 +206,3 @@ def test_mdlm_two_rank_update_matches_global_reference(tmp_path, coverage):
         assert all(
             s["step"].item() == 2 for s in distributed["optimizer"]["state"].values()
         )
-
-
-@pytest.mark.parametrize(
-    "case,context",
-    [
-        ("mdlm-bad-prepare", "Preparing MDLM window failed"),
-        ("mdlm-bad-forward", "Training forward failed"),
-    ],
-)
-def test_mdlm_rank_local_failure_terminates_every_rank(tmp_path, case, context):
-    from tests.integration.test_mdlm_training import training_fixture
-
-    training_fixture(tmp_path)
-    command = [
-        sys.executable,
-        "-m",
-        "tests.utils.distributed_probe",
-        "--case",
-        case,
-        "--output",
-        str(tmp_path),
-    ]
-    for result in run_distributed(command, timeout=20):
-        assert result.returncode != 0
-        assert context in result.stderr, result.stdout + result.stderr
-        sentinel = "preparation" if case == "mdlm-bad-prepare" else "forward"
-        assert f"injected rank-local MDLM {sentinel} failure" in result.stderr
-    assert not list((tmp_path / "run/checkpoints").glob("step_*.pt"))

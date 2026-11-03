@@ -306,10 +306,10 @@ modalities and coordinates aligned; unavailable labels keep their slots.
 
 Choose packaged groups with `model=mdlm_150m` or `train=mdlm_pilot`. Defaults use
 paired MDLM and the 150M group; the pilot selects BF16 and frozen evaluation.
-Only paired MDLM training is supported. Obsolete names, standalone MLM/codebook/
-FAPE settings, unsupported initialization, unknown nested fields, and inactive
-component parameters are rejected before devices, artifacts, W&B, or outputs.
-`train.pretrained_encoder` requires a future supported adapter.
+Only paired MDLM training is supported. Unknown or obsolete keys, including
+typos in YAML overlays, are rejected before devices, artifacts, W&B, or outputs.
+`train.mdlm.span_mean` is read only for span placement, and `noise.power` only
+for the power schedule.
 
 Configuration precedence, from lowest to highest, is:
 
@@ -321,8 +321,8 @@ Configuration precedence, from lowest to highest, is:
 Section files contain their contents without a `model`/`train`/`data` wrapper.
 Overlays cannot contain Hydra `defaults` lists. Dictionaries merge recursively
 and lists replace lists. Native Hydra additions, replacements, deletions and
-OmegaConf interpolations remain available for supported fields. Dynamic source
-and evaluation case names have validated field contracts.
+OmegaConf interpolations remain available for supported fields. Named sources
+accept only `path`, `load_coords`, and `fraction` (train) or `batch_size` (eval).
 
 ```yaml
 data:
@@ -356,11 +356,9 @@ one weighted eligible-token denominator across modalities/ranks/full windows.
 
 The engine resolves and freezes a private scientific configuration. The supplied
 configuration, including read-only inputs and authored interpolations, stays
-unchanged. Each run writes `configs/authored.yaml` (unresolved authored choices),
-`configs/run.yaml` (resolved scientific settings, including evaluation defaults),
-and `configs/runtime.yaml` (components, data identity, execution and effective
-precision). Checkpoints contain scientific `config` and derived `runtime`
-separately. Resume requires the same training configuration, data identity, world
+unchanged. Each run writes `configs/run.yaml` (resolved settings, including
+evaluation defaults). Checkpoints contain the resolved `config` and a derived
+`runtime` (data identity, execution and effective precision). Resume requires the same training configuration, data identity, world
 size, precision and device type; package upgrades and code edits do not block it.
 `residues_seen` counts globally consumed biological residues, including empty
 supervision; `executed_positions` counts globally forwarded padded positions,

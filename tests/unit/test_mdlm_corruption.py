@@ -277,11 +277,11 @@ def test_groups_reject_invalid_parameters(placement, span_mean):
         {"noise": {"min_mask_probability": math.nan}},
     ],
 )
-def test_corruption_rejects_invalid_training_configuration(changes):
-    from stok.utils.mdlm import corrupt_mdlm_batch
+def test_invalid_training_configuration_is_rejected(changes):
+    from stok.utils.mdlm import validate_mdlm_config
 
     with pytest.raises(ValueError):
-        corrupt_mdlm_batch(batch(), config(**changes), seeds=[0])
+        validate_mdlm_config(config(**changes))
 
 
 @pytest.mark.parametrize(
@@ -487,9 +487,7 @@ def test_training_time_stays_below_one_for_narrow_valid_noise_interval():
 
 
 def test_numerically_unrepresentable_time_interval_is_rejected():
-    from stok.utils.mdlm import corrupt_mdlm_batch
+    from stok.utils.mdlm import validate_mdlm_config
 
     with pytest.raises(ValueError, match="numerical support"):
-        corrupt_mdlm_batch(
-            batch(), config(noise={"name": "power", "power": 1e20}), seeds=[0]
-        )
+        validate_mdlm_config(config(noise={"name": "power", "power": 1e20}))

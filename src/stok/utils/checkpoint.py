@@ -9,7 +9,6 @@ import tempfile
 
 import numpy as np
 import torch
-from accelerate.utils import gather_object
 from omegaconf import OmegaConf
 
 from stok.data.dataset import set_dataset_epoch
@@ -61,12 +60,6 @@ def atomic_destination(path):
         Path(temporary).unlink(missing_ok=True)
 
 
-def rank_errors(error, accelerator, context):
-    errors = gather_object([error]) if accelerator else [error]
-    if any(errors):
-        raise RuntimeError(f"{context}: {errors}")
-
-
 def scientific_config(cfg):
     """Project the training trajectory, permitting evaluation/output overrides."""
     config = OmegaConf.to_container(cfg, resolve=True)
@@ -85,7 +78,6 @@ def scientific_config(cfg):
         train.pop(key, None)
     data.pop("eval", None)
     config["model"].pop("decoder", None)
-    config.pop("print_model_summary", None)
     return config
 
 
@@ -172,26 +164,3 @@ def epoch_iterator(loader, *, epoch, consumed, seed, rank, loader_state=None):
                 "Resume cursor exceeds the reconstructed local epoch"
             ) from exc
     return stream, start_state
-
-
-class ResumeWandb:
-    """Suppress duplicate remote history without changing the training cursor."""
-
-    def __init__(self, wandb, watermark):
-        self.wandb = wandb
-        self.watermark = watermark
-        self.error = None
-
-    @property
-    def run(self):
-        return self.wandb.run
-
-    def log(self, payload, *, step):
-        if step > self.watermark:
-            rng = collect_rng_state()
-            try:
-                self.wandb.log(payload, step=step)
-            except Exception as exc:
-                self.error = f"{type(exc).__name__}: {exc}"
-            finally:
-                restore_rng_state(rng)
