@@ -11,8 +11,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from stok.data.mdlm import CANONICAL_AA, MDLMBatch, prepare_mdlm_batch
-from stok.training.engine import _get_model_device, _unwrap_model
-from stok.eval.metrics.structure import LDDTMetric, RMSDMetric, TMScoreMetric
+from stok.eval.metrics.structure import STRUCTURE_SCORES
 from stok.utils.decoding import decode_token_aligned_coords
 from stok.utils.mdlm import (
     MDLMCorruption,
@@ -143,11 +142,11 @@ def validate_mdlm_decoder(decoder, codebook, expected_digest: str) -> None:
 
 
 def _geometry_scores(state, predicted, batch):
-    for index, metric in enumerate((LDDTMetric(), RMSDMetric(), TMScoreMetric())):
+    for index, metric in enumerate(STRUCTURE_SCORES.values()):
         score = (
             None
             if batch["coords"] is None
-            else metric.score(
+            else metric(
                 predicted,
                 batch["coords"],
                 batch["residue_mask"] & batch["structure_valid"],
@@ -198,8 +197,9 @@ def evaluate_mdlm(
     settings = resolve_mdlm_eval_config(cfg, identity=identity)
     run_denoising = run_denoising and settings.enabled
     run_generation = run_generation and settings.generation.enabled
-    eval_model = _unwrap_model(model, accelerator)
-    device = _get_model_device(model, accelerator)
+    # Tests evaluate plain modules; training always passes its accelerator.
+    eval_model = accelerator.unwrap_model(model) if accelerator else model
+    device = accelerator.device if accelerator else next(model.parameters()).device
     model_codebook_size = getattr(eval_model, "codebook_size", None)
     if type(model_codebook_size) is not int or model_codebook_size < 1:
         raise ValueError("MDLM evaluation codebook_size must be a positive integer")
@@ -513,7 +513,7 @@ def evaluate_mdlm(
                             regime.startswith("joint") and not joint_qualified
                         ):
                             continue
-                        for column, score in enumerate(("lddt", "rmsd", "tm")):
+                        for column, score in enumerate(STRUCTURE_SCORES):
                             total, count, skipped = geometry[index, column].tolist()
                             prefix = f"{name}/structure/{score}"
                             metrics.update(

@@ -2,7 +2,6 @@
 defaults: [base@train, _self_]
 
 train:
-  objective: mdlm
   mixed_precision: bf16
   max_steps: 10000
   warmup_steps: 500

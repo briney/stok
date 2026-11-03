@@ -6,7 +6,6 @@ import json
 import math
 import os
 import shutil
-import sys
 from pathlib import Path
 from typing import Any, Optional, cast
 
@@ -21,13 +20,11 @@ from stok.data.loaders import (
     _parse_train_configs,
 )
 from stok.config import validate_training_config
-from stok.eval import MetricLogger
 from stok.models.decoder import load_pretrained_decoder
 from stok.models.build import build_model
 from stok.data.mdlm import validate_mdlm_sources
 from stok.utils.codebook import load_codebook
-from stok.utils.console import ConsoleLogger
-from stok.utils.flops import compute_flops_6n, count_parameters
+from tqdm import tqdm
 from stok.training.tasks import MDLMTask
 from stok.utils.checkpoint import (
     atomic_destination as _atomic_destination,
@@ -51,20 +48,6 @@ def _maybe_get_accelerator(precision=None):
         )
     accelerator.gradient_accumulation_steps = 1
     return accelerator
-
-
-def _get_model_device(model: nn.Module, accelerator) -> torch.device:
-    """
-    Resolve the device to place tensors on, compatible with both plain nn.Module
-    and models wrapped by Accelerate/DDP.
-    """
-    if accelerator is not None:
-        return accelerator.device
-    # fall back to the device of the first parameter (or CPU if model is empty)
-    try:
-        return next(model.parameters()).device
-    except StopIteration:
-        return torch.device("cpu")
 
 
 def _build_scheduler(
@@ -136,10 +119,6 @@ def _save_config_snapshot(cfg: DictConfig, dst_file: Path):
         f.write(OmegaConf.to_yaml(cfg, resolve=True))
 
 
-def _unwrap_model(model: nn.Module, accelerator) -> nn.Module:
-    return accelerator.unwrap_model(model) if accelerator is not None else model
-
-
 def _save_checkpoint(
     path: Path,
     *,
@@ -158,17 +137,15 @@ def _save_checkpoint(
     scaler = getattr(accelerator, "scaler", None)
     rank_state = {
         **training_state["local"],
-        "rank": accelerator.process_index if accelerator else 0,
-        "rng": _collect_rng_state(
-            device=accelerator.device if accelerator else torch.device("cpu")
-        ),
+        "rank": accelerator.process_index,
+        "rng": _collect_rng_state(device=accelerator.device),
         "scaler": scaler.state_dict() if scaler is not None else None,
     }
-    rank_states = gather_object([rank_state]) if accelerator else [rank_state]
-    if accelerator is None or accelerator.is_main_process:
+    rank_states = gather_object([rank_state])
+    if accelerator.is_main_process:
         payload = {
             "format_version": 4,
-            "model": _unwrap_model(model, accelerator).state_dict(),
+            "model": accelerator.unwrap_model(model).state_dict(),
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
             "global_step": int(global_step),
@@ -221,6 +198,22 @@ def _maybe_init_wandb(
     return wandb
 
 
+def _log_evaluations(all_metrics, *, step, epoch, flops, wb, log_file):
+    for name, metrics in all_metrics.items():
+        msg = f"eval/{name} | step {step} | epoch {epoch:.3f} | flops {flops:.3e}"
+        msg += "".join(
+            f" | {key} {value:.4f}" for key, value in sorted(metrics.items())
+        )
+        tqdm.write(msg)
+        if log_file is not None:
+            print(msg + f" (flops_actual={flops})", file=log_file, flush=True)
+        if wb is not None:
+            payload = {f"eval/{name}/{key}": float(v) for key, v in metrics.items()}
+            payload[f"eval/{name}/epoch"] = float(epoch)
+            payload[f"eval/{name}/train_flops"] = float(flops)
+            wb.log(payload, step=step)
+
+
 def iter_windows(loader, size: int):
     if size < 1:
         raise ValueError("Accumulation window size must be positive")
@@ -252,7 +245,6 @@ def run_training(cfg: DictConfig) -> None:
     )
     resolve_mdlm_eval_config(cfg, identity={"shared_cases": shared})
     OmegaConf.set_readonly(cfg, True)
-    objective = "mdlm"
     project = cfg.train.output_dir
     if not isinstance(project, str) or not project.strip():
         raise ValueError("MDLM requires a nonempty unique train.output_dir")
@@ -285,12 +277,12 @@ def run_training(cfg: DictConfig) -> None:
         if precision is not None
         else _maybe_get_accelerator()
     )
-    is_main = accelerator.is_main_process if accelerator else True
-    printer = accelerator.print if accelerator else print
+    is_main = accelerator.is_main_process
+    printer = accelerator.print
 
     decoder = None
-    device = accelerator.device if accelerator else torch.device("cpu")
-    effective_precision = accelerator.mixed_precision if accelerator else "no"
+    device = accelerator.device
+    effective_precision = accelerator.mixed_precision
     requested_precision = cfg.train.get("mixed_precision")
     if effective_precision not in {"no", "fp16", "bf16"} or (
         requested_precision is not None and requested_precision != effective_precision
@@ -334,7 +326,7 @@ def run_training(cfg: DictConfig) -> None:
                 or cfg.model.codebook.get("preset")
                 or "base",
                 path=cfg.model.decoder.get("path"),
-                device=accelerator.device if accelerator else "cpu",
+                device=accelerator.device,
                 freeze=True,
                 progress=is_main,
             )
@@ -347,12 +339,7 @@ def run_training(cfg: DictConfig) -> None:
         weight_decay=cfg.train.weight_decay,
     )
 
-    if (
-        accelerator
-        and is_main
-        and accelerator.num_processes == 1
-        and torch.cuda.device_count() > 1
-    ):
+    if is_main and accelerator.num_processes == 1 and torch.cuda.device_count() > 1:
         printer(
             "Multiple CUDA devices detected but only one process is active. "
             "Launch multi-GPU with: accelerate launch -m stok.train <overrides>"
@@ -361,10 +348,9 @@ def run_training(cfg: DictConfig) -> None:
     io_dirs = _resolve_project_dirs(cfg)
 
     # Count trainable parameters for FLOPs tracking (6N approximation)
-    num_params = count_parameters(model, trainable_only=True)
+    num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     if is_main:
         printer(f"Trainable parameters: {num_params:,}")
-        device = accelerator.device if accelerator else torch.device("cpu")
         hardware = (
             torch.cuda.get_device_name(device) if device.type == "cuda" else "CPU"
         )
@@ -408,12 +394,7 @@ def run_training(cfg: DictConfig) -> None:
         total_steps=max_steps,
     )
 
-    # prepare with Accelerate (if available)
-    if accelerator:
-        model, optimizer = accelerator.prepare(model, optimizer)
-    else:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model.to(device)
+    model, optimizer = accelerator.prepare(model, optimizer)
 
     resume_payload = None
     progress = None
@@ -447,7 +428,7 @@ def run_training(cfg: DictConfig) -> None:
             epoch=progress["epoch"],
             consumed=cursor,
             seed=seed,
-            rank=accelerator.process_index if accelerator else 0,
+            rank=accelerator.process_index,
             loader_state=progress["loader_generator_state"],
         )
 
@@ -475,16 +456,13 @@ def run_training(cfg: DictConfig) -> None:
     grad_clip = float(cfg.train.get("max_grad_norm", 1.0))
 
     # console output (main process only
-    console_cfg = cfg.train.get("console")
-    console_enabled = True
-    if console_cfg is not None:
-        console_enabled = bool(console_cfg.get("enabled", True))
+    console_enabled = bool(cfg.train.get("console", {}).get("enabled", True))
     # console progbar renders to stdout only, text lines are also logged separately to file
     log_file_handle = None
     if is_main:
         log_file_handle = (io_dirs["logs"] / "train.log").open("a", encoding="utf-8")
         print(
-            f"Training started. Objective: {objective}",
+            "Training started.",
             file=log_file_handle,
             flush=True,
         )
@@ -495,18 +473,12 @@ def run_training(cfg: DictConfig) -> None:
                 file=log_file_handle,
                 flush=True,
             )
-    console = ConsoleLogger(
-        total_steps=max_steps,
-        initial_step=global_step,
-        is_main=is_main,
-        enabled=console_enabled,
-        file=sys.stdout,
-    )
-    metric_logger = MetricLogger(
-        console=console,
-        wandb=wb,
-        log_file=log_file_handle,
-        is_main=is_main,
+    progress_bar = tqdm(
+        total=max_steps,
+        initial=global_step,
+        unit="step",
+        dynamic_ncols=True,
+        disable=not (is_main and console_enabled),
     )
 
     # FLOPs use globally forwarded padded positions.
@@ -541,8 +513,7 @@ def run_training(cfg: DictConfig) -> None:
         }
 
     epoch_limit = cfg.train.get("max_epochs")
-    device = _get_model_device(model, accelerator)
-    world_size = accelerator.num_processes if accelerator else 1
+    world_size = accelerator.num_processes
     optimizer.zero_grad(set_to_none=True)
     while global_step < max_steps and (epoch_limit is None or epoch < int(epoch_limit)):
         if progress:
@@ -556,7 +527,7 @@ def run_training(cfg: DictConfig) -> None:
                 epoch=epoch,
                 consumed=0,
                 seed=seed,
-                rank=accelerator.process_index if accelerator else 0,
+                rank=accelerator.process_index,
             )
         resumed_batches = batches_in_pass
         updates_before_pass = global_step
@@ -571,13 +542,12 @@ def run_training(cfg: DictConfig) -> None:
                 epoch=epoch,
                 micro_step=micro_step,
                 global_step=global_step,
-                rank=accelerator.process_index if accelerator else 0,
+                rank=accelerator.process_index,
                 world_size=world_size,
             )
             window = prepared.batches
             counts = prepared.counts.to(device)
-            if accelerator:
-                counts = accelerator.reduce(counts, reduction="sum")
+            counts = accelerator.reduce(counts, reduction="sum")
             denominators = task.denominators(counts)
             accounting = task.consume_counts(counts)
             total_residues += accounting.residues_seen
@@ -590,7 +560,7 @@ def run_training(cfg: DictConfig) -> None:
             for micro_index, batch in enumerate(window):
                 sync = (
                     accelerator.no_sync(model)
-                    if accelerator and micro_index < len(window) - 1
+                    if micro_index < len(window) - 1
                     else nullcontext()
                 )
                 with sync:
@@ -611,34 +581,25 @@ def run_training(cfg: DictConfig) -> None:
                         )
                     if not torch.isfinite(loss):
                         raise FloatingPointError("Nonfinite training loss")
-                    if accelerator:
-                        accelerator.backward(loss)
-                    else:
-                        loss.backward()
+                    accelerator.backward(loss)
                     if window_statistics is None:
                         window_statistics = torch.zeros_like(result.statistics)
                     window_statistics += result.statistics
             if grad_clip > 0:
-                if accelerator:
-                    accelerator.clip_grad_norm_(model.parameters(), grad_clip)
-                else:
-                    nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                accelerator.clip_grad_norm_(model.parameters(), grad_clip)
             optimizer.step()
-            skipped = bool(accelerator and accelerator.optimizer_step_was_skipped)
+            skipped = accelerator.optimizer_step_was_skipped
             optimizer.zero_grad(set_to_none=True)
             if skipped:
                 continue
             scheduler.step()
             assert window_statistics is not None
-            if accelerator:
-                window_statistics = accelerator.reduce(
-                    window_statistics, reduction="sum"
-                )
+            window_statistics = accelerator.reduce(window_statistics, reduction="sum")
             task.record_update(window_statistics, counts)
             # logging
             if current_step % log_interval == 0:
                 if is_main:
-                    cumulative_flops = compute_flops_6n(num_params, total_tokens)
+                    cumulative_flops = 6 * num_params * total_tokens  # 6NT estimate
                     msg, payload = task.format_log(
                         step=current_step,
                         max_steps=max_steps,
@@ -649,7 +610,8 @@ def run_training(cfg: DictConfig) -> None:
                         residues_seen=total_residues,
                         executed_positions=total_tokens,
                     )
-                    console.train(msg)
+                    if console_enabled:
+                        progress_bar.write(msg)
                     if log_file_handle is not None:
                         print(
                             msg + f" (flops_actual={cumulative_flops})",
@@ -698,15 +660,18 @@ def run_training(cfg: DictConfig) -> None:
                         )
                         + "\n"
                     )
-                metric_logger.log_eval_all(
-                    all_eval_metrics,
-                    current_step,
-                    current_epoch,
-                    compute_flops_6n(num_params, total_tokens),
-                )
+                if is_main:
+                    _log_evaluations(
+                        all_eval_metrics,
+                        step=current_step,
+                        epoch=current_epoch,
+                        flops=6 * num_params * total_tokens,
+                        wb=wb,
+                        log_file=log_file_handle,
+                    )
 
             global_step += 1
-            console.step(1)
+            progress_bar.update(1)
             # checkpointing
             ckpt_steps = cfg.train.get("save_every")
             if (
@@ -765,13 +730,8 @@ def run_training(cfg: DictConfig) -> None:
         runtime=runtime,
     )
     if is_main:
-        console.close()
-        console.print("Training complete.")
+        progress_bar.close()
+        tqdm.write("Training complete.")
         if log_file_handle is not None:
             print("Training complete.", file=log_file_handle, flush=True)
-        # close log file if opened
-        if log_file_handle is not None:
-            try:
-                log_file_handle.close()
-            except Exception:
-                pass
+            log_file_handle.close()

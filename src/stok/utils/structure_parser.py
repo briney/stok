@@ -12,13 +12,11 @@ from dataclasses import dataclass
 import hashlib
 import math
 from types import MappingProxyType
-from typing import Any, Literal, NamedTuple
+from typing import Any, Literal
 
 import numpy as np
 
 __all__ = [
-    "parse_structure",
-    "StructureData",
     "parse_polymer_structure",
     "PolymerStructure",
     "StructureMappingError",
@@ -75,23 +73,6 @@ class PolymerStructure:
         object.__setattr__(self, "source", MappingProxyType(dict(self.source)))
 
 
-class StructureData(NamedTuple):
-    """Parsed structure data.
-
-    Attributes:
-        pid: Structure identifier (filename stem or structure ID).
-        protein_sequence: One-letter amino acid sequence.
-        coords: Backbone coordinates [L, 3, 3] for N, CA, C atoms.
-        chain_id: Chain identifier used for extraction.
-    """
-
-    pid: str
-    protein_sequence: str
-    coords: np.ndarray
-    chain_id: str | None
-
-
-# Standard 3-letter to 1-letter amino acid mapping
 AA3TO1 = {
     "ALA": "A",
     "CYS": "C",
@@ -126,110 +107,6 @@ AA3TO1 = {
     "MLY": "K",  # N-dimethyl-lysine
     "UNK": "X",  # Unknown
 }
-
-
-def parse_structure(
-    path: str | Path,
-    *,
-    chain_id: str | None = None,
-    strict: bool = False,
-) -> StructureData:
-    """Parse a PDB or mmCIF file and extract sequence and backbone coordinates.
-
-    Args:
-        path: Path to .pdb, .ent, .cif, or .mmcif file.
-        chain_id: Specific chain to extract. If None, uses first polymer chain.
-        strict: If True, raise on missing backbone atoms; else fill with NaN.
-
-    Returns:
-        StructureData with pid, sequence, and coords [L, 3, 3].
-
-    Raises:
-        ValueError: If structure cannot be parsed or has no valid residues.
-        FileNotFoundError: If the file does not exist.
-    """
-    from Bio.PDB.Polypeptide import is_aa
-
-    path = Path(path)
-    if not path.exists():
-        raise FileNotFoundError(f"Structure file not found: {path}")
-
-    structure = _read_structure(path)
-
-    models = list(structure.get_models())
-    if len(models) == 0:
-        raise ValueError(f"No models found in {path}")
-
-    model = models[0]
-
-    # Find target chain
-    chain = None
-    if chain_id is not None:
-        for ch in model:
-            if ch.id == chain_id:
-                chain = ch
-                break
-        if chain is None:
-            raise ValueError(f"Chain '{chain_id}' not found in {path}")
-    else:
-        # Find first chain with amino acid residues
-        for ch in model:
-            residues = [r for r in ch if is_aa(r, standard=False)]
-            if residues:
-                chain = ch
-                break
-        if chain is None:
-            raise ValueError(f"No protein chain found in {path}")
-
-    used_chain_id = chain.id
-
-    seq_chars: list[str] = []
-    coords_list: list[list[list[float]]] = []
-
-    for residue in chain:
-        if not is_aa(residue, standard=False):
-            continue
-
-        # Get one-letter code
-        res_name = residue.resname.upper().strip()
-        aa = _get_one_letter_code(res_name)
-        seq_chars.append(aa)
-
-        # Extract N, CA, C coordinates
-        try:
-            n_coord = residue["N"].coord.tolist()
-            ca_coord = residue["CA"].coord.tolist()
-            c_coord = residue["C"].coord.tolist()
-            coords_list.append([n_coord, ca_coord, c_coord])
-        except KeyError as e:
-            if strict:
-                raise ValueError(
-                    f"Missing backbone atom {e} in residue {residue.id} of {path}"
-                ) from e
-            # Fill with NaN for missing atoms
-            coords_list.append([[np.nan] * 3, [np.nan] * 3, [np.nan] * 3])
-
-    if len(seq_chars) == 0:
-        raise ValueError(f"No amino acid residues extracted from {path}")
-
-    return StructureData(
-        pid=path.stem,
-        protein_sequence="".join(seq_chars),
-        coords=np.array(coords_list, dtype=np.float32),
-        chain_id=used_chain_id,
-    )
-
-
-def _get_one_letter_code(res_name: str) -> str:
-    """Convert 3-letter amino acid code to 1-letter code.
-
-    Args:
-        res_name: 3-letter residue name (uppercase).
-
-    Returns:
-        1-letter amino acid code, or 'X' for unknown residues.
-    """
-    return AA3TO1.get(res_name, "X")
 
 
 def _read_structure(

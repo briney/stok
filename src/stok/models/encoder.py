@@ -26,8 +26,6 @@ class Encoder(nn.Module):
             n_layers: Number of encoder layers.
             dropout: Dropout probability for residual connections.
             attn_dropout: Dropout probability for attention outputs.
-            rope_base: RoPE base frequency.
-            rope_dim: RoPE dimensionality (must be even). If None, uses head_dim.
             ffn_mult: Feedforward multiplier (hidden_dim = d_model * ffn_mult).
             norm_type: Normalization type ("layernorm" currently supported).
         """
@@ -58,89 +56,9 @@ class Encoder(nn.Module):
         self.final_norm = Norm(d_model)
 
     def forward(
-        self,
-        h: torch.Tensor,
-        key_padding_mask: torch.Tensor | None = None,
-        attn_mask: torch.Tensor | None = None,
-        output_attentions: bool = False,
-        output_hidden_states: bool = False,
-        attention_layer_indices: tuple[int, ...] | None = None,
-    ) -> (
-        torch.Tensor
-        | tuple[torch.Tensor, tuple[torch.Tensor, ...]]
-        | tuple[torch.Tensor, tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]
-    ):
-        """Forward pass through encoder stack.
-
-        Args:
-            h: Input tensor of shape [B, L, d_model].
-            key_padding_mask: Padding mask of shape [B, L] where True marks
-                padding positions. Defaults to None.
-            attn_mask: Attention mask of shape [B, H, L, S] or [B, 1, L, S].
-                Defaults to None.
-            output_attentions: If True, also returns attention weights from
-                all layers. Defaults to False.
-            attention_layer_indices: Ordered, unique encoder layer indices to collect;
-                None returns all layers. Unrequested layers retain the SDPA path.
-            output_hidden_states: If True, also returns hidden states from
-                all layers (including initial embeddings). Defaults to False.
-
-        Returns:
-            Depends on output_attentions and output_hidden_states flags:
-            - Neither: Output tensor of shape [B, L, d_model].
-            - output_attentions only: (output, all_attentions) where
-                all_attentions is a tuple of n_layers tensors [B, H, L, L].
-            - output_hidden_states only: (output, all_hidden_states) where
-                all_hidden_states is a tuple of n_layers+1 tensors [B, L, d_model].
-            - Both: (output, all_attentions, all_hidden_states).
-        """
-        indices = (
-            tuple(range(len(self.layers)))
-            if attention_layer_indices is None
-            else tuple(attention_layer_indices)
-        )
-        if len(set(indices)) != len(indices) or any(
-            type(i) is not int or not 0 <= i < len(self.layers) for i in indices
-        ):
-            raise ValueError(
-                "attention_layer_indices must be unique valid encoder layer indices"
-            )
-        all_attentions = {}
-        all_hidden_states: list[torch.Tensor] = []
-
-        # Collect initial hidden state (before any layers)
-        if output_hidden_states:
-            all_hidden_states.append(h)
-
-        for i, layer in enumerate(self.layers):
-            collect = output_attentions and i in indices
-            layer_output = layer(
-                h,
-                key_padding_mask=key_padding_mask,
-                attn_mask=attn_mask,
-                output_attentions=collect,
-            )
-            if collect:
-                h, attn_weights = layer_output
-                all_attentions[i] = attn_weights
-            else:
-                h = layer_output
-
-            # Collect hidden state after each layer (before final norm)
-            if output_hidden_states:
-                all_hidden_states.append(h)
-
-        h = self.final_norm(h)
-
-        # Build return value based on flags
-        if output_attentions and output_hidden_states:
-            return (
-                h,
-                tuple(all_attentions[i] for i in indices),
-                tuple(all_hidden_states),
-            )
-        elif output_attentions:
-            return h, tuple(all_attentions[i] for i in indices)
-        elif output_hidden_states:
-            return h, tuple(all_hidden_states)
-        return h
+        self, h: torch.Tensor, key_padding_mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """Encode [B, L, d_model]; key_padding_mask is True at padding positions."""
+        for layer in self.layers:
+            h = layer(h, key_padding_mask=key_padding_mask)
+        return self.final_norm(h)

@@ -41,7 +41,6 @@ def mdlm_config(project, source, codebook_path, **options):
     cfg.data.pin_memory = False
     cfg.data.num_workers = 0
     cfg.data.shuffle_shards = cfg.data.shuffle_rows = False
-    cfg.train.objective = "mdlm"
     cfg.train.mixed_precision = "no"
     cfg.train.max_steps = 2
     cfg.train.lr = 0.002

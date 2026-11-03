@@ -11,29 +11,9 @@ def tokenize_residues(seq: str, tokenizer, max_len: int) -> torch.Tensor:
         raise ValueError(
             "Sequence must contain single-character residues, not control tokens"
         )
-    raw = tokenizer(seq, add_special_tokens=False)["input_ids"]
-    if len(raw) != len(seq):
-        raise ValueError("Tokenizer must encode exactly one token per residue")
-    return tokenizer(
-        seq,
-        add_special_tokens=True,
-        truncation=True,
-        max_length=max_len,
-        padding="max_length",
-        return_tensors="pt",
-    )["input_ids"][0]
-
-
-def align_coords(
-    coords: torch.Tensor | None, *, residue_count: int, token_length: int
-) -> torch.Tensor:
-    """Shift raw residue coordinates past BOS; preserve missing sample rows."""
-    aligned = torch.full((token_length, 3, 3), float("nan"))
-    if coords is not None:
-        if coords.ndim != 3 or coords.shape[1:] != (3, 3):
-            raise ValueError("Coordinates must have shape [residues,3,3]")
-        n = min(residue_count, token_length - 2)
-        if len(coords) < n:
-            raise ValueError("Coordinate length is shorter than the residue sequence")
-        aligned[1 : 1 + n] = coords[:n]
-    return aligned
+    ids = tokenizer.convert_tokens_to_ids(list(seq[: max_len - 2]))
+    tokens = torch.full((max_len,), tokenizer.pad_token_id, dtype=torch.long)
+    tokens[: len(ids) + 2] = torch.tensor(
+        [tokenizer.bos_token_id, *ids, tokenizer.eos_token_id]
+    )
+    return tokens

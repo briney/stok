@@ -1,30 +1,18 @@
 """Training and evaluation loader construction and residue alignment."""
 
 from collections.abc import Mapping
-from pathlib import Path
 from typing import Any
 
-import numpy as np
 import torch
 from omegaconf import DictConfig, OmegaConf
-from torch.utils.data import (
-    ConcatDataset,
-    DataLoader,
-    IterableDataset,
-    Sampler,
-    DistributedSampler,
-)
+from torch.utils.data import DataLoader
 
 from stok.data.dataset import (
-    PARQUET_EXTENSIONS,
     InterleavedIterableDataset,
     IterableTokenizedDataset,
-    MapAsIterableDataset,
-    TokenizedDataset,
     distributed_rank,
     _usable_samples,
 )
-from stok.utils.tokenizer import Tokenizer
 
 
 def _parse_eval_configs(cfg: DictConfig) -> dict[str, dict[str, Any]]:
@@ -143,90 +131,19 @@ def _parse_train_configs(cfg: DictConfig) -> list[dict[str, Any]]:
     raise ValueError(f"Invalid data.train config type: {type(raw_train)}")
 
 
-class MixtureSampler(Sampler[int]):
-    """
-    Efficient sampler for a ConcatDataset that samples per-dataset according to
-    dataset-level fractions, then uniformly within the chosen dataset.
-
-    This avoids allocating per-sample weight vectors (which can be huge).
-    Sampling is with replacement.
-    """
-
-    def __init__(
-        self,
-        *,
-        lengths: list[int],
-        fractions: list[float],
-        seed: int = 0,
-        num_samples: int | None = None,
-        rank: int = 0,
-        world_size: int = 1,
-    ):
-        if len(lengths) == 0:
-            raise ValueError("MixtureSampler requires at least one dataset length")
-        if len(lengths) != len(fractions):
-            raise ValueError("lengths and fractions must have the same length")
-        if any(int(L) <= 0 for L in lengths):
-            raise ValueError("All dataset lengths must be positive for MixtureSampler")
-        fr = np.asarray([float(f) for f in fractions], dtype=np.float64)
-        if np.any(fr < 0) or float(fr.sum()) <= 0:
-            raise ValueError(
-                "fractions must be non-negative and sum to a positive value"
-            )
-        fr = fr / float(fr.sum())
-
-        self.rank, self.world_size = rank, world_size
-        self.lengths = [int(L) for L in lengths]
-        self.fractions = fr.tolist()
-        self.seed = int(seed)
-        self._epoch = 0
-        self.offsets = np.cumsum([0] + self.lengths[:-1]).tolist()
-        self.num_samples = (
-            int(num_samples) if num_samples is not None else int(sum(self.lengths))
-        )
-
-    def __len__(self) -> int:
-        return self.num_samples // self.world_size
-
-    def set_epoch(self, epoch: int):
-        self._epoch = epoch
-
-    def __iter__(self):
-        rng = np.random.RandomState((self.seed + (self._epoch * 1009)) & 0xFFFFFFFF)
-        self._epoch += 1
-        fr = np.asarray(self.fractions, dtype=np.float64)
-        usable = len(self) * self.world_size
-        for position in range(usable):
-            ds_idx = int(rng.choice(len(self.lengths), p=fr))
-            j = int(rng.randint(0, self.lengths[ds_idx]))
-            if position % self.world_size == self.rank:
-                yield int(self.offsets[ds_idx] + j)
-
-
 def _build_dataloaders(
     cfg: DictConfig,
     *,
     identity: Mapping[str, Any],
 ) -> tuple[DataLoader, dict[str, DataLoader]]:
     """Build raw aligned MDLM loaders; all derived state stays in consumers."""
-    rank, world_size = distributed_rank()
-    pad_id = cfg.model.encoder.pad_id
+    rank, _ = distributed_rank()
     batch_size = cfg.train.batch_size
     num_workers = cfg.data.num_workers
     eval_configs = _parse_eval_configs(cfg)
     train_configs = _parse_train_configs(cfg)
     if not train_configs:
         raise ValueError("MDLM requires real paired Parquet training sources")
-    tokenizer = Tokenizer()
-    if pad_id != tokenizer.pad_token_id or cfg.model.encoder.vocab_size != len(
-        tokenizer
-    ):
-        raise ValueError("Model vocabulary and pad_id must match tokenizer")
-    for key in ("bos_id", "eos_id"):
-        if cfg.model.encoder[key] != getattr(
-            tokenizer, key.replace("_id", "_token_id")
-        ):
-            raise ValueError(f"Model {key} must match tokenizer")
 
     def coordinate_setting(options, needed=False):
         value = options.get("load_coords", cfg.data.load_coords)
@@ -248,21 +165,11 @@ def _build_dataloaders(
             load_coords=load_coords,
             require_structure_tokens=training,
         )
-        if Path(path).is_dir():
-            if not any(
-                p.is_file() and p.suffix.lower() in PARQUET_EXTENSIONS
-                for p in Path(path).iterdir()
-            ):
-                raise ValueError(
-                    f"{path}: expected a directory containing Parquet shards"
-                )
-            ds = IterableTokenizedDataset(
-                **kwargs,
-                shuffle_shards=cfg.data.shuffle_shards if training else False,
-                shuffle_rows=cfg.data.shuffle_rows if training else False,
-            )
-        else:
-            ds = TokenizedDataset(**kwargs)
+        ds = IterableTokenizedDataset(
+            **kwargs,
+            shuffle_shards=cfg.data.shuffle_shards if training else False,
+            shuffle_rows=cfg.data.shuffle_rows if training else False,
+        )
         if require_coords and not ds.has_coords:
             raise ValueError(
                 f"{name}: load_coords=true requires a coordinate-capable source"
@@ -276,29 +183,12 @@ def _build_dataloaders(
         )
         for source in train_configs
     ]
-    sampler = None
     if len(pairs) == 1:
         train_ds = pairs[0][0]
-    elif any(isinstance(ds, IterableDataset) for ds, _ in pairs):
-        iterables = [
-            ds
-            if isinstance(ds, IterableTokenizedDataset)
-            else MapAsIterableDataset(ds, num_samples=len(ds), seed=cfg.train.seed)
-            for ds, _ in pairs
-        ]
-        train_ds = InterleavedIterableDataset(
-            iterables,
-            [fraction for _, fraction in pairs],
-            num_samples=sum(ds.num_samples for ds in iterables),
-            seed=cfg.train.seed,
-        )
     else:
-        train_ds = ConcatDataset([ds for ds, _ in pairs])
-        sampler = MixtureSampler(
-            lengths=[len(ds) for ds, _ in pairs],
-            fractions=[fraction for _, fraction in pairs],
-            rank=rank,
-            world_size=world_size,
+        train_ds = InterleavedIterableDataset(
+            [ds for ds, _ in pairs],
+            [fraction for _, fraction in pairs],
             seed=cfg.train.seed,
         )
 
@@ -314,44 +204,23 @@ def _build_dataloaders(
             kwargs["prefetch_factor"] = cfg.data.prefetch_factor
         return kwargs
 
-    if isinstance(
-        train_ds,
-        (IterableTokenizedDataset, MapAsIterableDataset, InterleavedIterableDataset),
-    ):
-        train_ds.training_batch_size = batch_size
-        train_ds.num_workers = num_workers
-        dropped = train_ds.num_samples - _usable_samples(train_ds)
-        if rank == 0 and dropped:
-            print(
-                f"Training stream drops {dropped} samples per pass for complete rank/worker batches"
-            )
-    elif sampler is None:
-        sampler = DistributedSampler(
-            train_ds,
-            num_replicas=world_size,
-            rank=rank,
-            shuffle=True,
-            seed=cfg.train.seed,
-            drop_last=True,
+    train_ds.training_batch_size = batch_size
+    train_ds.num_workers = num_workers
+    dropped = train_ds.num_samples - _usable_samples(train_ds)
+    if rank == 0 and dropped:
+        print(
+            f"Training stream drops {dropped} samples per pass for complete rank/worker batches"
         )
     train_loader = DataLoader(
         train_ds,
-        sampler=sampler,
         shuffle=False,
         drop_last=True,
         **loader_kwargs(batch_size),
     )
     eval_loaders = {}
     for name, options in eval_configs.items():
-        ds = dataset(options["path"], options, name, training=False)
-        eval_sampler = (
-            None
-            if isinstance(ds, IterableDataset)
-            else range(rank, len(ds), world_size)
-        )
         eval_loaders[name] = DataLoader(
-            ds,
-            sampler=eval_sampler,
+            dataset(options["path"], options, name, training=False),
             shuffle=False,
             drop_last=False,
             generator=torch.Generator().manual_seed(

@@ -7,7 +7,7 @@ import pyarrow.parquet as pq
 import pytest
 import torch
 
-from stok.data.dataset import IterableTokenizedDataset, TokenizedDataset
+from stok.data.dataset import IterableTokenizedDataset
 from stok.utils.structure_parser import parse_polymer_structure
 from tests.unit.test_gcp_vqvae import tiny_config
 from tests.unit.test_structure_encoding import FIXTURES
@@ -160,12 +160,6 @@ def test_export_round_trip_alignment_provenance_and_grouping(tmp_path, export_in
         torch.equal(item["structure_tokens"], ids)
         for item, ids in zip(iterable, direct)
     )
-    assert torch.equal(
-        TokenizedDataset(str(output / summary["shards"][0]["path"]), max_length=1280)[
-            1
-        ]["structure_tokens"],
-        direct[1],
-    )
     single = tmp_path / "single"
     other = write_structure_dataset(
         manifest,
@@ -301,7 +295,7 @@ def test_corruption_and_incompatible_shards_fail_validation(tmp_path, export_inp
     metadata[b"stok.provenance"] = b"malformed"
     pq.write_table(table.replace_schema_metadata(metadata), first)
     with pytest.raises(ValueError, match="provenance"):
-        TokenizedDataset(str(first), max_length=1280)
+        IterableTokenizedDataset(str(output), max_length=1280)
 
 
 def test_declared_schema_preserves_all_null_integer_elements():
@@ -390,7 +384,7 @@ def test_generated_data_collation_decoder_and_training(tmp_path, export_inputs):
 
     model, manifest = export_inputs
     output = tmp_path / "dataset"
-    summary = write_structure_dataset(
+    write_structure_dataset(
         manifest, output, tokenizer=model, rows_per_shard=2, include_coordinates=True
     )
     items = list(
@@ -398,13 +392,8 @@ def test_generated_data_collation_decoder_and_training(tmp_path, export_inputs):
             str(output), max_length=None, shuffle_shards=False, shuffle_rows=False
         )
     )
-    map_items = [
-        TokenizedDataset(str(output / shard["path"]), max_length=None)[i]
-        for shard in summary["shards"]
-        for i in range(shard["row_count"])
-    ]
     tokenizer = Tokenizer()
-    for item in items + map_items:
+    for item in items:
         item["dataset"] = "export-fixture"
     batch = prepare_mdlm_batch(
         items,
@@ -414,17 +403,7 @@ def test_generated_data_collation_decoder_and_training(tmp_path, export_inputs):
         crop="center",
         seeds=[0] * len(items),
     )
-    other = prepare_mdlm_batch(
-        map_items,
-        tokenizer,
-        max_len=44,
-        codebook_size=len(model.quantizer.codebook),
-        crop="center",
-        seeds=[0] * len(map_items),
-    )
     coordinates = batch["coords"]
-    torch.testing.assert_close(coordinates, other["coords"], equal_nan=True)
-    assert torch.equal(batch["structure_tokens"], other["structure_tokens"])
     assert not batch["structure_valid"][1, 5] and not batch["structure_valid"][1, 12]
     assert not batch["structure_valid"][2, 1]
     assert (
@@ -445,7 +424,11 @@ def test_generated_data_collation_decoder_and_training(tmp_path, export_inputs):
         d_model=32, n_heads=4, n_layers=1, ffn_mult=1, max_length=1280, d_code=16
     ).eval()
     indices = items[1]["structure_tokens"][None]
-    reloaded = map_items[1]["structure_tokens"][None]
+    reloaded = list(
+        IterableTokenizedDataset(
+            str(output), max_length=None, shuffle_shards=False, shuffle_rows=False
+        )
+    )[1]["structure_tokens"][None]
     with torch.inference_mode():
         before = decode_structure_tokens(
             decoder,

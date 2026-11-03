@@ -48,7 +48,6 @@ console:
   enabled: true
 
 # Supported paired absorbing masked diffusion recipe.
-objective: mdlm
 mdlm:
   placement: token
   span_mean: 8.0  # read only when placement=span

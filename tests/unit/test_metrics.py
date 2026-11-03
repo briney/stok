@@ -1,6 +1,6 @@
 import torch
 
-from stok.utils.metrics import lddt_ca, tm_score, rmsd, true_aligned_error
+from stok.utils.metrics import lddt_ca, tm_score, rmsd
 from stok.utils.geometry import Affine3D, RotationMatrix
 
 
@@ -65,31 +65,6 @@ def test_tm_and_rmsd_identity_and_rigid_invariance():
     assert torch.allclose(rmsd_b, rmsd_b_t, atol=1e-6)
 
 
-def test_true_aligned_error_identity_and_invariance():
-    B, L = 1, 6
-    true = _stable_ncac_coords(B, L)
-    pred = true.clone()
-    mask = torch.ones((B, L), dtype=torch.bool)
-    tae, pair_mask = true_aligned_error(pred, true, residue_mask=mask)
-    assert tae.shape == (B, L, L)
-    assert torch.allclose(tae[pair_mask], torch.zeros_like(tae[pair_mask]), atol=1e-6)
-
-    # Global rigid transform invariance
-    rot = RotationMatrix.random((B, 1))
-    trans = torch.randn((B, 1, 3))
-    T = Affine3D(trans=trans, rot=rot)
-
-    def _apply_affine_all(T, coords):
-        p_in = coords.permute(1, 2, 0, 3).unsqueeze(-2)
-        applied = T.apply(p_in)
-        return applied.squeeze(-2).permute(2, 0, 1, 3)
-
-    pred_t = _apply_affine_all(T, pred)
-    true_t = _apply_affine_all(T, true)
-    tae_t, pm_t = true_aligned_error(pred_t, true_t, residue_mask=mask)
-    assert torch.allclose(tae[pm_t], tae_t[pm_t], atol=1e-5)
-
-
 def test_noise_effects_on_metrics():
     B, L = 1, 12
     true = _stable_ncac_coords(B, L)
@@ -142,7 +117,7 @@ def test_structure_metrics_reject_bad_predictions():
     true = _stable_ncac_coords(1, 5)
     pred = true.clone()
     pred[:, 2] = float("nan")
-    for metric in (rmsd, tm_score, lddt_ca, true_aligned_error):
+    for metric in (rmsd, tm_score, lddt_ca):
         with pytest.raises(ValueError, match="Nonfinite predictions"):
             metric(pred, true)
 
@@ -152,11 +127,14 @@ def test_fixed_cameo_subset_matches_independent_ca_references():
     import numpy as np
     from pathlib import Path
     from Bio.SVDSuperimposer import SVDSuperimposer
-    from stok.utils.structure_parser import parse_structure
+    from stok.utils.structure_parser import parse_polymer_structure
 
     root = Path(__file__).parents[1] / "test_data/cameo"
     for filename in ("7YPD_B.pdb", "8JVC_A.pdb"):
-        true = torch.as_tensor(parse_structure(root / filename).coords[:48]).float()
+        polymer = parse_polymer_structure(
+            root / filename, chain_id="A", allow_observed_sequence=True
+        )
+        true = torch.as_tensor(polymer.coordinates[:48, :3]).float()
         true[7] = float("nan")
         ca = true[:, 1].double().numpy()
         valid = np.isfinite(ca).all(-1)

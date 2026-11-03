@@ -71,17 +71,17 @@ def write_probe_data(root, n=17, eval_n=5):
         for i in range(n)
     ]
     table = pa.Table.from_pylist(rows)
-    pq.write_table(table, root / "train.parquet")
+    (root / "whole").mkdir()
+    pq.write_table(table, root / "whole/all.parquet")
     (root / "shards").mkdir()
     pq.write_table(table.slice(0, 7), root / "shards/a.parquet")
     pq.write_table(table.slice(7), root / "shards/b.parquet")
-    pq.write_table(table.slice(0, eval_n), root / "eval.parquet")
     (root / "eval_shards").mkdir()
     pq.write_table(table.slice(0, eval_n), root / "eval_shards/a.parquet")
 
 
 @pytest.mark.parametrize("workers", [0, 2])
-@pytest.mark.parametrize("source", ["map", "iterable", "map-mixture", "mixed-mixture"])
+@pytest.mark.parametrize("source", ["iterable", "mixture"])
 def test_native_training_stream_matches_single_rank(tmp_path, workers, source):
     write_probe_data(tmp_path)
     command = [
@@ -118,8 +118,7 @@ def test_native_training_stream_matches_single_rank(tmp_path, workers, source):
 
 
 @pytest.mark.parametrize("eval_n", [1, 5])
-@pytest.mark.parametrize("source", ["map", "iterable"])
-def test_native_eval_has_no_duplicates_or_dropped_tail(tmp_path, eval_n, source):
+def test_native_eval_has_no_duplicates_or_dropped_tail(tmp_path, eval_n):
     write_probe_data(tmp_path, eval_n=eval_n)
     command = [
         sys.executable,
@@ -129,8 +128,6 @@ def test_native_eval_has_no_duplicates_or_dropped_tail(tmp_path, eval_n, source)
         "eval-tail",
         "--output",
         str(tmp_path),
-        "--source",
-        source,
         "--workers",
         "2",
     ]

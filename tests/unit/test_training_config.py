@@ -60,7 +60,6 @@ def test_cli_overrides_win_over_full_and_section_yaml(
     assert cfg.data.num_workers == 5
     assert cfg.model.encoder.n_layers == 4
     assert cfg.model.encoder.d_model == 768
-    assert cfg.train.objective == "mdlm"
 
 
 def test_yaml_fields_support_native_hydra_overrides(tmp_path, monkeypatch):

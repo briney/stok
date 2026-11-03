@@ -9,7 +9,6 @@ from omegaconf import DictConfig
 from torch import Tensor, nn
 
 from stok.data.mdlm import CANONICAL_AA, MDLMBatch, prepare_mdlm_batch
-from stok.utils.flops import format_flops_scientific
 from stok.utils.mdlm import (
     MDLMCorruption,
     corrupt_mdlm_batch,
@@ -260,7 +259,7 @@ class MDLMTask:
                 else f" | {name}_ce unavailable"
             )
             msg += f" | {name}_masked {int(masked)}/{int(eligible)}"
-        msg += f" | residues {residues_seen} | positions {executed_positions} | missing_structure {state['total_missing_structure']} | noncanonical_sequence {state['total_noncanonical_sequence']} | flops {format_flops_scientific(flops)}"
+        msg += f" | residues {residues_seen} | positions {executed_positions} | missing_structure {state['total_missing_structure']} | noncanonical_sequence {state['total_noncanonical_sequence']} | flops {flops:.3e}"
         return msg, payload
 
     def reset_log_window(self) -> None:

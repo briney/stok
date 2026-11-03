@@ -34,7 +34,7 @@ def test_pilot_composes_pinned_values_and_parameter_count():
     cfg = pilot()
     assert cfg.model.encoder.d_model == 768 and cfg.model.encoder.n_layers == 20
     assert cfg.model.encoder.n_heads == 12 and cfg.model.encoder.ffn_mult == 8 / 3
-    assert cfg.train.objective == "mdlm" and cfg.train.mixed_precision == "bf16"
+    assert cfg.train.mixed_precision == "bf16"
     assert cfg.train.max_steps == 10000 and cfg.train.warmup_steps == 500
     assert (
         cfg.train.log_every,
@@ -58,8 +58,8 @@ def test_pilot_composes_pinned_values_and_parameter_count():
     with torch.device("meta"):
         enc = cfg.model.encoder
         model = STokMDLM(
-            vocab_size=enc.vocab_size,
-            pad_id=enc.pad_id,
+            vocab_size=32,
+            pad_id=1,
             codebook=torch.empty(4096, 32),
             d_model=enc.d_model,
             n_heads=enc.n_heads,
@@ -244,8 +244,8 @@ def test_checkpoint_only_builder_matches_original_sampling(
     def original_constructor(cfg, *, codebook):
         enc = cfg.model.encoder
         model = STokMDLM(
-            vocab_size=enc.vocab_size,
-            pad_id=enc.pad_id,
+            vocab_size=32,
+            pad_id=1,
             codebook=codebook,
             d_model=enc.d_model,
             n_heads=enc.n_heads,
@@ -356,7 +356,7 @@ def test_invalid_manifest_never_creates_output(tmp_path, trained, change):
     assert result.exit_code != 0 and not output.exists()
 
 
-@pytest.mark.parametrize("change", ["legacy", "objective", "conditional"])
+@pytest.mark.parametrize("change", ["legacy", "conditional"])
 def test_invalid_or_unqualified_checkpoint_fails_closed(tmp_path, trained, change):
     from stok.utils.checkpoint import scientific_config
 
@@ -368,8 +368,6 @@ def test_invalid_or_unqualified_checkpoint_fails_closed(tmp_path, trained, chang
     }
     if change == "legacy":
         changed = {"model": payload["model"]}
-    elif change == "objective":
-        changed["config"]["train"]["objective"] = "mlm"
     else:
         changed["config"]["train"]["mdlm"]["regime_weights"] = {"structure_only": 1}
         changed["signature"] = {

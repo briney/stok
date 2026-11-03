@@ -287,7 +287,6 @@ def snapshot(path):
 @pytest.mark.parametrize(
     "key,value",
     [
-        ("train.objective", "mlm"),
         ("train.seed", 9),
         ("train.gradient_accumulation_steps", 2),
         ("train.lr", 0.001),
@@ -308,12 +307,7 @@ def test_rejected_resume_preserves_every_artifact(tmp_path, key, value):
     before = snapshot(project)
     OmegaConf.update(cfg, key, value)
     results = execute(cfg, tmp_path / "rejected.yaml", ok=False)
-    reason = (
-        "only supports paired mdlm"
-        if key == "train.objective"
-        else "signature mismatch"
-    )
-    assert reason in results[0].stderr
+    assert "signature mismatch" in results[0].stderr
     assert snapshot(project) == before
 
 
@@ -527,8 +521,6 @@ def test_no_eligible_windows_are_in_resume_cursor(tmp_path):
 def test_explicit_epochs_recurse_and_preserve_implicit_legacy_iteration(tmp_path):
     from stok.data.dataset import (
         IterableTokenizedDataset,
-        MapAsIterableDataset,
-        TokenizedDataset,
         InterleavedIterableDataset,
         set_dataset_epoch,
     )
@@ -536,11 +528,8 @@ def test_explicit_epochs_recurse_and_preserve_implicit_legacy_iteration(tmp_path
     source, _ = training_fixture(tmp_path, n=20)
 
     def build():
-        shard = IterableTokenizedDataset(str(source), max_length=8)
-        mapped = MapAsIterableDataset(
-            TokenizedDataset(str(source / "part-000000.parquet"), max_length=8)
-        )
-        child = InterleavedIterableDataset([shard, mapped], [0.5, 0.5])
+        shards = [IterableTokenizedDataset(str(source), max_length=8) for _ in "ab"]
+        child = InterleavedIterableDataset(shards, [0.5, 0.5])
         return InterleavedIterableDataset([child], [1])
 
     implicit, explicit = build(), build()
@@ -593,7 +582,7 @@ def test_resume_cursor_keeps_task_logging_separate(tmp_path):
 
 
 def test_optimizer_coverage_preserves_unused_and_frozen_parameters(tmp_path):
-    from stok.training.engine import _save_checkpoint
+    from stok.training.engine import _maybe_get_accelerator, _save_checkpoint
     from stok.utils.checkpoint import (
         read_training_checkpoint,
         restore_training_state,
@@ -656,7 +645,7 @@ def test_optimizer_coverage_preserves_unused_and_frozen_parameters(tmp_path):
             "mdlm_identity": identity,
         },
         cfg=cfg,
-        accelerator=None,
+        accelerator=_maybe_get_accelerator(),
         training_state={
             "signature": signature,
             "wandb_run_id": None,
