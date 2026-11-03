@@ -1,4 +1,3 @@
-import importlib
 import os
 from pathlib import Path
 from typing import Literal
@@ -39,8 +38,6 @@ class GeometricDecoder(nn.Module):
     ):
         super(GeometricDecoder, self).__init__()
 
-        self.decoder_output_scaling_factor = 1.0
-
         # input projection (from codebook space to decoder space)
         self.projector_in = nn.Linear(d_code, d_model, bias=False)
 
@@ -70,11 +67,7 @@ class GeometricDecoder(nn.Module):
         )
 
         # output projection
-        self.affine_output_projection = Dim6RotStructureHead(
-            d_model,
-            trans_scale_factor=1.0,
-            predict_torsion_angles=False,
-        )
+        self.affine_output_projection = Dim6RotStructureHead(d_model)
 
     def forward(
         self,
@@ -104,13 +97,8 @@ class GeometricDecoder(nn.Module):
             decoder_mask_bool = positions[None] < true_lengths.to(mask.device)[:, None]
         x = self.decoder_stack(x, mask=decoder_mask_bool)
 
-        bb_out = self.affine_output_projection(
-            x, affine=None, affine_mask=torch.zeros_like(mask)
-        )
-        # Dim6RotStructureHead may return either (rigids, pred_xyz) or just pred_xyz
-        bb_pred = bb_out[1] if isinstance(bb_out, tuple) else bb_out
-
-        return bb_pred.flatten(-2) * self.decoder_output_scaling_factor
+        bb_pred = self.affine_output_projection(x, affine_mask=torch.zeros_like(mask))
+        return bb_pred.flatten(-2)
 
 
 # decoder architecture presets (single source of truth)
@@ -135,117 +123,15 @@ _DECODER_ARCH = {
     ),
 }
 
-DECODER_URLS: dict[str, str] = {
-    "base": os.environ.get(
-        "STOK_DECODER_BASE_URL",
-        "https://huggingface.co/brineylab/STok/resolve/main/decoder.base.pth",
-    ),
-    "lite": os.environ.get(
-        "STOK_DECODER_LITE_URL",
-        "https://huggingface.co/brineylab/STok/resolve/main/decoder.lite.pth",
-    ),
-}
-
-
-def _is_writable_dir(path: Path) -> bool:
-    try:
-        path.mkdir(parents=True, exist_ok=True)
-        test_file = path / ".write_test"
-        with test_file.open("wb") as f:
-            f.write(b"ok")
-        test_file.unlink(missing_ok=True)
-        return True
-    except Exception:
-        return False
-
-
-def _resolve_cache_dir() -> Path:
-    # env can override the default cache directory
-    env_dir = os.environ.get("STOK_DECODER_CACHE")
-    if env_dir:
-        p = Path(env_dir)
-        if _is_writable_dir(p):
-            return p
-
-    # use default cache directory (in the stok package)
-    try:
-        stok_pkg = importlib.import_module("stok")
-        pkg_dir = Path(stok_pkg.__file__).resolve().parent / "checkpoints" / "decoder"
-        if _is_writable_dir(pkg_dir):
-            return pkg_dir
-    except Exception:
-        pass
-
-    # if the default cache directory is not writable, use the user cache directory
-    user_cache_root = os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))
-    user_dir = Path(user_cache_root) / "stok" / "decoder"
-    user_dir.mkdir(parents=True, exist_ok=True)
-    return user_dir
-
 
 def _ensure_downloaded(preset: str, *, progress: bool = True) -> Path:
-    if not os.environ.get(f"STOK_DECODER_{preset.upper()}_URL"):
-        ddp = dist.is_available() and dist.is_initialized()
-        if ddp:
-            if dist.get_rank() == 0:
-                resolve_gcp_artifact(
-                    preset,
-                    cache_dir=os.environ.get("STOK_DECODER_CACHE"),
-                    progress=progress,
-                )
-            dist.barrier()
-        return resolve_gcp_artifact(
-            preset, cache_dir=os.environ.get("STOK_DECODER_CACHE"), progress=progress
-        )
-    cache_dir = _resolve_cache_dir()
-    local_name = f"decoder-{preset}.pt"
-    local_path = cache_dir / local_name
-    url = os.environ.get(f"STOK_DECODER_{preset.upper()}_URL", DECODER_URLS[preset])
-
-    # if the weights file already exists, return the existing weights file
-    if local_path.exists() and local_path.is_file():
-        return local_path
-
-    # Determine distributed context (no try/except; torch is a dependency)
-    ddp = dist.is_available() and dist.is_initialized()
-    rank = dist.get_rank() if ddp else 0
-
-    def _download_to_final() -> None:
-        # download to temp then move to the local path (atomic within a filesystem)
-        tmp_path = local_path.with_suffix(local_path.suffix + ".tmp")
-        try:
-            torch.hub.download_url_to_file(
-                url,
-                str(tmp_path),
-                progress=progress,
-            )
-            # If another process already moved the file, tmp may be gone; tolerate it
-            if tmp_path.exists():
-                tmp_path.replace(local_path)
-            elif not local_path.exists():
-                # Defensive: download finished but file missing
-                raise FileNotFoundError(
-                    f"Decoder checkpoint missing after download: {tmp_path} -> {local_path}"
-                )
-        finally:
-            # Best-effort cleanup
-            tmp_path.unlink(missing_ok=True)
-
-    if ddp:
-        # Only rank 0 performs the download; others wait and reuse the cached file
-        if (rank == 0) and (not local_path.exists()):
-            _download_to_final()
+    cache_dir = os.environ.get("STOK_DECODER_CACHE")
+    # Rank 0 downloads; other ranks wait, then verify the cached file.
+    if dist.is_available() and dist.is_initialized():
+        if dist.get_rank() == 0:
+            resolve_gcp_artifact(preset, cache_dir=cache_dir, progress=progress)
         dist.barrier()
-        if not local_path.exists():
-            raise FileNotFoundError(
-                f"Decoder checkpoint not found after distributed download: {local_path}"
-            )
-        return local_path
-
-    # Single-process path
-    _download_to_final()
-
-    return local_path
+    return resolve_gcp_artifact(preset, cache_dir=cache_dir, progress=progress)
 
 
 def load_pretrained_decoder(

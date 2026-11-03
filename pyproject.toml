@@ -28,7 +28,6 @@ dependencies = [
   "pyyaml",
   "x-transformers==2.8.0",
   "vector-quantize-pytorch==1.25.2",
-  "typing-extensions; python_version < '3.11'",
 ]
 
 [tool.setuptools]

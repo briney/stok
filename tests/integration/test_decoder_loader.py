@@ -1,5 +1,3 @@
-import os
-
 import pytest
 import torch
 
@@ -61,55 +59,3 @@ def test_path_override_and_freeze(tmp_path):
     assert all(not p.requires_grad for p in model.parameters())
     assert model.projector_in.weight.shape[0] == 1024
     assert model.projector_in.weight.shape[1] == 64
-
-
-def test_download_and_cache_reuse(tmp_path, monkeypatch):
-    from stok.models.decoder import load_pretrained_decoder
-
-    # Isolate cache into a temp directory
-    cache_dir = tmp_path / "cache"
-    os.environ["STOK_DECODER_CACHE"] = str(cache_dir)
-
-    # Prepare a fake checkpoint to "download"
-    fake_ckpt = _make_state_dict("lite", d_code=32)
-
-    calls = {"n": 0}
-
-    def _fake_download(url, dst, hash_prefix=None, progress=True):  # noqa: ARG001
-        calls["n"] += 1
-        torch.save(fake_ckpt, dst)
-
-    monkeypatch.setenv(
-        "STOK_DECODER_LITE_URL", "https://example.invalid/decoder-lite.pt"
-    )
-    monkeypatch.setenv("STOK_DECODER_LITE_SHA256", "")
-    monkeypatch.setenv(
-        "STOK_DECODER_BASE_URL", "https://example.invalid/decoder-base.pt"
-    )
-    monkeypatch.setenv("STOK_DECODER_BASE_SHA256", "")
-    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
-
-    # Patch the downloader
-    from torch.hub import download_url_to_file as _orig
-
-    monkeypatch.setattr("torch.hub.download_url_to_file", _fake_download)
-
-    try:
-        model = load_pretrained_decoder(preset="lite", device="cpu", freeze=True)
-        assert calls["n"] == 1
-        expected = cache_dir / "decoder-lite.pt"
-        assert expected.exists()
-
-        # Second call should reuse cache
-        _ = load_pretrained_decoder(preset="lite", device="cpu", freeze=True)
-        assert calls["n"] == 1
-        assert model.projector_in.weight.shape[0] == 1024
-        assert model.projector_in.weight.shape[1] == 32
-    finally:
-        # restore original in case of leakage (defensive; pytest will isolate anyway)
-        try:
-            import torch.hub as hub
-
-            hub.download_url_to_file = _orig
-        except Exception:
-            pass
