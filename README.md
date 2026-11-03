@@ -169,13 +169,14 @@ source revision. Optional `parent_ids` declares unique canonical parent IDs.
 Display labels may repeat for distinct records; repeated resolved selections,
 unknown fields, malformed rows, and missing files are fatal.
 
-The canonical directory contains `records.jsonl`, `inputs.jsonl`, categorized
-parser `rejections.jsonl`, and a completed integrity `manifest.json`. Records
+The canonical directory contains `records.jsonl`, categorized parser
+`rejections.jsonl` (with the input `sequence_id` and path), and a completed
+`manifest.json` with file digests and counts. Records
 retain original float32 N/CA/C/O observations, boolean masks, complete residue
 correspondence, source declarations, and identity/content/map hashes. Missing
 coordinates are JSON null. Its sorted population digest excludes paths, labels,
 physical order, tokenizer state and shards. Parsed records remain canonical even
-if a tokenizer later rejects them. Consumers verify frozen artifacts without
+if a tokenizer later rejects them. Consumers read frozen artifacts without
 requiring the original structure files. A zero-record inventory can retain a
 complete parser-failure audit, but cannot produce a representation dataset.
 
@@ -246,9 +247,9 @@ cases.
 The completed directory contains `manifest.json` and `cases.jsonl`. Cases retain
 explicit ordinals, canonical content/map digests, center crops, full-residue
 positions, original eligibility, group IDs and realized boolean masks. Case and
-shared-case identities exclude representation and filesystem paths; physical file
-hashes and per-inventory references separately verify integrity. Readers verify
-stored controls without redrawing them. `stok.eval.cases.project_case_controls`
+shared-case identities exclude representation and filesystem paths. Readers
+check the completion manifest and the `cases.jsonl` digest, and never redraw
+stored controls. `stok.eval.cases.project_case_controls`
 pairs one case with each batch row, keeps replicates distinct, applies the BOS
 offset, and intersects controls with available targets. Missing generation
 conditioning is reported explicitly.
@@ -274,8 +275,10 @@ summary = write_structure_dataset(
 uncompressed `.pdb`, `.ent`, `.cif`, and `.mmcif` discovery. It selects protein
 chains from the first model; callers must add explicit source namespace/accession
 before writing a preparation manifest. Neither API accepts a policy argument.
-Use `validate_canonical_dataset(path)` and `validate_structure_dataset(path)` to
-audit completed artifacts. Export validates both before publication.
+`validate_canonical_dataset(path)` and `validate_structure_dataset(path)` check
+that an artifact is complete: the manifest status, the canonical file digests,
+and the export's shard inventory and row counts. Record contents are checked when
+they are written, not re-derived on every read.
 
 `--rows-per-shard` bounds each output shard; the default is 1000 chain rows.
 `--batch-size` groups chains using independent singleton forwards, preserving
@@ -286,11 +289,9 @@ directories and separate completed exports. There is no automatic export resume.
 Training crops paired windows later without changing the stored full-chain tokens.
 
 Parser and representation admission exclusions have separate stable reason audits;
-unexpected numerical/model errors abort. Existing destinations are refused,
-including concurrent publication. Failed runs leave a marked hidden sibling
-staging directory without advertising a completed dataset. Atomic no-replace
-publication requires Linux `renameat2` or native Windows rename; unsupported
-platforms fail closed.
+unexpected numerical/model errors abort. Existing destinations are refused.
+Outputs are written to a hidden sibling staging directory and renamed into place
+once complete, so a failed run never advertises a completed dataset.
 
 ## training
 

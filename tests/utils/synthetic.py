@@ -218,51 +218,26 @@ def write_dataset(path, rows, *, codebook=None, policy=None):
     path.mkdir()
     canonical = path / "canonical"
     canonical.mkdir()
-    records, inputs, exported = [], [], []
-    for ordinal, row in enumerate(rows):
+    records, exported = [], []
+    for row in rows:
         record = canonical_fixture(row)
-        request = {
-            "sequence_id": row["sequence_id"],
-            "path": row["source"]["path"],
-            "source_namespace": record["identity"]["source_namespace"],
-            "source_accession": record["identity"]["source_accession"],
-            "source_revision_sha256": row["source"]["sha256"],
-            "chain_id": "A",
-            "chain_namespace": record["identity"]["chain_namespace"],
-            "model_index": 0,
-            "parent_ids": [],
-        }
-        request_id = json_sha256(
-            {"request_version": 1, "ordinal": ordinal, "request": request}
-        )
-        record["provenance"]["request_id"] = request_id
         records.append(record)
-        inputs.append(
-            {
-                **request,
-                "request_id": request_id,
-                "canonical_id": record["canonical_id"],
-            }
-        )
         exported.append(canonical_row(row, record))
     (canonical / "records.jsonl").write_text(
         "".join(json.dumps(record) + "\n" for record in records)
-    )
-    (canonical / "inputs.jsonl").write_text(
-        "".join(json.dumps(request) + "\n" for request in inputs)
     )
     (canonical / "rejections.jsonl").write_text("")
     inventory = {
         "schema_version": 1,
         "status": "complete",
         "population_sha256": _population(records),
-        "requested_input_count": len(inputs),
+        "requested_input_count": len(records),
         "canonical_record_count": len(records),
         "parser_rejection_count": 0,
         "exclusions": {},
         **{
             name + "_sha256": file_sha256(canonical / (name + ".jsonl"))
-            for name in ("records", "inputs", "rejections")
+            for name in ("records", "rejections")
         },
     }
     (canonical / "manifest.json").write_text(json.dumps(inventory))
@@ -275,7 +250,13 @@ def write_dataset(path, rows, *, codebook=None, policy=None):
             "encoder_state_sha256": json_sha256("local-fixture"),
         },
         "policy": policy or {"sequence_mode": "native", "context_scope": "full_chain"},
-        "execution": {"device": "cpu", "dtype": "float32"},
+        "execution": {
+            "device": "cpu",
+            "dtype": "float32",
+            "matmul_precision": "highest",
+            "cuda_matmul_allow_tf32": False,
+            "cudnn_allow_tf32": True,
+        },
     }
     metadata = {
         b"stok.provenance": json.dumps(provenance, sort_keys=True).encode(),
