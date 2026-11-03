@@ -28,7 +28,6 @@ def validate_training_config(cfg: DictConfig) -> None:
     from stok.eval.mdlm import resolve_mdlm_eval_config
     from stok.data.loaders import _parse_eval_configs
     from stok.utils.mdlm import validate_mdlm_config
-    from stok.utils.tokenizer import Tokenizer
 
     with as_file(files("stok").joinpath("configs")) as directory:
         schema = OmegaConf.create(
@@ -75,8 +74,6 @@ def validate_training_config(cfg: DictConfig) -> None:
         raise ValueError(
             "Choose exactly one training budget: max_steps or max_epochs; epoch runs require max_steps=null"
         )
-    if train.objective != "mdlm":
-        raise ValueError("train.objective only supports paired mdlm")
     # Zero cadences divide by zero mid-run; negative budgets silently train nothing.
     for name, value, minimum in (
         ("train.batch_size", train.batch_size, 1),
@@ -103,17 +100,6 @@ def validate_training_config(cfg: DictConfig) -> None:
         raise ValueError("model.encoder.d_model must be divisible by n_heads")
     if (enc.d_model // enc.n_heads) % 2:
         raise ValueError("model.encoder head width must be even for RoPE")
-    tokenizer = Tokenizer()
-    for key, expected in (
-        ("vocab_size", len(tokenizer)),
-        ("pad_id", tokenizer.pad_token_id),
-        ("bos_id", tokenizer.bos_token_id),
-        ("eos_id", tokenizer.eos_token_id),
-    ):
-        if enc[key] != expected:
-            raise ValueError(
-                f"model.encoder.{key} must match the native sequence tokenizer"
-            )
     if (
         resolved_eval.generation.enabled
         and resolved_eval.generation.decode

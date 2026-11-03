@@ -20,9 +20,6 @@ def device():
 @pytest.fixture(scope="session")
 def tokenizer():
     """Pytest fixture providing a Tokenizer instance for tests."""
-    # Ensure native deps exist; skip tests cleanly if not available
-    pytest.importorskip("transformers")
-    pytest.importorskip("tokenizers")
     from stok.utils.tokenizer import Tokenizer as _Tokenizer
 
     return _Tokenizer()

@@ -4,8 +4,14 @@ import pytest
 import torch
 
 from stok.data.mdlm import prepare_mdlm_batch
-from stok.data.dataset import IterableTokenizedDataset, TokenizedDataset
+from stok.data.dataset import IterableTokenizedDataset
 from stok.utils.tokenizer import Tokenizer
+
+
+def ordered(directory, **kwargs):
+    return IterableTokenizedDataset(
+        str(directory), shuffle_shards=False, shuffle_rows=False, **kwargs
+    )
 
 
 def write_parquet(path, tokens=(4, None, 7, None), token_type=None):
@@ -21,17 +27,10 @@ def write_parquet(path, tokens=(4, None, 7, None), token_type=None):
     pq.write_table(table, path)
 
 
-@pytest.mark.parametrize("sharded", [False, True])
 @pytest.mark.parametrize("token_type", [pa.int32(), pa.int64()])
-def test_null_tokens_preserve_residue_alignment(tmp_path, sharded, token_type):
-    path = tmp_path / "data.parquet"
-    write_parquet(path, token_type=token_type)
-    if sharded:
-        ds = IterableTokenizedDataset(str(tmp_path), max_length=8)
-        item = next(iter(ds))
-    else:
-        ds = TokenizedDataset(str(path), max_length=8)
-        item = ds[0]
+def test_null_tokens_preserve_residue_alignment(tmp_path, token_type):
+    write_parquet(tmp_path / "data.parquet", token_type=token_type)
+    item = next(iter(ordered(tmp_path, max_length=8)))
 
     assert item["sequence_id"] == "p1"
     assert item["sequence"] == "ACDE"
@@ -51,15 +50,10 @@ def test_null_tokens_preserve_residue_alignment(tmp_path, sharded, token_type):
     assert truncated["structure_tokens"].tolist() == [[8, 10, 7, 8]]
 
 
-@pytest.mark.parametrize("sharded", [False, True])
-def test_sequence_only_parquet_for_diagnostics(tmp_path, sharded):
+def test_sequence_only_parquet_for_diagnostics(tmp_path):
     path = tmp_path / "data.parquet"
     pq.write_table(pa.table({"sequence_id": ["p1"], "sequence": ["ACDE"]}), path)
-    cls = IterableTokenizedDataset if sharded else TokenizedDataset
-    ds = cls(
-        str(tmp_path if sharded else path), max_length=8, require_structure_tokens=False
-    )
-    item = next(iter(ds)) if sharded else ds[0]
+    item = next(iter(ordered(tmp_path, max_length=8, require_structure_tokens=False)))
     assert item == {"sequence_id": "p1", "sequence": "ACDE"}
 
 
@@ -70,8 +64,7 @@ def test_sequence_only_parquet_for_diagnostics(tmp_path, sharded):
         ([4.0, 5.0, 7.0, 8.0], pa.list_(pa.float64())),
     ],
 )
-@pytest.mark.parametrize("sharded", [False, True])
-def test_rejects_untyped_structure_tokens(tmp_path, tokens, token_type, sharded):
+def test_rejects_untyped_structure_tokens(tmp_path, tokens, token_type):
     path = tmp_path / "bad.parquet"
     table = pa.table(
         {
@@ -81,9 +74,8 @@ def test_rejects_untyped_structure_tokens(tmp_path, tokens, token_type, sharded)
         }
     )
     pq.write_table(table, path)
-    cls = IterableTokenizedDataset if sharded else TokenizedDataset
     with pytest.raises(ValueError, match="structure_tokens.*integer"):
-        cls(str(tmp_path if sharded else path), max_length=8)
+        ordered(tmp_path, max_length=8)
 
 
 @pytest.mark.parametrize(
@@ -94,14 +86,10 @@ def test_rejects_untyped_structure_tokens(tmp_path, tokens, token_type, sharded)
         (None, "null"),
     ],
 )
-@pytest.mark.parametrize("sharded", [False, True])
-def test_rejects_invalid_token_rows(tmp_path, tokens, match, sharded):
-    path = tmp_path / "bad.parquet"
-    write_parquet(path, tokens=tokens)
-    cls = IterableTokenizedDataset if sharded else TokenizedDataset
-    ds = cls(str(tmp_path if sharded else path), max_length=8)
+def test_rejects_invalid_token_rows(tmp_path, tokens, match):
+    write_parquet(tmp_path / "bad.parquet", tokens=tokens)
     with pytest.raises(ValueError, match=match):
-        next(iter(ds)) if sharded else ds[0]
+        next(iter(ordered(tmp_path, max_length=8)))
 
 
 def test_checks_required_columns_in_every_shard(tmp_path):
@@ -122,14 +110,7 @@ def test_rejects_legacy_column_names(tmp_path):
         path,
     )
     with pytest.raises(ValueError, match="sequence"):
-        TokenizedDataset(str(path), max_length=8)
-
-
-def test_rejects_csv(tmp_path):
-    path = tmp_path / "data.csv"
-    path.write_text("sequence_id,sequence,structure_tokens\np1,ACDE,1 2 3 4\n")
-    with pytest.raises(ValueError, match="Parquet"):
-        TokenizedDataset(str(path), max_length=8)
+        ordered(tmp_path, max_length=8)
 
 
 @pytest.mark.parametrize("load_coords", [False, True])
@@ -162,7 +143,6 @@ def test_shards_with_missing_optional_coordinates(tmp_path, load_coords):
         assert "coords" not in second
 
 
-@pytest.mark.parametrize("sharded", [False, True])
 @pytest.mark.parametrize("load_coords", [False, True])
 @pytest.mark.parametrize(
     "coordinates,coordinate_type",
@@ -189,30 +169,25 @@ def test_shards_with_missing_optional_coordinates(tmp_path, load_coords):
     ],
 )
 def test_coordinate_schema_checked_only_when_loaded(
-    tmp_path, sharded, load_coords, coordinates, coordinate_type
+    tmp_path, load_coords, coordinates, coordinate_type
 ):
-    if sharded:
-        write_parquet(tmp_path / "a.parquet")
+    write_parquet(tmp_path / "a.parquet")
     path = tmp_path / "b.parquet"
     write_parquet(path)
     table = pq.read_table(path).append_column(
         "coordinates", pa.array([coordinates], type=coordinate_type)
     )
     pq.write_table(table, path)
-    cls = IterableTokenizedDataset if sharded else TokenizedDataset
-    source = str(tmp_path if sharded else path)
     if load_coords:
         with pytest.raises(ValueError, match="coordinates") as exc:
-            cls(source, max_length=8, load_coords=True)
+            ordered(tmp_path, max_length=8, load_coords=True)
         assert str(path) in str(exc.value)
     else:
-        ds = cls(source, max_length=8, load_coords=False)
-        items = list(ds) if sharded else [ds[0]]
-        assert len(items) == (2 if sharded else 1)
+        items = list(ordered(tmp_path, max_length=8, load_coords=False))
+        assert len(items) == 2
         assert all("coords" not in item for item in items)
 
 
-@pytest.mark.parametrize("sharded", [False, True])
 @pytest.mark.parametrize(
     "coordinate_type",
     [
@@ -226,7 +201,7 @@ def test_coordinate_schema_checked_only_when_loaded(
     ],
 )
 def test_numeric_coordinate_schema_preserves_values_and_missing_rows(
-    tmp_path, sharded, coordinate_type
+    tmp_path, coordinate_type
 ):
     path = tmp_path / "data.parquet"
     table = pa.table(
@@ -240,14 +215,7 @@ def test_numeric_coordinate_schema_preserves_values_and_missing_rows(
         }
     )
     pq.write_table(table, path)
-    if sharded:
-        ds = IterableTokenizedDataset(
-            str(tmp_path), max_length=8, shuffle_shards=False, shuffle_rows=False
-        )
-        present, missing = list(ds)
-    else:
-        ds = TokenizedDataset(str(path), max_length=8)
-        present, missing = ds[0], ds[1]
+    present, missing = list(ordered(tmp_path, max_length=8))
     torch.testing.assert_close(
         present["coords"][:4], torch.tensor([[[1.0, 2.0, 3.0]] * 3] * 4)
     )
@@ -255,25 +223,19 @@ def test_numeric_coordinate_schema_preserves_values_and_missing_rows(
     assert torch.isnan(missing["coords"]).all()
 
 
-@pytest.mark.parametrize("sharded", [False, True])
-def test_numeric_coordinate_rows_still_require_backbone_shape(tmp_path, sharded):
+def test_numeric_coordinate_rows_still_require_backbone_shape(tmp_path):
     path = tmp_path / "data.parquet"
     write_parquet(path)
     table = pq.read_table(path).append_column(
         "coordinates", pa.array([[[[1.0, 2.0]] * 3] * 4])
     )
     pq.write_table(table, path)
-    cls = IterableTokenizedDataset if sharded else TokenizedDataset
-    ds = cls(str(tmp_path if sharded else path), max_length=8)
     with pytest.raises(ValueError, match="p1: coordinates.*shape"):
-        next(iter(ds)) if sharded else ds[0]
+        next(iter(ordered(tmp_path, max_length=8)))
 
 
-@pytest.mark.parametrize("sharded", [False, True])
 @pytest.mark.parametrize("max_length", [None, 3, 8])
-def test_raw_coordinate_length_mode_preserves_integer_semantics(
-    tmp_path, sharded, max_length
-):
+def test_raw_coordinate_length_mode_preserves_integer_semantics(tmp_path, max_length):
     coords = torch.arange(45, dtype=torch.float32).reshape(5, 3, 3)
     path = tmp_path / "data.parquet"
     pq.write_table(
@@ -287,11 +249,7 @@ def test_raw_coordinate_length_mode_preserves_integer_semantics(
         ),
         path,
     )
-    cls = IterableTokenizedDataset if sharded else TokenizedDataset
-    dataset = cls(
-        str(tmp_path if sharded else path), max_length=max_length, dataset_name="corpus"
-    )
-    rows = list(dataset) if sharded else [dataset[0], dataset[1]]
+    rows = list(ordered(tmp_path, max_length=max_length, dataset_name="corpus"))
     rows.sort(key=lambda row: row["sequence_id"])
     missing, observed = rows
     length = 5 if max_length is None else max_length
@@ -306,12 +264,10 @@ def test_raw_coordinate_length_mode_preserves_integer_semantics(
 
 @pytest.mark.parametrize("suffix", [".parq", ".pq", ".PARQUET", ".PARQ", ".PQ"])
 def test_standalone_alias_shards_remain_readable(tmp_path, suffix):
-    from stok.data.dataset import IterableTokenizedDataset, TokenizedDataset
     from tests.utils.synthetic import make_mdlm_rows
 
     path = tmp_path / ("rows" + suffix)
     pq.write_table(pa.Table.from_pylist(make_mdlm_rows()), path)
-    assert len(TokenizedDataset(str(path), max_length=None)) == 2
     assert len(list(IterableTokenizedDataset(str(tmp_path), max_length=None))) == 2
 
 
@@ -320,7 +276,7 @@ def test_schema_two_rows_retain_canonical_identity(tmp_path):
 
     originals = make_mdlm_rows()
     directory = write_dataset(tmp_path / "current", originals)
-    item = TokenizedDataset(str(directory / "part-000000.parquet"), max_length=None)[0]
+    item = next(iter(ordered(directory, max_length=None)))
     for key in (
         "canonical_id",
         "canonical_content_sha256",
@@ -344,4 +300,4 @@ def test_schema_one_representation_provenance_is_rejected(tmp_path):
     metadata[b"stok.provenance"] = json.dumps(provenance).encode()
     pq.write_table(table.replace_schema_metadata(metadata), shard)
     with pytest.raises(ValueError, match="provenance"):
-        TokenizedDataset(str(shard), max_length=None)
+        ordered(directory, max_length=None)

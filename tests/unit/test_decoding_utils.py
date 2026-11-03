@@ -43,10 +43,9 @@ def test_decode_coords_runs_when_decoder_available(monkeypatch):
 
 def test_token_aligned_decoder_excludes_boundaries_and_empty_rows():
     from stok.utils.decoding import decode_token_aligned_coords
-    from stok.utils.masking import residue_mask_from_tokens
 
     tokens = torch.tensor([[0, 4, 3, 31, 2, 1], [0, 2, 1, 1, 1, 1]])
-    mask = residue_mask_from_tokens(tokens, pad_id=1, bos_id=0, eos_id=2)
+    mask = (tokens != 0) & (tokens != 1) & (tokens != 2)
     codes = torch.randn(2, 6, 9, requires_grad=True)
 
     def decoder(x, mask):

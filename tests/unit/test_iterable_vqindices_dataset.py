@@ -1,4 +1,5 @@
-import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 from pathlib import Path
 
@@ -20,8 +21,7 @@ def _write_shard(dir_path: Path, name: str, rows: int, indices_len: int = 5):
                 "structure_tokens": list(range(len(seq))),
             }
         )
-    df = pd.DataFrame(data)
-    df.to_parquet(dir_path / f"{name}.parquet", index=False)
+    pq.write_table(pa.Table.from_pylist(data), dir_path / f"{name}.parquet")
 
 
 def test_iterable_len_equals_total_rows_single_rank(tmp_path):
@@ -60,17 +60,13 @@ def test_mixed_optional_columns_and_required_schema(tmp_path):
     import torch
 
     _write_shard(tmp_path, "a", 1)
-    df = pd.DataFrame(
-        [
-            {
-                "sequence_id": "b",
-                "sequence": "LA",
-                "structure_tokens": [1, 2],
-                "coordinates": [[[0.0, 0.0, 0.0]] * 3] * 2,
-            }
-        ]
-    )
-    df.to_parquet(tmp_path / "b.parquet", index=False)
+    written = {
+        "sequence_id": "b",
+        "sequence": "LA",
+        "structure_tokens": [1, 2],
+        "coordinates": [[[0.0, 0.0, 0.0]] * 3] * 2,
+    }
+    pq.write_table(pa.Table.from_pylist([written]), tmp_path / "b.parquet")
     ds = IterableTokenizedDataset(
         str(tmp_path),
         max_length=None,
@@ -88,9 +84,8 @@ def test_mixed_optional_columns_and_required_schema(tmp_path):
     assert coords.shape == (2, 8, 3, 3)
     assert torch.isnan(coords[0]).all()
     assert torch.isfinite(coords[1, 1:3]).all()
-    df.drop(columns="structure_tokens").to_parquet(
-        tmp_path / "bad.parquet", index=False
-    )
+    del written["structure_tokens"]
+    pq.write_table(pa.Table.from_pylist([written]), tmp_path / "bad.parquet")
     with pytest.raises(ValueError, match="bad.parquet.*structure_tokens"):
         IterableTokenizedDataset(str(tmp_path), max_length=8)
 

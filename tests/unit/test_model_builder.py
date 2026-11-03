@@ -16,8 +16,6 @@ def test_builder_matches_existing_mdlm_constructor():
         {
             "model": {
                 "encoder": {
-                    "vocab_size": 32,
-                    "pad_id": 1,
                     "d_model": 16,
                     "n_heads": 2,
                     "n_layers": 1,
@@ -27,10 +25,7 @@ def test_builder_matches_existing_mdlm_constructor():
                     "norm": "layernorm",
                 },
             },
-            "train": {
-                "objective": "mdlm",
-                "mdlm": {"regime_weights": {"joint_independent": 1}},
-            },
+            "train": {"mdlm": {"regime_weights": {"joint_independent": 1}}},
         }
     )
     saved_cfg = OmegaConf.to_container(cfg, resolve=True)
@@ -109,8 +104,6 @@ def test_missing_or_empty_regime_weights_stay_unqualified(weights):
         {
             "model": {
                 "encoder": {
-                    "vocab_size": 32,
-                    "pad_id": 1,
                     "d_model": 16,
                     "n_heads": 2,
                     "n_layers": 1,
@@ -120,35 +113,10 @@ def test_missing_or_empty_regime_weights_stay_unqualified(weights):
                     "norm": "layernorm",
                 }
             },
-            "train": {"objective": "mdlm", "mdlm": {}},
+            "train": {"mdlm": {}},
         }
     )
     if weights is not None:
         cfg.train.mdlm.regime_weights = weights
     model = build_model(cfg, codebook=torch.zeros(8, 4))
     assert model.mdlm_regime_weights == {}
-
-
-@pytest.mark.parametrize("cosine", [False, True])
-def test_frozen_prototype_head_matches_declared_geometry_and_backpropagates(cosine):
-    from stok.models.head import CodebookClassifier
-
-    codebook = torch.tensor([[1.0, 0.0], [0.0, 2.0], [-1.0, -1.0]], requires_grad=True)
-    head = CodebookClassifier(
-        d_in=4, codebook=codebook, use_cosine=cosine, projector_dim=3
-    )
-    hidden = torch.arange(16.0).reshape(1, 4, 4).requires_grad_()
-    codes = head.to_code(head.ln(head.project(hidden)))
-    expected = (
-        F.normalize(codes, dim=-1) @ F.normalize(codebook.detach(), dim=-1).T
-        if cosine
-        else 2 * codes @ codebook.detach().T - codebook.detach().square().sum(-1)
-    )
-    torch.testing.assert_close(head(hidden), expected)
-    head(hidden).square().sum().backward()
-    assert torch.isfinite(hidden.grad).all() and hidden.grad.abs().sum() > 0
-    assert all(
-        parameter.grad is not None and torch.isfinite(parameter.grad).all()
-        for parameter in head.parameters()
-    )
-    assert head.E.grad is None and codebook.grad is None and not head.E.requires_grad

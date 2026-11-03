@@ -27,8 +27,8 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
         "--source",
-        choices=["map", "iterable", "map-mixture", "mixed-mixture"],
-        default="map",
+        choices=["iterable", "mixture"],
+        default="iterable",
     )
     parser.add_argument("--workers", type=int, default=0)
     parser.add_argument("--accum", type=int, default=1)
@@ -69,20 +69,14 @@ def main():
         if torch.distributed.is_initialized():
             torch.distributed.destroy_process_group()
         return
-    train_path = str(
-        root / ("shards" if args.source == "iterable" else "train.parquet")
-    )
-    if args.source.endswith("mixture"):
-        other = root / ("shards" if args.source == "mixed-mixture" else "train.parquet")
+    if args.source == "mixture":
         cfg.data.train = {
-            "a": {"path": train_path, "fraction": 0.4},
-            "b": {"path": str(other), "fraction": 0.6},
+            "a": {"path": str(root / "shards"), "fraction": 0.4},
+            "b": {"path": str(root / "whole"), "fraction": 0.6},
         }
     else:
-        cfg.data.train = train_path
-    cfg.data.eval = str(
-        root / ("eval_shards" if args.source == "iterable" else "eval.parquet")
-    )
+        cfg.data.train = str(root / "shards")
+    cfg.data.eval = str(root / "eval_shards")
     names = [item["name"] for item in _parse_train_configs(cfg)]
     identity = {
         "sources": {name: {"replay_sha256": name} for name in names + ["default"]},

@@ -4,20 +4,15 @@ from typing import Iterable, Tuple
 
 import torch
 
-from .geometry import frames_from_ncac, sanitize_coordinates, fp32_autocast_context
+from .geometry import sanitize_coordinates, fp32_autocast_context
 
-__all__ = ["lddt_ca", "tm_score", "rmsd", "true_aligned_error"]
+__all__ = ["lddt_ca", "tm_score", "rmsd"]
 
 
 def _ensure_batch(coords: torch.Tensor) -> torch.Tensor:
     if coords.ndim == 3 and coords.shape[-2:] == (3, 3):
         return coords.unsqueeze(0)
     return coords
-
-
-def _infer_residue_mask(true_coords: torch.Tensor) -> torch.Tensor:
-    # Valid if none of the backbone atoms are NaN
-    return torch.isfinite(true_coords).all(dim=(-2, -1))
 
 
 def _expand_mask_for_atoms(
@@ -287,53 +282,3 @@ def rmsd(
         diffs = (P - Q).norm(dim=-1)  # [B, N]
         rmsd_b = torch.sqrt(_masked_mean(diffs**2, mask, dim=1))
         return rmsd_b
-
-
-def true_aligned_error(
-    pred_coords: torch.Tensor,
-    true_coords: torch.Tensor,
-    residue_mask: torch.Tensor | None = None,
-    *,
-    atom: str = "CA",
-    clamp: float | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compute True Aligned Error (per-pair PAE target) in Å.
-
-    For each residue j, align the predicted structure to the true structure using
-    the local frames at residue j, then measure the distance between all residues i.
-
-    Returns:
-        (tae: [B, L, L], pair_mask: [B, L, L])
-    """
-    with fp32_autocast_context(pred_coords.device.type):
-        pred = _ensure_batch(pred_coords)
-        true = _ensure_batch(true_coords)
-        if pred.shape != true.shape or pred.ndim != 4 or pred.shape[-2:] != (3, 3):
-            raise ValueError("coords must be shaped [B, L, 3, 3] with atoms (N, CA, C)")
-        B, L = pred.shape[:2]
-
-        pred, true, res_mask = sanitize_coordinates(
-            pred, true, residue_mask, ca_only=False
-        )
-
-        atom_pred = _get_atom(pred, atom)  # [B, L, 3]
-        atom_true = _get_atom(true, atom)  # [B, L, 3]
-
-        # Per-residue frames
-        T_pred = frames_from_ncac(pred)  # [B, L]
-        T_true = frames_from_ncac(true)  # [B, L]
-        T_align = T_true.compose(T_pred.invert())  # align pred->true by residue j
-
-        # Transform all predicted atoms by frames of each residue j
-        p_in = atom_pred.permute(1, 0, 2).unsqueeze(-2)  # [Lj, B, 1, 3]
-        applied = T_align.apply(p_in)  # [Li, B, Lj, 3] after broadcasting
-        pred_aligned = applied.permute(1, 0, 2, 3)  # [B, Li, Lj, 3]
-
-        # True atoms expanded across j
-        true_exp = atom_true[:, :, None, :]  # [B, Li, 1, 3]
-        d = torch.linalg.norm(pred_aligned - true_exp, dim=-1)  # [B, L, L]
-        if clamp is not None:
-            d = d.clamp(max=float(clamp))
-
-        pair_mask = res_mask[:, :, None] & res_mask[:, None, :]  # [B, L, L]
-        return d, pair_mask

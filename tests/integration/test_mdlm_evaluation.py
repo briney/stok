@@ -425,15 +425,15 @@ def test_generation_full_masks_controls_geometry_and_native_conditioning():
     assert torch.equal(inverse[1], batch["structure_tokens"])
     assert joint[0][:, 1:4].eq(batch["sequence_mask_id"]).all()
     assert joint[1][:, 1:4].eq(batch["codebook_size"] + 1).all()
-    from stok.eval.metrics.structure import RMSDMetric, LDDTMetric, TMScoreMetric
+    from stok.eval.metrics.structure import STRUCTURE_SCORES
 
     target = torch.tensor(population[0]["coordinates"])[None]
     predicted = Decoder(model.structure_codebook)(
         decoder.calls[1][0:1, :3], torch.ones(1, 3, dtype=torch.bool)
     ).view(1, 3, 3, 3)
-    for metric in (RMSDMetric(), LDDTMetric(), TMScoreMetric()):
-        expected = metric.score(predicted, target, torch.ones(1, 3, dtype=torch.bool))
-        assert metrics[f"folding/structure/{metric.name}"] == pytest.approx(
+    for name, metric in STRUCTURE_SCORES.items():
+        expected = metric(predicted, target, torch.ones(1, 3, dtype=torch.bool))
+        assert metrics[f"folding/structure/{name}"] == pytest.approx(
             float(expected), abs=1e-5
         )
 

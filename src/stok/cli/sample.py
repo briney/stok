@@ -81,11 +81,6 @@ def sample_cmd(
         identity = OmegaConf.create(payload["runtime"]["mdlm_identity"])
         codebook = payload["model"]["structure_codebook"]
         tokenizer = Tokenizer()
-        enc = cfg.model.encoder
-        if enc.vocab_size != len(tokenizer) or enc.pad_id != tokenizer.pad_token_id:
-            raise ValueError(
-                "Checkpoint sequence vocabulary is incompatible with Tokenizer"
-            )
         expected_vocabulary = {
             "codebook_size": len(codebook),
             "structure_pad": len(codebook),

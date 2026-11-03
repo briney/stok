@@ -348,13 +348,6 @@ def test_reordered_tokenizer_mask_id_and_codebook_metadata(tmp_path):
     assert out["sequence_tokens"][0, 2] == tok.convert_tokens_to_ids("X")
 
 
-def test_prepare_rejects_missing_or_invalid_mask_token_metadata():
-    tok = Tokenizer()
-    tok.mask_token = None
-    with pytest.raises(ValueError, match="mask"):
-        batch(tok)
-
-
 def test_group_marginals_and_zero_mask_draws():
     from stok.utils.mdlm import corrupt_mdlm_batch
 

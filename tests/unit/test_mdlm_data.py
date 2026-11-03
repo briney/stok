@@ -8,7 +8,7 @@ import pyarrow.parquet as pq
 import pytest
 import torch
 
-from stok.data.dataset import IterableTokenizedDataset, TokenizedDataset
+from stok.data.dataset import IterableTokenizedDataset
 from stok.utils.pretrained import file_sha256, state_sha256
 from stok.utils.tokenizer import DEFAULT_VOCAB, Tokenizer
 from tests.utils.synthetic import (
@@ -46,9 +46,8 @@ def paired_sources(tmp_path):
     return train, val, manifest, assignments
 
 
-@pytest.mark.parametrize("sharded", [False, True])
 @pytest.mark.parametrize("crop,seed,offset", [("center", 0, 11), ("random", 3, 12)])
-def test_crop_keeps_all_modalities_aligned(tmp_path, sharded, crop, seed, offset):
+def test_crop_keeps_all_modalities_aligned(tmp_path, crop, seed, offset):
     from stok.data.mdlm import prepare_mdlm_batch
 
     originals = make_mdlm_rows()
@@ -57,11 +56,10 @@ def test_crop_keeps_all_modalities_aligned(tmp_path, sharded, crop, seed, offset
     table = pa.Table.from_pylist(originals)
     path = tmp_path / "rows.parquet"
     pq.write_table(table, path)
-    cls = IterableTokenizedDataset if sharded else TokenizedDataset
-    dataset = cls(
-        str(tmp_path if sharded else path), max_length=None, dataset_name="synthetic"
+    dataset = IterableTokenizedDataset(
+        str(tmp_path), max_length=None, dataset_name="synthetic"
     )
-    rows = list(dataset) if sharded else [dataset[i] for i in range(len(dataset))]
+    rows = list(dataset)
     rows.sort(key=lambda row: row["sequence_id"])
     original_coords = torch.tensor(originals[0]["coordinates"])
     tokenizer = Tokenizer()

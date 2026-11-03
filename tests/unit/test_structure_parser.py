@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 from pathlib import Path
 
-from stok.utils.structure_parser import parse_structure, StructureData, AA3TO1
+from stok.utils.structure_parser import AA3TO1
 
 
 # Minimal valid PDB content with two residues (ALA, GLY)
@@ -87,116 +87,6 @@ END
 """
 
 
-class TestParseStructure:
-    """Tests for parse_structure function."""
-
-    def test_parse_valid_pdb(self, tmp_path):
-        """Parse a valid PDB file and verify sequence and coords."""
-        pdb_file = tmp_path / "test.pdb"
-        pdb_file.write_text(MINIMAL_PDB)
-
-        result = parse_structure(pdb_file)
-
-        assert isinstance(result, StructureData)
-        assert result.pid == "test"
-        assert result.protein_sequence == "AG"
-        assert result.coords.shape == (2, 3, 3)
-        assert result.chain_id == "A"
-        # Verify first residue N atom coords
-        assert np.allclose(result.coords[0, 0], [0.0, 0.0, 0.0])
-        # Verify first residue CA atom coords
-        assert np.allclose(result.coords[0, 1], [1.458, 0.0, 0.0])
-
-    def test_parse_valid_mmcif(self, tmp_path):
-        """Parse a valid mmCIF file and verify sequence and coords."""
-        cif_file = tmp_path / "test.cif"
-        cif_file.write_text(MINIMAL_CIF)
-
-        result = parse_structure(cif_file)
-
-        assert isinstance(result, StructureData)
-        assert result.protein_sequence == "AS"
-        assert result.coords.shape == (2, 3, 3)
-
-    def test_missing_backbone_atoms_nonstrict(self, tmp_path):
-        """Missing backbone atoms fill with NaN when strict=False."""
-        pdb_file = tmp_path / "missing.pdb"
-        pdb_file.write_text(PDB_MISSING_CA)
-
-        result = parse_structure(pdb_file, strict=False)
-
-        assert result.protein_sequence == "AG"
-        assert result.coords.shape == (2, 3, 3)
-        # First residue should be fine
-        assert not np.isnan(result.coords[0]).any()
-        # Second residue should have NaN for all atoms (missing CA)
-        assert np.isnan(result.coords[1]).all()
-
-    def test_missing_backbone_atoms_strict(self, tmp_path):
-        """Missing backbone atoms raise ValueError when strict=True."""
-        pdb_file = tmp_path / "missing.pdb"
-        pdb_file.write_text(PDB_MISSING_CA)
-
-        with pytest.raises(ValueError, match="Missing backbone atom"):
-            parse_structure(pdb_file, strict=True)
-
-    def test_chain_selection(self, tmp_path):
-        """Select specific chain by chain_id."""
-        pdb_file = tmp_path / "twochains.pdb"
-        pdb_file.write_text(PDB_TWO_CHAINS)
-
-        # Select chain B
-        result = parse_structure(pdb_file, chain_id="B")
-
-        assert result.protein_sequence == "MG"
-        assert result.chain_id == "B"
-        assert result.coords.shape == (2, 3, 3)
-
-    def test_chain_selection_invalid(self, tmp_path):
-        """Invalid chain_id raises ValueError."""
-        pdb_file = tmp_path / "twochains.pdb"
-        pdb_file.write_text(PDB_TWO_CHAINS)
-
-        with pytest.raises(ValueError, match="Chain 'X' not found"):
-            parse_structure(pdb_file, chain_id="X")
-
-    def test_first_chain_fallback(self, tmp_path):
-        """Uses first polymer chain when chain_id=None."""
-        pdb_file = tmp_path / "twochains.pdb"
-        pdb_file.write_text(PDB_TWO_CHAINS)
-
-        result = parse_structure(pdb_file, chain_id=None)
-
-        # Should get chain A (first)
-        assert result.chain_id == "A"
-        assert result.protein_sequence == "A"
-
-    def test_nonstandard_amino_acid(self, tmp_path):
-        """Non-standard amino acids are mapped correctly."""
-        pdb_file = tmp_path / "nonstandard.pdb"
-        pdb_file.write_text(PDB_NONSTANDARD)
-
-        result = parse_structure(pdb_file)
-
-        # MSE (selenomethionine) should map to M
-        assert result.protein_sequence == "M"
-
-    def test_file_not_found(self, tmp_path):
-        """Non-existent file raises FileNotFoundError."""
-        with pytest.raises(FileNotFoundError):
-            parse_structure(tmp_path / "nonexistent.pdb")
-
-    def test_empty_structure(self, tmp_path):
-        """Structure with no amino acids raises ValueError."""
-        pdb_file = tmp_path / "empty.pdb"
-        pdb_file.write_text("END\n")
-
-        with pytest.raises(
-            ValueError, match="(No protein chain found|No models found)"
-        ):
-            parse_structure(pdb_file)
-
-
 class TestAA3TO1Mapping:
     """Tests for amino acid mapping dictionary."""
 
@@ -231,11 +121,6 @@ class TestAA3TO1Mapping:
         """Common non-standard amino acids are mapped."""
         assert AA3TO1.get("MSE") == "M"  # Selenomethionine
         assert AA3TO1.get("UNK") == "X"  # Unknown
-
-    def test_unknown_residue_code(self):
-        from stok.utils.structure_parser import _get_one_letter_code
-
-        assert _get_one_letter_code("ZZZ") == "X"
 
 
 POLYMER_FIXTURES = Path(__file__).parents[1] / "test_data/gcp_vqvae/polymer"

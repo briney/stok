@@ -1,5 +1,3 @@
-import math
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -11,8 +9,7 @@ class MultiheadAttention(nn.Module):
     """Multi-head self-attention using PyTorch SDPA with RoPE.
 
     Uses `scaled_dot_product_attention` to leverage backend optimizations
-    (Flash/Memory-Efficient attention) when available. Falls back to a
-    manual implementation when attention weights are requested.
+    (Flash/Memory-Efficient attention) when available.
     """
 
     def __init__(
@@ -39,30 +36,9 @@ class MultiheadAttention(nn.Module):
         self.rope = rope
 
     def forward(
-        self,
-        x: torch.Tensor,
-        key_padding_mask: torch.Tensor | None = None,
-        attn_mask: torch.Tensor | None = None,
-        need_weights: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """Forward pass through multi-head attention with RoPE.
-
-        Args:
-            x: Input tensor of shape [B, L, d_model].
-            key_padding_mask: Padding mask of shape [B, L] where True marks
-                padding positions. Defaults to None.
-            attn_mask: Attention mask of shape [B, H, L, S] or [B, 1, L, S].
-                Additive (negative values) or boolean masks are supported.
-                Defaults to None.
-            need_weights: If True, returns attention weights along with output.
-                Uses a slower manual implementation instead of optimized SDPA.
-                Defaults to False.
-
-        Returns:
-            If need_weights=False: Output tensor of shape [B, L, d_model].
-            If need_weights=True: Tuple of (output, attention_weights) where
-                attention_weights has shape [B, H, L, S].
-        """
+        self, x: torch.Tensor, key_padding_mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """Self-attention over [B, L, d_model]; key_padding_mask is True at padding."""
         B, L, _ = x.shape
         qkv = self.qkv(x)  # [B, L, 3*d_model]
         q, k, v = qkv.chunk(3, dim=-1)
@@ -80,84 +56,20 @@ class MultiheadAttention(nn.Module):
         )
         q, k = apply_rope(q, k, cos, sin)
 
-        # Build SDPA masks. key_padding_mask: [B, L] -> [B, 1, 1, S] (True = masked)
-        sdpa_mask = attn_mask
+        # Additive SDPA mask [B,1,1,S]; its dtype must match the query (DeepSpeed).
+        sdpa_mask = None
         if key_padding_mask is not None:
-            kpm = key_padding_mask[:, None, None, :]  # [B,1,1,S]
-            if sdpa_mask is None:
-                sdpa_mask = kpm
-            else:
-                # if an attention mask is provided, combine it with key padding.
-                if sdpa_mask.dtype == torch.bool:
-                    sdpa_mask = sdpa_mask | kpm
-                else:
-                    # assume additive mask; add -inf where kpm is True
-                    sdpa_mask = sdpa_mask.masked_fill(kpm, float("-inf"))
-
-        # convert boolean mask to additive mask expected by SDPA
-        if sdpa_mask is not None and sdpa_mask.dtype == torch.bool:
-            sdpa_mask = sdpa_mask.float()
+            sdpa_mask = key_padding_mask[:, None, None, :].float()
             sdpa_mask = sdpa_mask.masked_fill(sdpa_mask > 0, float("-inf"))
-            # for DeepSpeed, the dtype of the mask must match the dtype of the query
             sdpa_mask = sdpa_mask.to(dtype=q.dtype)
 
-        if need_weights:
-            # Manual attention computation to capture weights
-            y, attn_weights = self._attention_with_weights(q, k, v, sdpa_mask)
-        else:
-            # sdpa expects [B, H, L, D] - use optimized kernels
-            y = F.scaled_dot_product_attention(
-                q,
-                k,
-                v,
-                attn_mask=sdpa_mask,
-                dropout_p=self.dropout if self.training else 0.0,
-                is_causal=False,
-            )  # [B, H, L, D]
-            attn_weights = None
-
+        y = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=sdpa_mask,
+            dropout_p=self.dropout if self.training else 0.0,
+            is_causal=False,
+        )  # [B, H, L, D]
         y = y.transpose(1, 2).contiguous().view(B, L, self.d_model)
-        output = self.out(y)
-
-        if need_weights:
-            assert attn_weights is not None
-            return output, attn_weights
-        return output
-
-    def _attention_with_weights(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        attn_mask: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Compute attention with explicit weight calculation.
-
-        Args:
-            q: Query tensor [B, H, L, D]
-            k: Key tensor [B, H, S, D]
-            v: Value tensor [B, H, S, D]
-            attn_mask: Additive attention mask [B, 1, L, S] or [B, H, L, S]
-
-        Returns:
-            Tuple of (output [B, H, L, D], attention_weights [B, H, L, S])
-        """
-        scale = 1.0 / math.sqrt(self.head_dim)
-        attn_scores = torch.matmul(q, k.transpose(-2, -1)) * scale  # [B, H, L, S]
-
-        if attn_mask is not None:
-            attn_scores = attn_scores + attn_mask
-
-        fully_blocked = torch.isneginf(attn_scores).all(dim=-1, keepdim=True)
-        attn_scores = attn_scores.masked_fill(fully_blocked, 0)
-        attn_weights = F.softmax(attn_scores, dim=-1).masked_fill(fully_blocked, 0)
-
-        # Apply dropout during training
-        attn_weights_dropped = F.dropout(
-            attn_weights, p=self.dropout, training=self.training
-        )
-
-        output = torch.matmul(attn_weights_dropped.to(dtype=v.dtype), v)  # [B, H, L, D]
-
-        # Return pre-dropout weights for interpretability
-        return output, attn_weights
+        return self.out(y)

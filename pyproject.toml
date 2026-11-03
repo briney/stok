@@ -20,14 +20,12 @@ dependencies = [
   "wandb",
   "accelerate",
   "tqdm>=4.66",
-  "tokenizers",
   "numpy",
-  "pandas",
   # ponytail: graphein pins numpy<2 and pyarrow 26 needs NumPy 2 at import; drop
   # this cap when graphein is removed.
   "pyarrow>=12,<26",
   "biopython",
-  "transformers",
+  "pyyaml",
   "x-transformers==2.8.0",
   "vector-quantize-pytorch==1.25.2",
   "typing-extensions; python_version < '3.11'",

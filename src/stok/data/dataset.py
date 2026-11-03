@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
-from collections.abc import Sequence, Sized
-from typing import Any, cast
+from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
-from torch.utils.data import Dataset, IterableDataset, get_worker_info
+from torch.utils.data import IterableDataset, get_worker_info
 from ..utils.pretrained import json_sha256
 
 PARQUET_EXTENSIONS = {".parquet", ".parq", ".pq"}
@@ -96,8 +96,6 @@ def set_dataset_epoch(dataset, epoch: int):
         setter(epoch)
     for child in getattr(dataset, "datasets", ()):
         set_dataset_epoch(child, epoch)
-    if hasattr(dataset, "dataset"):
-        set_dataset_epoch(dataset.dataset, epoch)
 
 
 def _parquet_columns(
@@ -238,54 +236,6 @@ def _build_output_from_row(
     return out
 
 
-class TokenizedDataset(Dataset):
-    """Map-style dataset for a single typed Parquet file.
-
-    Required columns: sequence_id (string), sequence (string), and, for
-    codebook training, structure_tokens (list of integers). Null token
-    elements mark unlabeled residues. Optional coordinates are [L, 3, 3].
-    max_length=None keeps full coordinates for downstream aligned cropping.
-    dataset_name optionally attaches a stable sample namespace.
-    """
-
-    def __init__(
-        self,
-        dataset_path: str,
-        max_length: int | None,
-        *,
-        load_coords: bool = True,
-        require_structure_tokens: bool = True,
-        dataset_name: str | None = None,
-    ):
-        path = Path(dataset_path)
-        if path.suffix.lower() not in PARQUET_EXTENSIONS:
-            raise ValueError("Provide a Parquet file (.parquet, .parq, or .pq)")
-        parquet = pq.ParquetFile(path)
-        columns = _parquet_columns(
-            path,
-            parquet.schema_arrow,
-            require_structure_tokens=require_structure_tokens,
-            load_coords=load_coords,
-        )
-        self.data = parquet.read(columns=columns)
-        self.max_length = max_length
-        self.dataset_name = dataset_name
-        self.has_coords = "coordinates" in columns
-        self.has_labels = "structure_tokens" in columns
-
-    def __len__(self):
-        return self.data.num_rows
-
-    def __getitem__(self, index: int) -> dict[str, Any]:
-        row = self.data.slice(index, 1).to_pylist()[0]
-        out = _build_output_from_row(
-            row, max_length=self.max_length, has_coords=self.has_coords
-        )
-        if self.dataset_name is not None:
-            out["dataset"] = self.dataset_name
-        return out
-
-
 class IterableTokenizedDataset(IterableDataset):
     """Shard-wise iterable dataset over a directory of Parquet files.
 
@@ -397,63 +347,11 @@ class IterableTokenizedDataset(IterableDataset):
                     raise ValueError(f"Shard {path}: {exc}") from exc
 
 
-class MapAsIterableDataset(IterableDataset):
-    """
-    Wrap a map-style Dataset to behave like an IterableDataset.
-
-    This is useful when mixing map-style and iterable datasets, because PyTorch
-    DataLoader does not allow mixing samplers/shuffle with IterableDatasets.
-
-    Behavior:
-      - Each epoch yields `num_samples` samples (default: len(dataset))
-      - Sampling is with replacement, uniformly over indices [0, len(dataset))
-      - Dataloader worker IDs stripe the sample positions to avoid multiplying
-        total emitted samples by `num_workers`.
-    """
-
-    training_batch_size: int
-    num_workers: int
-
-    def __init__(
-        self, dataset: Dataset, *, num_samples: int | None = None, seed: int = 0
-    ):
-        super().__init__()
-        self.dataset = dataset
-        self.has_labels = getattr(dataset, "has_labels", True)
-        self.has_coords = getattr(dataset, "has_coords", False)
-        self.num_samples = (
-            int(num_samples) if num_samples is not None else len(cast(Sized, dataset))
-        )
-        self.seed = int(seed)
-        self._epoch = -1
-        self.rank, self.world_size = distributed_rank()
-
-    def __len__(self) -> int:
-        return _partition_length(self)
-
-    def set_epoch(self, epoch: int):
-        self._epoch = int(epoch)
-        self._explicit_epoch = True
-
-    def __iter__(self):
-        return _partition_stream(self)
-
-    def _iter_unsharded(self, epoch: int):
-        rng = np.random.RandomState(
-            ((0x9E3779B97F4A7C15 ^ self.seed) + epoch * 0x1000003) & 0xFFFFFFFF
-        )
-        if len(cast(Sized, self.dataset)) == 0:
-            return
-        for _ in range(self.num_samples):
-            yield self.dataset[int(rng.randint(0, len(cast(Sized, self.dataset))))]
-
-
 class InterleavedIterableDataset(IterableDataset):
     """
     Interleave samples from multiple IterableDatasets according to fractions.
 
-    Each epoch yields `num_samples` items (default: sum(len(ds)) when available,
-    otherwise falls back to 0 which effectively yields nothing).
+    Each epoch yields `num_samples` items (default: the sources' total).
 
     When a sub-dataset iterator is exhausted, it is re-initialized so mixing
     continues without prematurely stopping.
@@ -467,9 +365,7 @@ class InterleavedIterableDataset(IterableDataset):
 
     def __init__(
         self,
-        datasets: Sequence[
-            IterableTokenizedDataset | MapAsIterableDataset | InterleavedIterableDataset
-        ],
+        datasets: Sequence[IterableTokenizedDataset | InterleavedIterableDataset],
         fractions: list[float],
         *,
         num_samples: int | None = None,
@@ -496,17 +392,11 @@ class InterleavedIterableDataset(IterableDataset):
         self._epoch = -1
         self.rank, self.world_size = distributed_rank()
 
-        if num_samples is None:
-            # best-effort: sum dataset lengths if available
-            total = 0
-            for ds in datasets:
-                try:
-                    total += ds.num_samples
-                except Exception:
-                    total = 0
-                    break
-            num_samples = total
-        self.num_samples = int(num_samples)
+        self.num_samples = (
+            sum(ds.num_samples for ds in datasets)
+            if num_samples is None
+            else int(num_samples)
+        )
 
     def __len__(self) -> int:
         return _partition_length(self)

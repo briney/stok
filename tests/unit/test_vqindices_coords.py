@@ -1,13 +1,18 @@
 import numpy as np
-import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 import torch
 
-from stok.data.dataset import TokenizedDataset
+from stok.data.dataset import IterableTokenizedDataset
 
 
-pytest.importorskip("pyarrow")
+def first_item(directory, max_length):
+    dataset = IterableTokenizedDataset(
+        str(directory), max_length=max_length, shuffle_shards=False, shuffle_rows=False
+    )
+    return next(iter(dataset))
 
 
 def _make_coords(L: int) -> list[list[list[float]]]:
@@ -19,7 +24,6 @@ def _make_coords(L: int) -> list[list[list[float]]]:
 
 
 def test_dataset_parquet_with_coords_returns_coords_tensor(tmp_path):
-    pq = tmp_path / "with_coords.parquet"
     rows = []
     for i in range(3):
         seq = "ACDEFGHIKLM"[: 6 + i]  # variable lengths
@@ -32,12 +36,10 @@ def test_dataset_parquet_with_coords_returns_coords_tensor(tmp_path):
                 "coordinates": _make_coords(L),
             }
         )
-    df = pd.DataFrame(rows)
-    df.to_parquet(pq, index=False)
+    pq.write_table(pa.Table.from_pylist(rows), tmp_path / "with_coords.parquet")
 
     max_len = 8
-    ds = TokenizedDataset(str(pq), max_length=max_len)
-    item = ds[0]
+    item = first_item(tmp_path, max_len)
     assert "coords" in item
     coords = item["coords"]
     assert isinstance(coords, torch.Tensor)
@@ -54,7 +56,6 @@ def test_dataset_parquet_with_coords_returns_coords_tensor(tmp_path):
 
 
 def test_dataset_parquet_without_coords_omits_key(tmp_path):
-    pq = tmp_path / "no_coords.parquet"
     rows = []
     for i in range(2):
         seq = "ACDEFGHIKLM"[: 6 + i]
@@ -65,10 +66,9 @@ def test_dataset_parquet_without_coords_omits_key(tmp_path):
                 "structure_tokens": list(range(len(seq))),
             }
         )
-    pd.DataFrame(rows).to_parquet(pq, index=False)
+    pq.write_table(pa.Table.from_pylist(rows), tmp_path / "no_coords.parquet")
 
-    ds = TokenizedDataset(str(pq), max_length=8)
-    item = ds[0]
+    item = first_item(tmp_path, 8)
     assert "coords" not in item
 
 
