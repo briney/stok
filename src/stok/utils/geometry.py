@@ -5,13 +5,8 @@ import typing
 from dataclasses import dataclass
 
 import torch
-from typing_extensions import Self
 
-__all__ = [
-    "Affine3D",
-    "RotationMatrix",
-    "frames_from_ncac",
-]
+__all__ = ["Affine3D", "RotationMatrix"]
 
 
 class fp32_autocast_context:
@@ -36,58 +31,7 @@ class fp32_autocast_context:
         return self._ctx.__exit__(exc_type, exc_value, traceback)
 
 
-@typing.runtime_checkable
-class Rotation(typing.Protocol):
-    def __init__(self, tensor: torch.Tensor) -> None: ...
-
-    @classmethod
-    def identity(cls, shape: tuple[int, ...], **tensor_kwargs) -> Self: ...
-
-    @classmethod
-    def random(cls, shape: tuple[int, ...], **tensor_kwargs) -> Self: ...
-
-    def __getitem__(self, idx: typing.Any) -> Self: ...
-
-    @property
-    def tensor(self) -> torch.Tensor: ...
-
-    @property
-    def shape(self) -> tuple[int, ...]: ...
-
-    def as_matrix(self) -> "RotationMatrix": ...
-
-    def compose(self, other: Self) -> Self: ...
-
-    def convert_compose(self, other: Self) -> Self: ...
-
-    def apply(self, p: torch.Tensor) -> torch.Tensor: ...
-
-    def invert(self) -> Self: ...
-
-    @property
-    def dtype(self) -> torch.dtype:
-        return self.tensor.dtype
-
-    @property
-    def device(self) -> torch.device:
-        return self.tensor.device
-
-    @property
-    def requires_grad(self) -> bool:
-        return self.tensor.requires_grad
-
-    @classmethod
-    def _from_tensor(cls, t: torch.Tensor) -> Self:
-        return cls(t)  # type: ignore[misc]
-
-    def to(self, **kwargs) -> Self:
-        return self._from_tensor(self.tensor.to(**kwargs))
-
-    def detach(self, *args, **kwargs) -> Self:
-        return self._from_tensor(self.tensor.detach(*args, **kwargs))
-
-
-class RotationMatrix(Rotation):
+class RotationMatrix:
     def __init__(self, rots: torch.Tensor):
         if rots.shape[-1] == 9:
             rots = rots.unflatten(-1, (3, 3))
@@ -116,15 +60,13 @@ class RotationMatrix(Rotation):
     def shape(self) -> tuple[int, ...]:
         return self._rots.shape[:-2]
 
-    def as_matrix(self) -> "RotationMatrix":
-        return self
+    @property
+    def device(self) -> torch.device:
+        return self._rots.device
 
     def compose(self, other: "RotationMatrix") -> "RotationMatrix":
         with fp32_autocast_context(self.device.type):
             return RotationMatrix(self._rots @ other._rots)
-
-    def convert_compose(self, other: Rotation) -> "RotationMatrix":
-        return self.compose(other.as_matrix())
 
     def apply(self, p: torch.Tensor) -> torch.Tensor:
         with fp32_autocast_context(self.device.type):
@@ -132,18 +74,9 @@ class RotationMatrix(Rotation):
                 return p @ self._rots.transpose(-1, -2).squeeze(-3)
             return torch.einsum("...ij,...j", self._rots, p)
 
-    def invert(self) -> "RotationMatrix":
-        return RotationMatrix(self._rots.transpose(-1, -2))
-
     @property
     def tensor(self) -> torch.Tensor:
         return self._rots.flatten(-2)
-
-    def to(self, **kwargs) -> "RotationMatrix":  # type: ignore[override]
-        return RotationMatrix(self._rots.to(**kwargs))
-
-    def detach(self, *args, **kwargs) -> "RotationMatrix":  # type: ignore[override]
-        return RotationMatrix(self._rots.detach(*args, **kwargs))
 
     @staticmethod
     def from_graham_schmidt(
@@ -155,31 +88,17 @@ class RotationMatrix(Rotation):
 @dataclass(frozen=True)
 class Affine3D:
     trans: torch.Tensor
-    rot: Rotation
+    rot: RotationMatrix
 
     def __post_init__(self) -> None:
         if self.trans.shape[:-1] != self.rot.shape:
             raise ValueError("Translation and rotation shapes must align")
 
     @staticmethod
-    def identity(
-        shape_or_affine: tuple[int, ...] | "Affine3D",
-        rotation_type: typing.Type[Rotation] = RotationMatrix,
-        **tensor_kwargs,
-    ) -> "Affine3D":
-        if isinstance(shape_or_affine, Affine3D):
-            kwargs: dict[str, typing.Any] = {
-                "dtype": shape_or_affine.dtype,
-                "device": shape_or_affine.device,
-            }
-            kwargs.update(tensor_kwargs)
-            shape = shape_or_affine.shape
-            rotation_type = type(shape_or_affine.rot)
-        else:
-            kwargs = tensor_kwargs
-            shape = shape_or_affine
+    def identity(shape: tuple[int, ...], **tensor_kwargs) -> "Affine3D":
         return Affine3D(
-            torch.zeros((*shape, 3), **kwargs), rotation_type.identity(shape, **kwargs)
+            torch.zeros((*shape, 3), **tensor_kwargs),
+            RotationMatrix.identity(shape, **tensor_kwargs),
         )
 
     def __getitem__(self, idx: typing.Any) -> "Affine3D":
@@ -193,51 +112,20 @@ class Affine3D:
     def shape(self) -> tuple[int, ...]:
         return self.trans.shape[:-1]
 
-    @property
-    def dtype(self) -> torch.dtype:
-        return self.trans.dtype
-
-    @property
-    def device(self) -> torch.device:
-        return self.trans.device
-
-    def to(self, **kwargs) -> "Affine3D":
-        return Affine3D(self.trans.to(**kwargs), self.rot.to(**kwargs))
-
-    def detach(self, *args, **kwargs) -> "Affine3D":
-        return Affine3D(
-            self.trans.detach(*args, **kwargs), self.rot.detach(*args, **kwargs)
-        )
-
-    def as_matrix(self) -> "Affine3D":
-        return Affine3D(trans=self.trans, rot=self.rot.as_matrix())
-
-    def compose(self, other: "Affine3D", autoconvert: bool = False) -> "Affine3D":
-        rot = self.rot
-        new_rot = (rot.convert_compose if autoconvert else rot.compose)(other.rot)
-        new_trans = rot.apply(other.trans) + self.trans
+    def compose(self, other: "Affine3D") -> "Affine3D":
+        new_rot = self.rot.compose(other.rot)
+        new_trans = self.rot.apply(other.trans) + self.trans
         return Affine3D(trans=new_trans, rot=new_rot)
 
-    def mask(self, mask: torch.Tensor, with_zero: bool = False) -> "Affine3D":
-        if with_zero:
-            tensor = self.tensor
-            return Affine3D.from_tensor(
-                torch.zeros_like(tensor).where(mask[..., None], tensor)
-            )
+    def mask(self, mask: torch.Tensor) -> "Affine3D":
+        """Replace frames where ``mask`` is True with the identity."""
         identity = Affine3D.identity(
-            self.shape,
-            rotation_type=type(self.rot),
-            device=self.device,
-            dtype=self.dtype,
+            self.shape, device=self.trans.device, dtype=self.trans.dtype
         ).tensor
         return Affine3D.from_tensor(identity.where(mask[..., None], self.tensor))
 
     def apply(self, p: torch.Tensor) -> torch.Tensor:
         return self.rot.apply(p) + self.trans
-
-    def invert(self) -> "Affine3D":
-        inv_rot = self.rot.invert()
-        return Affine3D(trans=-inv_rot.apply(self.trans), rot=inv_rot)
 
     @property
     def tensor(self) -> torch.Tensor:
@@ -245,18 +133,10 @@ class Affine3D:
 
     @staticmethod
     def from_tensor(t: torch.Tensor) -> "Affine3D":
-        match t.shape[-1]:
-            case 4:
-                trans = t[..., :3, 3]
-                rot = RotationMatrix(t[..., :3, :3])
-            case 12:
-                trans = t[..., -3:]
-                rot = RotationMatrix(t[..., :-3].unflatten(-1, (3, 3)))
-            case _:
-                raise RuntimeError(
-                    f"Cannot detect rotation format from {t.shape[-1] - 3}-d flat vector"
-                )
-        return Affine3D(trans, rot)
+        """Inverse of ``tensor``: 9 flattened rotation entries, then translation."""
+        if t.shape[-1] != 12:
+            raise ValueError("Affine3D tensors have 12 entries")
+        return Affine3D(t[..., -3:], RotationMatrix(t[..., :-3].unflatten(-1, (3, 3))))
 
     @staticmethod
     def from_graham_schmidt(
@@ -270,23 +150,6 @@ class Affine3D:
         return Affine3D(
             trans=origin, rot=RotationMatrix.from_graham_schmidt(x_axis, xy_plane, eps)
         )
-
-
-def frames_from_ncac(coords: torch.Tensor) -> "Affine3D":
-    """Build per-residue backbone frames from N-CA-C coordinates.
-
-    Args:
-        coords: Tensor of shape [..., L, 3, 3] with atoms ordered [N(0), CA(1), C(2)].
-
-    Returns:
-        ``Affine3D`` transforms whose origin is at CA and x-axis is along CA−N
-        with the xy-plane defined by C. The returned shape matches the leading
-        batch dimensions and length ``L`` of the input tensor.
-    """
-    n = coords[..., 0, :]
-    ca = coords[..., 1, :]
-    c = coords[..., 2, :]
-    return Affine3D.from_graham_schmidt(neg_x_axis=n, origin=ca, xy_plane=c)
 
 
 def _graham_schmidt(

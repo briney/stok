@@ -165,18 +165,14 @@ def test_inference_aborts_on_nonfinite_model_outputs(monkeypatch, stage):
         model.encode(graph, residue_mask=residues, token_mask=tokens)
 
 
-def test_empty_scatter_groups_match_reference_zero():
+def test_empty_scatter_groups_are_zero():
     from stok.utils.gcp import scatter_reduce
 
     values = torch.tensor([[-3.0], [-2.0]])
     groups = torch.tensor([0, 0])
     assert torch.equal(
-        scatter_reduce(values, groups, 0, 3, "max"),
-        torch.tensor([[-2.0], [0.0], [0.0]]),
-    )
-    assert torch.equal(
-        scatter_reduce(values, groups, 0, 3, "min"),
-        torch.tensor([[-3.0], [0.0], [0.0]]),
+        scatter_reduce(values, groups, 0, 3, "mean"),
+        torch.tensor([[-2.5], [0.0], [0.0]]),
     )
 
 

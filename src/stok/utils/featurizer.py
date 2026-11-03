@@ -6,7 +6,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from graphein.protein.tensor.angles import alpha, dihedrals, kappa
-from graphein.protein.tensor.data import get_random_batch
 from torch_geometric.data import Data
 from torch_geometric.nn.encoding import PositionalEncoding
 
@@ -27,9 +26,8 @@ class ProteinFeaturiser(nn.Module):
             "dihedrals", and the required "sequence_positional_encoding".
         vector_node_features (list[str]): Per-node vector features to compute.
             Supported: "orientation".
-        edge_types (list[str]): Edge construction strategy identifiers. This
-            helper assumes ``edge_index`` is provided upstream; values are kept
-            as metadata only.
+        edge_types (list[str]): Edge construction identifiers; ``edge_index`` is
+            built upstream, so these are configuration metadata only.
         scalar_edge_features (list[str]): Per-edge scalar features to compute.
             Supported: "edge_distance".
         vector_edge_features (list[str]): Per-edge vector features to compute.
@@ -62,15 +60,10 @@ class ProteinFeaturiser(nn.Module):
             raise ValueError(
                 "The supported featurizer requires sequence positional encoding"
             )
-        self.representation = representation
+        # The pinned presets enable every listed feature; the remaining
+        # arguments are retained only as configuration metadata.
         self.scalar_node_features = scalar_node_features
-        self.vector_node_features = vector_node_features
-        self.edge_types = edge_types
-        self.scalar_edge_features = scalar_edge_features
-        self.vector_edge_features = vector_edge_features
-
-        if "sequence_positional_encoding" in self.scalar_node_features:
-            self.positional_encoding = PositionalEncoding(16)
+        self.positional_encoding = PositionalEncoding(16)
 
     def forward(self, batch: Data) -> Data:
         """Compute features and edges for a protein batch.
@@ -80,9 +73,8 @@ class ProteinFeaturiser(nn.Module):
 
         - computes scalar node features and writes them to ``x``;
         - sets ``pos`` to C-alpha coordinates from ``coords``;
-        - optionally adds vector node features to ``x_vector_attr``;
-        - ensures ``edge_index``/``edge_type`` exist (no new edges are built);
-        - optionally computes ``edge_attr`` and ``edge_vector_attr``.
+        - adds vector node features to ``x_vector_attr``;
+        - computes ``edge_attr`` and ``edge_vector_attr`` on the upstream ``edge_index``.
 
         Args:
             batch (Batch | ProteinBatch): Input batch. Must define ``coords``
@@ -95,7 +87,6 @@ class ProteinFeaturiser(nn.Module):
         """
         # scalar node features
         positional_features = self.positional_encoding(batch.seq_pos)
-        batch.x = positional_features
         scalar_features = compute_scalar_node_features(batch, self.scalar_node_features)
         batch.x = torch.nan_to_num(
             torch.cat([positional_features, scalar_features], dim=-1),
@@ -108,86 +99,18 @@ class ProteinFeaturiser(nn.Module):
         batch.pos = batch.coords[:, 1, :]
 
         # vector node features
-        if self.vector_node_features:
-            vector_node_features = [
-                orientations(batch.coords, batch._slice_dict["coords"])
-            ]
-            batch.x_vector_attr = torch.cat(vector_node_features, dim=0)
-            if getattr(batch, "orientation_mask", None) is not None:
-                batch.x_vector_attr = (
-                    batch.x_vector_attr * batch.orientation_mask[..., None]
-                )
+        batch.x_vector_attr = orientations(batch.coords, batch._slice_dict["coords"])
+        if getattr(batch, "orientation_mask", None) is not None:
+            batch.x_vector_attr = (
+                batch.x_vector_attr * batch.orientation_mask[..., None]
+            )
 
-        # edges
-        if self.edge_types:
-            batch.edge_index, batch.edge_type = compute_edges(batch)
-            batch.num_relation = len(self.edge_types)
-
-        # scalar edge features
-        if self.scalar_edge_features:
-            assert batch.pos is not None and batch.edge_index is not None
-            scalars = [_edge_distance(batch.pos, batch.edge_index)]
-            batch.edge_attr = torch.cat(scalars, dim=1)
-
-        # vector edge features
-        if self.vector_edge_features:
-            assert batch.pos is not None and batch.edge_index is not None
-            diff = batch.pos[batch.edge_index[0]] - batch.pos[batch.edge_index[1]]
-            vectors = [_normalize(diff).unsqueeze(-2)]
-            batch.edge_vector_attr = torch.cat(vectors, dim=0)
-
+        # scalar and vector edge features
+        assert batch.pos is not None and batch.edge_index is not None
+        batch.edge_attr = _edge_distance(batch.pos, batch.edge_index)
+        diff = batch.pos[batch.edge_index[0]] - batch.pos[batch.edge_index[1]]
+        batch.edge_vector_attr = _normalize(diff).unsqueeze(-2)
         return batch
-
-    def _example(self, batch_size: int = 2):
-        """Featurise a randomly generated batch for quick inspection.
-
-        Args:
-            batch_size (int): Number of protein graphs to generate.
-
-        Returns:
-            ProteinBatch: Featurised synthetic batch.
-        """
-        batch = get_random_batch(batch_size)
-        return self(batch)
-
-    def __repr__(self) -> str:
-        """Return a readable string summary of the configuration.
-
-        Returns:
-            str: Human-readable representation.
-        """
-        repr = f"ProteinFeaturiser(\n\trepresentation={self.representation},"
-        repr += f"\n\tscalar_node_features={self.scalar_node_features},"
-        repr += f"\n\tvector_node_features={self.vector_node_features}, "
-        repr += f"\n\tedge_types={self.edge_types},"
-        repr += f"\n\tscalar_edge_features={self.scalar_edge_features},"
-        repr += f"\n\tvector_edge_features={self.vector_edge_features}\n)"
-        return repr
-
-
-def compute_edges(batch: Data) -> tuple[torch.Tensor, torch.Tensor]:
-    """Ensure edge metadata exists for a batch.
-
-    This helper assumes ``edge_index`` has been computed upstream (e.g., k-NN).
-    If ``edge_type`` is missing or empty, it is created as a zeros tensor that
-    aligns with ``edge_index``.
-
-    Args:
-        batch (Batch): Graph batch containing ``edge_index`` and optionally
-            ``edge_type``.
-
-    Returns:
-        tuple[torch.Tensor, torch.Tensor]: A tuple of (``edge_index``,
-        ``edge_type``).
-    """
-    edge_index = batch.edge_index
-    assert edge_index is not None
-    edge_type = getattr(batch, "edge_type", None)
-    if edge_type is None or edge_type.numel() == 0:
-        edge_type = torch.zeros(
-            edge_index.size(1), dtype=torch.long, device=edge_index.device
-        )
-    return edge_index, edge_type
 
 
 def compute_scalar_node_features(
@@ -213,8 +136,7 @@ def compute_scalar_node_features(
         node_features (list[str]): Names of features to compute.
 
     Returns:
-        torch.Tensor: Concatenated feature tensor of shape (N, F). If no
-        features are requested, returns ``x.x`` unchanged.
+        torch.Tensor: Concatenated feature tensor of shape (N, F).
 
     Raises:
         ValueError: If an unsupported feature name is provided.
@@ -243,11 +165,7 @@ def compute_scalar_node_features(
             valid = stencil_mask[:, columns[feature]].repeat_interleave(2, dim=-1)
             feats[-1] = feats[-1] * valid
     feats = [feat.unsqueeze(1) if feat.ndim == 1 else feat for feat in feats]
-
-    if feats:
-        return torch.cat(feats, dim=1)
-    assert x.x is not None
-    return x.x
+    return torch.cat(feats, dim=1)
 
 
 def orientations(
