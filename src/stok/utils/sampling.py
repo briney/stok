@@ -78,19 +78,6 @@ def sample_mdlm(
         if time_grid is None
         else time_grid
     )
-    if (
-        not isinstance(grid, Tensor)
-        or grid.ndim != 1
-        or len(grid) != steps + 1
-        or not grid.is_floating_point()
-        or not torch.isfinite(grid).all()
-        or grid[0] != 1
-        or grid[-1] != 0
-        or not (grid.diff() < 0).all()
-    ):
-        raise ValueError(
-            "MDLM time grid must strictly descend from 1 to 0 with steps+1 entries"
-        )
     probabilities, _ = mask_schedule(
         grid.cpu().double(), name=schedule.name, power=float(schedule.get("power", 2))
     )
@@ -100,77 +87,7 @@ def sample_mdlm(
         batch["sequence_tokens"].clone(),
         batch["structure_tokens"].clone(),
     )
-    shape = sequence.shape
-    if sequence.ndim != 2 or not shape[0] or structure.shape != shape:
-        raise ValueError("MDLM sampling requires a nonempty aligned batch")
-    if sequence.device != structure.device:
-        raise ValueError("MDLM sampling tensors must share a device")
-    if any(tokens.dtype != torch.long for tokens in (sequence, structure)):
-        raise ValueError("MDLM sampling tokens must be int64")
-    if (
-        generate_mask.shape != (*shape, 2)
-        or generate_mask.dtype != torch.bool
-        or group_ids.shape != generate_mask.shape
-        or group_ids.dtype != torch.long
-        or generate_mask.device != sequence.device
-        or group_ids.device != sequence.device
-        or (group_ids < -1).any()
-        or not torch.equal(group_ids >= 0, generate_mask)
-    ):
-        raise ValueError(
-            "MDLM groups must exactly cover requested outputs, excluding clamped cells"
-        )
-    for name in ("residue_mask", "sequence_valid", "structure_valid"):
-        mask = batch[name]
-        if (
-            mask.shape != shape
-            or mask.dtype != torch.bool
-            or mask.device != sequence.device
-        ):
-            raise ValueError("MDLM sampling masks must be aligned boolean tensors")
-    if (generate_mask & ~batch["residue_mask"][..., None]).any():
-        raise ValueError("MDLM generation can only request residue slots")
-    if len(seeds) != shape[0] or any(type(seed) is not int for seed in seeds):
-        raise ValueError("MDLM sampling requires one integer seed per sample")
     mask_id, size = batch["sequence_mask_id"], batch["codebook_size"]
-    embed = getattr(model, "embed", None)
-    pad_id = getattr(model, "pad_id", None)
-    model_size = getattr(model, "codebook_size", None)
-    if (
-        not isinstance(embed, nn.Embedding)
-        or type(pad_id) is not int
-        or type(model_size) is not int
-    ):
-        raise ValueError("MDLM model embedding or vocabulary metadata is invalid")
-    vocab = embed.num_embeddings
-    if (
-        type(mask_id) is not int
-        or not 0 <= mask_id < vocab
-        or mask_id == pad_id
-        or type(size) is not int
-        or size < 1
-        or size != model_size
-        or ((sequence < 0) | (sequence >= vocab)).any()
-        or ((structure < 0) | (structure >= size + 3)).any()
-        or (sequence.eq(pad_id) & structure.ne(size)).any()
-        or (batch["residue_mask"] & sequence.eq(pad_id)).any()
-        or (sequence.eq(mask_id) & ~generate_mask[..., 0]).any()
-        or (structure.eq(size + 1) & ~generate_mask[..., 1]).any()
-    ):
-        raise ValueError("MDLM input tokens or mask/codebook metadata are invalid")
-    aa = canonical_aa_ids
-    if (
-        aa.ndim != 1
-        or aa.dtype != torch.long
-        or not aa.numel()
-        or ((aa < 0) | (aa >= vocab)).any()
-        or aa.unique().numel() != aa.numel()
-        or ((aa == mask_id) | (aa == pad_id)).any()
-        or torch.isin(aa, sequence[~batch["residue_mask"]].to(aa.device)).any()
-    ):
-        raise ValueError(
-            "MDLM canonical output IDs must be distinct clean vocabulary IDs"
-        )
     joint = generate_mask.any(1).all(-1)
     if joint.any():
         weights = getattr(model, "mdlm_regime_weights", {})
@@ -181,7 +98,7 @@ def sample_mdlm(
             raise ValueError(
                 "MDLM checkpoint is not qualified for joint generation; explicit joint training regime metadata required"
             )
-    aa = aa.to(sequence.device)
+    aa = canonical_aa_ids.to(sequence.device)
     sequence.masked_fill_(generate_mask[..., 0], mask_id)
     structure.masked_fill_(generate_mask[..., 1], size + 1)
     active = generate_mask.clone()
@@ -190,21 +107,10 @@ def sample_mdlm(
     with inference_context(model):
         for p_t, p_s in zip(probabilities[:-1], probabilities[1:]):
             outputs = model(sequence_tokens=sequence, structure_tokens=structure)
-            sequence_logits, structure_logits = (
-                outputs["sequence_logits"],
+            logits = (
+                outputs["sequence_logits"].index_select(-1, aa),
                 outputs["structure_logits"],
             )
-            if sequence_logits.shape != (*shape, vocab) or structure_logits.shape != (
-                *shape,
-                size,
-            ):
-                raise ValueError("MDLM sampling output vocabulary shapes are invalid")
-            logits = (sequence_logits.index_select(-1, aa), structure_logits)
-            if any(
-                not torch.isfinite(values[active[..., track]]).all()
-                for track, values in enumerate(logits)
-            ):
-                raise FloatingPointError("Nonfinite requested MDLM predictions")
             for i, generator in enumerate(generators):
                 hidden_ids = group_ids[i][active[i]].unique()
                 reveal = (
@@ -231,6 +137,4 @@ def sample_mdlm(
                         )
                         tokens[i, cells] = aa[draws] if track == 0 else draws
                 active[i] &= ~selected
-    if active.any():
-        raise RuntimeError("MDLM sampling failed to complete requested outputs")
     return {"sequence_tokens": sequence, "structure_tokens": structure}

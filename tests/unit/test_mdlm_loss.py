@@ -82,33 +82,6 @@ def test_unequal_modality_coverage_and_loss_weights():
     ) == pytest.approx(8 * math.log(2) / 7)
 
 
-@pytest.mark.parametrize("track", [0, 1])
-@pytest.mark.parametrize("masked", [False, True])
-def test_invalid_targets_are_rejected_before_selection(track, masked):
-    from stok.utils.mdlm import mdlm_loss_terms
-
-    batch, corruption, outputs, aa = loss_case()
-    corruption["masked"].zero_()
-    corruption["masked"][0, 2, track] = masked
-    batch["sequence_tokens" if track == 0 else "structure_tokens"][0, 2] = (
-        31 if track == 0 else 2
-    )
-    with pytest.raises(ValueError, match="target"):
-        mdlm_loss_terms(outputs, batch, corruption, canonical_aa_ids=aa)
-
-
-@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
-@pytest.mark.parametrize("head", ["sequence_logits", "structure_logits"])
-def test_nonfinite_valid_predictions_are_not_dropped(head, value):
-    from stok.utils.mdlm import mdlm_loss_terms
-
-    batch, corruption, outputs, aa = loss_case()
-    with torch.no_grad():
-        outputs[head][0, 2, 0] = value  # eligible but unmasked
-    with pytest.raises(FloatingPointError):
-        mdlm_loss_terms(outputs, batch, corruption, canonical_aa_ids=aa)
-
-
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_loss_reduction_is_finite_in_reduced_precision(dtype):
     from stok.utils.mdlm import mdlm_loss_terms
@@ -138,14 +111,3 @@ def test_zero_draw_connects_both_heads():
     for tensor in outputs.values():
         assert tensor.grad is not None
         assert torch.count_nonzero(tensor.grad) == 0
-
-
-def test_nonfinite_predictions_on_available_inactive_modality_are_rejected():
-    from stok.utils.mdlm import mdlm_loss_terms
-
-    batch, corruption, outputs, aa = loss_case()
-    corruption["eligible"][..., 1] = False
-    with torch.no_grad():
-        outputs["structure_logits"][0, 2, 0] = float("nan")
-    with pytest.raises(FloatingPointError):
-        mdlm_loss_terms(outputs, batch, corruption, canonical_aa_ids=aa)

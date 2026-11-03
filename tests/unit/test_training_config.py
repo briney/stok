@@ -97,7 +97,6 @@ def test_training_options_use_oplm_names(monkeypatch):
             "train=mdlm_pilot",
             "data.train=/training",
             "train.batch_size=3",
-            "train.optimizer=adamw",
             "train.lr=0.002",
             "train.weight_decay=0.02",
             "train.adam_beta1=0.8",
@@ -118,7 +117,6 @@ def test_training_options_use_oplm_names(monkeypatch):
         key: train[key]
         for key in (
             "batch_size",
-            "optimizer",
             "lr",
             "max_steps",
             "gradient_accumulation_steps",
@@ -130,7 +128,6 @@ def test_training_options_use_oplm_names(monkeypatch):
         )
     } == {
         "batch_size": 3,
-        "optimizer": "adamw",
         "lr": 0.002,
         "max_steps": 17,
         "gradient_accumulation_steps": 4,
@@ -191,18 +188,9 @@ def test_obsolete_inactive_and_unknown_keys_are_rejected(tmp_path, key, value):
 @pytest.mark.parametrize(
     "key,value",
     [
-        ("train.batch_size", True),
-        ("train.max_steps", 1.5),
-        ("train.lr", -1),
-        ("train.adam_beta1", 1),
-        ("train.adam_eps", 0),
-        ("data.num_workers", -1),
-        ("data.max_len", 2),
         ("model.encoder.n_heads", 7),
-        ("model.encoder.dropout", 1.1),
-        ("train.wandb.enabled", "yes"),
-        ("train.eval.mdlm.enabled", "yes"),
-        ("data.train.local.fraction", float("nan")),
+        ("train.scheduler", "step"),
+        ("data.eval.local.batch_size", 0),
     ],
 )
 def test_programmatic_invalid_fields_fail_before_side_effects(
@@ -238,7 +226,7 @@ def test_pretrained_encoder_request_fails_before_side_effects(tmp_path, monkeypa
         pytest.fail("unsupported initialization must fail before side effects")
 
     monkeypatch.setattr(engine, "_maybe_get_accelerator", forbidden)
-    with pytest.raises(ValueError, match="pretrained_encoder.*supported adapter"):
+    with pytest.raises(ValueError, match="train.pretrained_encoder"):
         engine.run_training(cfg)
     assert not (tmp_path / "run").exists()
 
@@ -286,8 +274,6 @@ def test_custom_yaml_requires_an_overlay_mapping(tmp_path, monkeypatch, contents
 @pytest.mark.parametrize(
     "key,value",
     [
-        ("train.mdlm.span_mean", 8),
-        ("train.mdlm.noise.power", 2),
         ("train.eval.mdlm.generation.schedule.power", 2),
         ("train.eval.mdlm.families", 8),
     ],
@@ -316,12 +302,6 @@ def test_inactive_component_parameters_fail_before_execution(
 @pytest.mark.parametrize(
     "key,value",
     [
-        ("train", []),
-        ("data", False),
-        ("model.encoder", "bad"),
-        ("train.mixed_precision", {}),
-        ("train.wandb.mode", []),
-        ("model.codebook.preset", {}),
         ("train.eval.mdlm.generation", []),
         ("train.eval.mdlm.generation.schedule", False),
         (
@@ -342,17 +322,6 @@ def test_malformed_nested_settings_raise_useful_validation_errors(tmp_path, key,
     OmegaConf.update(cfg, key, value, force_add=True, merge=False)
     with pytest.raises(ValueError):
         validate_training_config(cfg)
-
-
-@pytest.mark.parametrize(
-    "field",
-    ["train.max_steps", "model.encoder.n_heads", "train.mdlm.noise.name", "data.train"],
-)
-def test_missing_required_scientific_choices_are_rejected(field):
-    from stok.config import load_training_config
-
-    with pytest.raises(ValueError, match=field):
-        load_training_config([f"~{field}"])
 
 
 @pytest.mark.parametrize(

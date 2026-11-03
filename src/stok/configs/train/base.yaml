@@ -1,4 +1,4 @@
-optimizer: adamw
+# AdamW
 lr: 3e-4
 adam_beta1: 0.9
 adam_beta2: 0.95
@@ -51,6 +51,7 @@ console:
 objective: mdlm
 mdlm:
   placement: token
+  span_mean: 8.0  # read only when placement=span
   regime_weights:
     joint_independent: 1.0
     structure_only: 0.0
@@ -58,6 +59,7 @@ mdlm:
     joint_tied: 0.0
   noise:
     name: linear
+    power: 2.0  # read only when name=power
     min_mask_probability: 0.0001
   sequence_loss_weight: 1.0
   structure_loss_weight: 1.0

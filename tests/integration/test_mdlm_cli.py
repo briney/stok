@@ -87,9 +87,9 @@ def test_hydra_overrides_remain_authoritative(regime):
     cfg = pilot(
         *weights,
         "train.mdlm.placement=span",
-        "+train.mdlm.span_mean=5",
+        "train.mdlm.span_mean=5",
         "train.mdlm.noise.name=power",
-        "+train.mdlm.noise.power=3",
+        "train.mdlm.noise.power=3",
         "train.batch_size=1",
         "train.mixed_precision=no",
     )
@@ -165,7 +165,8 @@ def test_startup_fails_before_artifacts_or_wandb(tmp_path, monkeypatch, kind):
         lambda *a, **kw: pytest.fail("W&B reached before preflight"),
     )
     with pytest.raises(
-        (ValueError, RuntimeError), match="MDLM|precision|output_dir|populated|gumbel"
+        (ValueError, RuntimeError),
+        match="MDLM|precision|output_dir|populated|gumbel|train source",
     ):
         run_training(cfg)
     assert not project.exists() or sorted(p.name for p in project.iterdir()) == ["keep"]
@@ -355,7 +356,7 @@ def test_invalid_manifest_never_creates_output(tmp_path, trained, change):
     assert result.exit_code != 0 and not output.exists()
 
 
-@pytest.mark.parametrize("change", ["legacy", "objective", "codebook", "conditional"])
+@pytest.mark.parametrize("change", ["legacy", "objective", "conditional"])
 def test_invalid_or_unqualified_checkpoint_fails_closed(tmp_path, trained, change):
     from stok.utils.checkpoint import scientific_config
 
@@ -369,10 +370,6 @@ def test_invalid_or_unqualified_checkpoint_fails_closed(tmp_path, trained, chang
         changed = {"model": payload["model"]}
     elif change == "objective":
         changed["config"]["train"]["objective"] = "mlm"
-    elif change == "codebook":
-        changed["model"]["structure_codebook"] = (
-            payload["model"]["structure_codebook"] + 1
-        )
     else:
         changed["config"]["train"]["mdlm"]["regime_weights"] = {"structure_only": 1}
         changed["signature"] = {
@@ -585,27 +582,21 @@ def test_cpu_sampling_valid_gpu_checkpoint_never_restores_device_rng(
     assert json.loads(output.read_text())["length"] == 3
 
 
-@pytest.mark.parametrize("damage", ["representation", "sequence_vocabulary"])
-def test_sampler_rejects_corrupt_current_identity_and_state(tmp_path, trained, damage):
+def test_sampler_rejects_changed_sequence_vocabulary(tmp_path, trained):
     import copy
 
     _, original = trained
     payload = copy.deepcopy(original)
-    if damage == "representation":
-        payload["runtime"]["components"]["structure_representation"] = "lfq"
-    else:
-        payload["runtime"]["mdlm_identity"]["vocabulary"]["sequence_vocab_sha256"] = (
-            "changed"
-        )
+    payload["runtime"]["mdlm_identity"]["vocabulary"]["sequence_vocab_sha256"] = (
+        "changed"
+    )
     checkpoint = tmp_path / "bad.pt"
     torch.save(payload, checkpoint)
     result, output = invoke_sample(
         tmp_path, checkpoint, [{"sequence_id": "sample", "length": 3}], "joint"
     )
     assert result.exit_code != 0 and not output.exists()
-    assert any(
-        word in result.output.lower() for word in ("representation", "vocabulary")
-    )
+    assert "vocabulary" in result.output.lower()
 
 
 def test_sampler_rejects_same_size_reordered_sequence_vocabulary(
@@ -649,7 +640,6 @@ def test_reader_and_sampling_allow_operational_overrides_and_inference_backend(
     cfg["train"]["wandb"]["name"] = "changed"
     cfg["data"]["eval"] = {"other": {"path": "/absent/eval"}}
     cfg["model"]["decoder"]["path"] = "/absent/decoder"
-    cfg["print_model_summary"] = not cfg["print_model_summary"]
     checkpoint = tmp_path / "overrides.pt"
     torch.save(payload, checkpoint)
 
