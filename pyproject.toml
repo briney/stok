@@ -23,7 +23,9 @@ dependencies = [
   "tokenizers",
   "numpy",
   "pandas",
-  "pyarrow>=12",
+  # ponytail: graphein pins numpy<2 and pyarrow 26 needs NumPy 2 at import; drop
+  # this cap when graphein is removed.
+  "pyarrow>=12,<26",
   "biopython",
   "transformers",
   "x-transformers==2.8.0",
