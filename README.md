@@ -251,10 +251,7 @@ hashes and per-inventory references separately verify integrity. Readers verify
 stored controls without redrawing them. `stok.eval.cases.project_case_controls`
 pairs one case with each batch row, keeps replicates distinct, applies the BOS
 offset, and intersects controls with available targets. Missing generation
-conditioning is reported explicitly. Protocol identity adds selected cases,
-resolved evaluator/sampler settings, representation, decoder and execution
-metadata; measurement identity also binds a checkpoint digest or training
-signature plus successful update count.
+conditioning is reported explicitly.
 
 The Python API uses the same two stages:
 
@@ -360,12 +357,10 @@ The engine resolves and freezes a private scientific configuration. The supplied
 configuration, including read-only inputs and authored interpolations, stays
 unchanged. Each run writes `configs/authored.yaml` (unresolved authored choices),
 `configs/run.yaml` (resolved scientific settings, including evaluation defaults),
-and `configs/runtime.yaml` (component/artifact identity, software/execution contract,
-effective precision, and installed-package source checksum).
-Checkpoints contain scientific `config` and derived `runtime` separately. The
-source checksum hashes relative Python/config filenames and content, so it is
-identical in a checkout and installed wheel and needs no Git metadata. Exact
-resume requires the same source/software contract, in addition to training choices.
+and `configs/runtime.yaml` (components, data identity, execution and effective
+precision). Checkpoints contain scientific `config` and derived `runtime`
+separately. Resume requires the same training configuration, data identity, world
+size, precision and device type; package upgrades and code edits do not block it.
 `residues_seen` counts globally consumed biological residues, including empty
 supervision; `executed_positions` counts globally forwarded padded positions,
 including AMP-skipped updates. `global_step` counts successful optimizer updates.
@@ -424,15 +419,11 @@ train.eval.mdlm.families=[probe]
 Cases retain canonical positions, group IDs and realized masks when an arm lacks
 codes. Unavailable targets affect coverage and denominators; missing conditional
 inputs and unsupported crops are explicitly reported. Evaluation never silently
-recrops or redraws a case. Numeric metrics and separate finite JSON measurement
-summaries are written under `logs/evaluations/step-<update>-<measurement-sha>.json`.
-Summaries distinguish case counts from unique proteins and bind controls, actual
-protocol/execution, and the live successful-update boundary. Their live model
-`training_signature` hashes the complete native resume signature (model, seed,
-optimizer and execution included); the data identity’s same-named field hashes
-only training sources/population/splits/representation/replay. Evaluation-only
-overrides preserve both training identities. Identical replay is
-idempotent; conflicting summary bytes fail closed.
+recrops or redraws a case. Each evaluation also writes
+`logs/evaluations/step-<update>.json` with the frozen-case digest, resolved
+evaluation settings, coverage counts and metrics. Summaries distinguish case
+counts from unique proteins. Evaluation-only overrides on resume do not change
+the training identity.
 
 For a bounded one-source overfit diagnostic, supply an actual completed export,
 a new run directory, a small budget, and disable both benchmark controls:

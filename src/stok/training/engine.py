@@ -2,6 +2,7 @@
 
 from contextlib import nullcontext
 from itertools import islice
+import json
 import math
 import os
 import shutil
@@ -41,7 +42,6 @@ from stok.utils.checkpoint import (
     validate_resume_signature,
     ResumeWandb,
 )
-from stok.utils.pretrained import state_sha256, json_sha256
 
 
 def _maybe_get_accelerator(precision=None):
@@ -173,9 +173,6 @@ def _save_checkpoint(
             "residues_seen": int(residues_seen),
             "executed_positions": int(executed_positions),
         }
-        payload["optimizer_initialized"] = [
-            key for key, state in payload["optimizer"]["state"].items() if state
-        ]
         if any(p.grad is not None for p in model.parameters()):
             raise ValueError(
                 "Checkpoint requires a completed accumulation boundary with no pending gradients"
@@ -287,7 +284,6 @@ def run_training(cfg: DictConfig) -> None:
     cfg = cast(DictConfig, OmegaConf.create(OmegaConf.to_container(cfg, resolve=True)))
     from stok.eval.mdlm import (
         evaluate_mdlm,
-        mdlm_evaluation_protocol,
         resolve_mdlm_eval_config,
         validate_mdlm_decoder,
     )
@@ -301,7 +297,7 @@ def run_training(cfg: DictConfig) -> None:
     if cfg.train.mdlm.noise.name == "power":
         cfg.train.mdlm.noise.setdefault("power", 2.0)
     cfg.train.eval.mdlm = resolve_mdlm_eval_config(cfg)
-    from stok.eval.cases import read_evaluation_cases, publish_evaluation_summary
+    from stok.eval.cases import read_evaluation_cases
 
     case_error = None
     try:
@@ -506,13 +502,12 @@ def run_training(cfg: DictConfig) -> None:
     try:
         signature = resume_signature(
             cfg,
-            sources=_parse_train_configs(cfg),
             codebook=codebook,
             accelerator=accelerator,
             identity=mdlm_identity,
         )
         runtime.update(
-            **{key: signature[key] for key in ("software", "execution", "source")},
+            execution=signature["execution"],
             components={
                 "objective": "mdlm",
                 "model": "stok_mdlm",
@@ -524,18 +519,6 @@ def run_training(cfg: DictConfig) -> None:
         )
         if decoder is not None:
             runtime["components"]["decoder"] = "geometric"
-            runtime["decoder"] = {
-                "sha256": state_sha256(decoder.state_dict()),
-                "codebook_sha256": mdlm_identity["codebook_sha256"],
-            }
-        runtime["evaluation_protocol"] = mdlm_evaluation_protocol(
-            cfg,
-            identity=mdlm_identity,
-            environment={
-                key: runtime[key] for key in ("software", "execution", "source")
-            },
-            decoder=runtime.get("decoder"),
-        )
         if cfg.train.get("resume_from"):
             resume_payload = read_training_checkpoint(Path(cfg.train.resume_from))
             validate_resume_signature(resume_payload, signature)
@@ -833,17 +816,12 @@ def run_training(cfg: DictConfig) -> None:
                 and current_step % mdlm_eval.generation.steps == 0
             )
             if denoising_due or generation_due:
-                all_eval_metrics, evaluation_summary = evaluate_mdlm(
+                all_eval_metrics, coverage = evaluate_mdlm(
                     model,
                     eval_loaders,
                     cfg,
                     accelerator=accelerator,
                     identity=mdlm_identity,
-                    protocol=runtime["evaluation_protocol"],
-                    model_identity={
-                        "training_signature": json_sha256(signature),
-                        "global_step": current_step,
-                    },
                     decoder=decoder,
                     run_denoising=denoising_due,
                     run_generation=generation_due,
@@ -851,11 +829,26 @@ def run_training(cfg: DictConfig) -> None:
                 summary_error = None
                 if is_main:
                     try:
-                        publish_evaluation_summary(
-                            io_dirs["logs"]
-                            / "evaluations"
-                            / f"step-{current_step}-{evaluation_summary['measurement_sha256']}.json",
-                            evaluation_summary,
+                        summaries = io_dirs["logs"] / "evaluations"
+                        summaries.mkdir(parents=True, exist_ok=True)
+                        (summaries / f"step-{current_step}.json").write_text(
+                            json.dumps(
+                                {
+                                    "global_step": current_step,
+                                    # Enabled evaluation requires frozen cases.
+                                    "shared_cases_sha256": cast(
+                                        dict, mdlm_identity["shared_cases"]
+                                    )["shared_cases_sha256"],
+                                    "settings": OmegaConf.to_container(
+                                        mdlm_eval, resolve=True
+                                    ),
+                                    "coverage": coverage,
+                                    "metrics": all_eval_metrics,
+                                },
+                                sort_keys=True,
+                                allow_nan=False,
+                            )
+                            + "\n"
                         )
                     except Exception as exc:
                         summary_error = f"{type(exc).__name__}: {exc}"

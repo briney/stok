@@ -187,40 +187,6 @@ def selected_mdlm_cases(settings, shared):
     return selected
 
 
-def mdlm_evaluation_protocol(cfg, *, identity, environment, decoder):
-    from stok.eval.cases import evaluation_protocol
-
-    settings = resolve_mdlm_eval_config(cfg, identity=identity)
-    shared = identity.get("shared_cases")
-    if shared is None:
-        return None
-    cases = selected_mdlm_cases(settings, shared)
-    science = cast(dict[str, Any], OmegaConf.to_container(settings, resolve=True))
-    science["families"] = sorted(
-        {case["family_key"] for case in cases if case["kind"] == "denoising"}
-    )
-    science["generation"]["families"] = sorted(
-        {case["family_key"] for case in cases if case["kind"] == "generation"}
-    )
-    if not settings.generation.enabled:
-        science["generation"] = {"enabled": False}
-    return evaluation_protocol(
-        science,
-        shared_cases={**shared, "cases": cases},
-        representation={
-            "sources": sorted(
-                source["representation_sha256"]
-                for source in identity["sources"].values()
-                if source["kind"] == "eval"
-            )
-        },
-        decoder=decoder
-        if settings.generation.enabled and settings.generation.decode
-        else None,
-        environment=environment,
-    )
-
-
 def evaluate_mdlm(
     model,
     loaders: dict[str, DataLoader],
@@ -228,14 +194,12 @@ def evaluate_mdlm(
     *,
     accelerator,
     identity: Mapping[str, Any],
-    protocol: Mapping[str, Any],
-    model_identity: Mapping[str, Any],
     decoder=None,
     run_denoising: bool = True,
     run_generation: bool = True,
 ) -> tuple[dict[str, dict[str, float]], dict[str, Any]]:
     """Execute frozen cases on their row owner, preserving controls and coverage."""
-    from stok.eval.cases import evaluation_measurement, project_case_controls
+    from stok.eval.cases import project_case_controls
 
     error = None
     try:
@@ -249,37 +213,6 @@ def evaluate_mdlm(
             raise ValueError("MDLM evaluation codebook_size must be a positive integer")
         codebook_size = cast(int, model_codebook_size)
         selected = selected_mdlm_cases(settings, identity.get("shared_cases"))
-        if protocol is None or protocol["selected_case_ids"] != [
-            case["case_id"] for case in selected
-        ]:
-            raise ValueError("Evaluation protocol disagrees with selected frozen cases")
-        evaluation_measurement(
-            protocol, model_identity=model_identity, coverage={}, metrics={}
-        )
-        from stok.utils.checkpoint import execution_identity
-
-        decoder_identity = (
-            {
-                "sha256": state_sha256(decoder.state_dict()),
-                "codebook_sha256": identity["codebook_sha256"],
-            }
-            if decoder is not None
-            else None
-        )
-        environment = execution_identity(accelerator)
-        if environment["execution"]["device"] != device.type:
-            raise ValueError("Evaluation accelerator/device identity mismatch")
-        actual_protocol = mdlm_evaluation_protocol(
-            cfg,
-            identity=identity,
-            environment=environment,
-            decoder=decoder_identity,
-        )
-        if protocol != actual_protocol:
-            raise ValueError(
-                "Evaluation protocol disagrees with actual settings/decoder/execution"
-            )
-
         if run_generation and settings.generation.decode:
             validate_mdlm_decoder(
                 decoder, eval_model.structure_codebook, identity["codebook_sha256"]
@@ -665,6 +598,4 @@ def evaluate_mdlm(
             for key in ("unavailable_targets", "unavailable_conditioning")
         },
     }
-    return results, evaluation_measurement(
-        protocol, model_identity=model_identity, coverage=coverage, metrics=results
-    )
+    return results, coverage
