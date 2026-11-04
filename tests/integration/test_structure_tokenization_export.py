@@ -13,6 +13,14 @@ from tests.unit.test_gcp_vqvae import tiny_config
 from tests.unit.test_structure_encoding import FIXTURES
 
 
+@pytest.fixture(autouse=True)
+def restore_determinism(monkeypatch):
+    # tokenize-structures turns on process-wide deterministic mode.
+    monkeypatch.delenv("CUBLAS_WORKSPACE_CONFIG", raising=False)
+    yield
+    torch.use_deterministic_algorithms(False)
+
+
 @pytest.fixture
 def export_inputs(tmp_path):
     from stok.models.gcp_vqvae import GCPVQTokenizer
@@ -345,6 +353,8 @@ def test_cli_loads_tokenizer_once_and_publishes(tmp_path, export_inputs, monkeyp
     assert result.exit_code == 0, result.output
     assert len(calls) == 1
     assert "4 chains" in result.output
+    summary = json.loads((tmp_path / "cli-dataset" / "manifest.json").read_text())
+    assert summary["provenance"]["execution"]["deterministic_algorithms"] is True
 
 
 def test_export_uses_training_policy_without_configuration(tmp_path, export_inputs):

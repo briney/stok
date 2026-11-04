@@ -37,6 +37,10 @@ def tokenize_structures_cmd(
     Uses the fixed training-native-reference policy: native sequence inputs,
     reference preparation, full chains of 25-1280 residues, and FP32 inference.
     """
+    import os
+
+    import torch
+
     from stok.data.canonical import validate_canonical_dataset
     from stok.data.structure_export import write_structure_dataset
     from stok.models.gcp_vqvae import load_pretrained_tokenizer
@@ -45,6 +49,10 @@ def tokenize_structures_cmd(
         inventory = validate_canonical_dataset(canonical_dir)
         if not inventory["canonical_record_count"]:
             raise ValueError("Cannot export an empty canonical population")
+        # Without this, GPU atomics occasionally flip a near-tie token between runs.
+        # cuBLAS needs a fixed workspace before deterministic mode allows its matmuls.
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+        torch.use_deterministic_algorithms(True)
         tokenizer = load_pretrained_tokenizer(preset, path=checkpoint, device=device)
         summary = write_structure_dataset(
             canonical_dir,
