@@ -240,6 +240,7 @@ def inference_metadata(device: torch.device) -> dict:
         "matmul_precision": torch.get_float32_matmul_precision(),
         "cuda_matmul_allow_tf32": torch.backends.cuda.matmul.allow_tf32,
         "cudnn_allow_tf32": torch.backends.cudnn.allow_tf32,
+        "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
         "sdp_backends_enabled": {
             name: getter()
             for name, getter in (
