@@ -6,7 +6,7 @@ from pathlib import Path
 
 import torch
 from hydra import compose, initialize_config_dir
-from stok.data.loaders import _build_dataloaders, _parse_train_configs
+from stok.data.loaders import _build_dataloaders
 from stok.training.engine import _maybe_get_accelerator, run_training
 
 
@@ -77,12 +77,7 @@ def main():
     else:
         cfg.data.train = str(root / "shards")
     cfg.data.eval = str(root / "eval_shards")
-    names = [item["name"] for item in _parse_train_configs(cfg)]
-    identity = {
-        "sources": {name: {"replay_sha256": name} for name in names + ["default"]},
-        "shared_cases": None,
-    }
-    train, evaluations = _build_dataloaders(cfg, identity=identity)
+    train, evaluations = _build_dataloaders(cfg)
     loader = train if args.case == "coverage" else evaluations["default"]
     ids, batches = [], 0
     for batch in loader:

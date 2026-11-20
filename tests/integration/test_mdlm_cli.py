@@ -47,7 +47,7 @@ def test_pilot_composes_pinned_values_and_parameter_count():
         cfg.data.num_workers,
         cfg.data.prefetch_factor,
     ) == (514, 2, 2, 2)
-    assert cfg.data.split_manifest is None and cfg.train.resume_from is None
+    assert "split_manifest" not in cfg.data and cfg.train.resume_from is None
     assert cfg.train.eval.steps == 250
     assert cfg.train.eval.mdlm.enabled and cfg.train.eval.mdlm.generation.enabled
     assert cfg.train.eval.mdlm.case_manifest is None
@@ -216,10 +216,9 @@ def row_for(payload, mode):
     if mode == "folding":
         row["sequence"] = "AXG"
     elif mode == "inverse_folding":
-        identity = payload["runtime"]["mdlm_identity"]
+        identity = payload["runtime"]["data"]
         row.update(
             structure_tokens=[2, None, 7],
-            tokenizer_sha256=identity["tokenizer_sha256"],
             codebook_sha256=identity["codebook_sha256"],
         )
     return row
@@ -325,7 +324,6 @@ def test_sampling_modes_complete_clamp_and_repeat(tmp_path, trained, mode, monke
         "length",
         "sentinel",
         "codebook",
-        "tokenizer",
         "control",
         "missing_condition",
         "boolean_length",
@@ -342,8 +340,8 @@ def test_invalid_manifest_never_creates_output(tmp_path, trained, change):
         row["length"] = 4
     elif change == "sentinel":
         row["structure_tokens"][0] = 32
-    elif change in {"codebook", "tokenizer"}:
-        row[change + "_sha256"] = "0" * 64
+    elif change == "codebook":
+        row["codebook_sha256"] = "0" * 64
     elif change == "control":
         mode = "folding"
         row = {"sequence_id": "sample", "sequence": "<mask>", "length": 6}
@@ -405,15 +403,12 @@ def test_cpu_launch_logs_device_precision_and_identity(tmp_path, capsys):
         and "mixed_precision=no" in output
         and "hardware=CPU" in output
     )
-    assert (
-        "MDLM data identity:" in output
-        and "codebook_sha256" in output
-        and "tokenizer_sha256" in output
-    )
+    summary = "MDLM data: local (train, 1 shards, 8 rows)"
+    assert summary in output
 
     log = (tmp_path / "run/logs/train.log").read_text()
     assert "Trainable parameters:" in log and "mixed_precision=no" in log
-    assert "MDLM data identity:" in log and "tokenizer_sha256" in log
+    assert summary in log
 
 
 @pytest.mark.parametrize("matching", [True, False])
@@ -464,13 +459,12 @@ def test_supplied_target_tokens_never_reach_first_forward(
     tmp_path, trained, monkeypatch, mode
 ):
     checkpoint, payload = trained
-    identity = payload["runtime"]["mdlm_identity"]
+    identity = payload["runtime"]["data"]
     row = {
         "sequence_id": "sample",
         "length": 3,
         "sequence": "ACD",
         "structure_tokens": [1, 2, 3],
-        "tokenizer_sha256": identity["tokenizer_sha256"],
         "codebook_sha256": identity["codebook_sha256"],
     }
     seen = []
@@ -528,33 +522,6 @@ def test_invalid_binary_checkpoint_reports_error_and_preserves_output(tmp_path):
     assert "Error:" in result.output
 
 
-@pytest.mark.parametrize(
-    "suffix", [".parquet", ".parq", ".pq", ".PARQUET", ".PARQ", ".PQ"]
-)
-def test_unlisted_heldout_shard_rejected_before_startup(tmp_path, monkeypatch, suffix):
-    from stok.data.mdlm import validate_mdlm_sources
-    from tests.integration.test_mdlm_evaluation import evaluation_training_fixture
-    from tests.integration.test_mdlm_resume import snapshot
-
-    cfg = evaluation_training_fixture(tmp_path)
-    codebook = torch.load(cfg.model.codebook.path, weights_only=True)["codebook"]
-    kwargs = dict(codebook=codebook, split_manifest=cfg.data.split_manifest)
-    clean = validate_mdlm_sources(cfg.data.train, cfg.data.eval, **kwargs)
-    assert clean["sources"]["local"]["row_count"] == 8
-    shutil.copyfile(
-        str(cfg.data.eval.validation.path) + "/part-000000.parquet",
-        str(cfg.data.train.local.path) + "/unlisted" + suffix,
-    )
-    before = snapshot(tmp_path)
-    monkeypatch.setattr(
-        "stok.training.engine._maybe_init_wandb",
-        lambda *a, **kw: pytest.fail("W&B reached before shard audit"),
-    )
-    with pytest.raises((ValueError, RuntimeError), match="shard inventory"):
-        run_training(cfg)
-    assert snapshot(tmp_path) == before
-
-
 def test_cpu_sampling_valid_gpu_checkpoint_never_restores_device_rng(
     tmp_path, trained, monkeypatch
 ):
@@ -585,9 +552,7 @@ def test_sampler_rejects_changed_sequence_vocabulary(tmp_path, trained):
 
     _, original = trained
     payload = copy.deepcopy(original)
-    payload["runtime"]["mdlm_identity"]["vocabulary"]["sequence_vocab_sha256"] = (
-        "changed"
-    )
+    payload["runtime"]["data"]["vocabulary"]["sequence_vocab_sha256"] = "changed"
     checkpoint = tmp_path / "bad.pt"
     torch.save(payload, checkpoint)
     result, output = invoke_sample(

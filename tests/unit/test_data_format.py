@@ -108,3 +108,22 @@ def test_tokenizer_metadata_key():
     assert schema.field("coordinates").type == pa.list_(
         pa.list_(pa.list_(pa.float32()))
     )
+
+
+def test_read_source_mixed_optional_coordinates(tmp_path):
+    write_shard(tmp_path / "a.parquet", rows(1))
+    schema = shard_schema(
+        structure=True, coordinates=True, extra=None, tokenizer=TOKENIZER
+    )
+    row = rows(1)[0] | {"coordinates": [[[0.0] * 3] * 3] * 3}
+    pq.write_table(pa.Table.from_pylist([row], schema=schema), tmp_path / "b.parquet")
+    summary = read_source(tmp_path)
+    assert summary["coordinates"] is True
+    assert summary["columns"] == ["sequence_id", "sequence", "structure_tokens"]
+
+
+def test_read_source_rejects_mixed_structure_presence(tmp_path):
+    write_shard(tmp_path / "a.parquet", rows(1))
+    write_shard(tmp_path / "b.parquet", rows(1, structure=False), structure=False)
+    with pytest.raises(ValueError, match="structure_tokens"):
+        read_source(tmp_path)

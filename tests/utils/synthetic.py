@@ -1,8 +1,6 @@
-import json
 import pyarrow as pa
 import pyarrow.parquet as pq
-from stok.data.structure_export import structure_export_schema
-from stok.utils.pretrained import file_sha256, json_sha256, state_sha256
+from stok.utils.pretrained import state_sha256
 
 import random
 from typing import Callable, List, Tuple
@@ -86,96 +84,8 @@ def make_collate_fn(
     return _collate
 
 
-def canonical_fixture(row):
-    """Build complete original observations for an explicit local test identity."""
-    import numpy as np
-    from stok.data.canonical import canonical_record
-    from stok.utils.structure_parser import PolymerStructure
-
-    length = len(row["sequence"])
-    coordinates = np.zeros((length, 4, 3), dtype=np.float32)
-    if "coordinates" in row:
-        coordinates[:, :3] = np.asarray(row["coordinates"], dtype=np.float32)
-    if "original_atom_mask" in row:
-        coordinates[~np.asarray(row["original_atom_mask"], dtype=bool)] = np.nan
-    else:
-        for position, token in enumerate(row["structure_tokens"]):
-            if token is None:
-                coordinates[position, 3] = np.nan
-    residue_map = []
-    for position, entry in enumerate(row["residue_map"]):
-        residue_map.append(
-            {
-                "polymer_position": position,
-                "monomer_id": "ALA",
-                "observed_monomer_id": "ALA",
-                "observed_one_letter": row["sequence"][position],
-                "label_seq_id": position + 1,
-                "author_residue_id": position + 1,
-                "insertion_code": "",
-                "selected_altloc": "",
-                **entry,
-            }
-        )
-    source = {
-        "path": row["source"]["path"],
-        "sha256": row["source"]["sha256"],
-        "label_chain_id": "A",
-        "author_chain_id": "A",
-        "entity_id": "1",
-        "model_index": 0,
-        "model_serial_id": 1,
-        "sequence_source": "supplied",
-        **row["source"],
-    }
-    structure = PolymerStructure(
-        row["sequence_id"],
-        row["sequence"],
-        coordinates,
-        np.isfinite(coordinates).all(-1),
-        tuple(residue_map),
-        source,
-    )
-    return canonical_record(
-        structure,
-        source_namespace=row["canonical_identity"]["source_namespace"],
-        source_accession=row["canonical_identity"]["source_accession"],
-    )
-
-
-def canonical_row(row, record):
-    return {
-        **row,
-        "canonical_id": record["canonical_id"],
-        "canonical_content_sha256": record["content_sha256"],
-        "residue_map_sha256": record["residue_map_sha256"],
-        "canonical_identity": record["identity"],
-        "parent_ids": record["parent_ids"],
-        "source": record["provenance"]["source"],
-        "residue_map": record["residue_map"],
-    }
-
-
-def declare_synthetic_source(row, *, source_accession):
-    """Explicitly declare a distinct fixture source; display aliases alone do not."""
-    row = {
-        **row,
-        "source": {
-            **row["source"],
-            "path": source_accession + ".cif",
-            "sha256": json_sha256({"fixture_source": source_accession}),
-        },
-        "canonical_identity": {
-            **row["canonical_identity"],
-            "source_namespace": "synthetic",
-            "source_accession": source_accession,
-        },
-    }
-    return canonical_row(row, canonical_fixture(row))
-
-
 def make_mdlm_rows() -> list[dict]:
-    """Clean schema-2 paired rows; inventory keeps four original atoms."""
+    """Clean paired rows; the long chain has one unavailable structure token."""
     rows = []
     for sequence_id, sequence in (
         ("long", "LAGVSERTIPDKQNFYMHWCLAGVSERT"),
@@ -184,31 +94,23 @@ def make_mdlm_rows() -> list[dict]:
         tokens = list(range(len(sequence)))
         if sequence_id == "long":
             tokens[14] = None
-        row = {
-            "dataset": "synthetic",
-            "canonical_identity": {
-                "source_namespace": "synthetic",
-                "source_accession": sequence_id,
-            },
-            "sequence_id": sequence_id,
-            "sequence": sequence,
-            "structure_tokens": tokens,
-            "coordinates": torch.arange(len(sequence) * 9, dtype=torch.float32)
-            .reshape(len(sequence), 3, 3)
-            .tolist(),
-            "source": {
-                "path": sequence_id + ".cif",
-                "sha256": json_sha256({"fixture_source": sequence_id}),
-            },
-            "residue_map": [{"polymer_position": i} for i in range(len(sequence))],
-        }
-        rows.append(canonical_row(row, canonical_fixture(row)))
+        rows.append(
+            {
+                "dataset": "synthetic",
+                "sequence_id": sequence_id,
+                "sequence": sequence,
+                "structure_tokens": tokens,
+                "coordinates": torch.arange(len(sequence) * 9, dtype=torch.float32)
+                .reshape(len(sequence), 3, 3)
+                .tolist(),
+            }
+        )
     return rows
 
 
-def write_dataset(path, rows, *, codebook=None, policy=None):
-    from stok.data.canonical import _population
-    from stok.data.structure_export import representation_sha256
+def write_dataset(path, rows, *, codebook=None, coordinates=True, extra=None):
+    """One plain shard carrying the tokenizer identity of ``codebook``."""
+    from stok.data.format import shard_schema
 
     codebook = (
         torch.arange(64, dtype=torch.float32).reshape(32, 2)
@@ -216,87 +118,20 @@ def write_dataset(path, rows, *, codebook=None, policy=None):
         else codebook
     )
     path.mkdir()
-    canonical = path / "canonical"
-    canonical.mkdir()
-    records, exported = [], []
-    for row in rows:
-        record = canonical_fixture(row)
-        records.append(record)
-        exported.append(canonical_row(row, record))
-    (canonical / "records.jsonl").write_text(
-        "".join(json.dumps(record) + "\n" for record in records)
+    tokenizer = {
+        "preset": "large",
+        "checkpoint_sha256": "0" * 64,
+        "codebook_sha256": state_sha256({"codebook": codebook}),
+        "codebook_size": len(codebook),
+        "stok_version": "test",
+    }
+    schema = shard_schema(
+        structure=True,
+        coordinates=coordinates,
+        extra=extra,
+        tokenizer=tokenizer,
     )
-    (canonical / "rejections.jsonl").write_text("")
-    inventory = {
-        "schema_version": 1,
-        "status": "complete",
-        "population_sha256": _population(records),
-        "requested_input_count": len(records),
-        "canonical_record_count": len(records),
-        "parser_rejection_count": 0,
-        "exclusions": {},
-        **{
-            name + "_sha256": file_sha256(canonical / (name + ".jsonl"))
-            for name in ("records", "rejections")
-        },
-    }
-    (canonical / "manifest.json").write_text(json.dumps(inventory))
-    provenance = {
-        "schema_version": 2,
-        "canonical_population_sha256": inventory["population_sha256"],
-        "tokenizer": {
-            "codebook_size": len(codebook),
-            "codebook_sha256": state_sha256({"codebook": codebook}),
-            "encoder_state_sha256": json_sha256("local-fixture"),
-        },
-        "policy": policy or {"sequence_mode": "native", "context_scope": "full_chain"},
-        "execution": {
-            "device": "cpu",
-            "dtype": "float32",
-            "matmul_precision": "highest",
-            "cuda_matmul_allow_tf32": False,
-            "cudnn_allow_tf32": True,
-        },
-    }
-    metadata = {
-        b"stok.provenance": json.dumps(provenance, sort_keys=True).encode(),
-        b"stok.tokenizer_sha256": json_sha256(provenance["tokenizer"]).encode(),
-        b"stok.policy_sha256": json_sha256(provenance["policy"]).encode(),
-    }
-    shard = path / "part-000000.parquet"
     pq.write_table(
-        pa.Table.from_pylist(
-            exported,
-            schema=structure_export_schema(include_coordinates=True, metadata=metadata),
-        ),
-        shard,
+        pa.Table.from_pylist(rows, schema=schema), path / "part-000000.parquet"
     )
-    counts = {
-        "row_count": len(rows),
-        "residue_count": sum(len(row["sequence"]) for row in rows),
-        "null_count": sum(row["structure_tokens"].count(None) for row in rows),
-    }
-    (path / "rejections.jsonl").write_text("")
-    manifest = {
-        "schema_version": 2,
-        "status": "complete",
-        "provenance": provenance,
-        "tokenizer_sha256": metadata[b"stok.tokenizer_sha256"].decode(),
-        "policy_sha256": metadata[b"stok.policy_sha256"].decode(),
-        "canonical_directory": "canonical",
-        "canonical_manifest_sha256": file_sha256(canonical / "manifest.json"),
-        "canonical_population_sha256": inventory["population_sha256"],
-        "requested_input_count": len(rows),
-        "canonical_record_count": len(rows),
-        "parser_rejection_count": 0,
-        "representation_rejection_count": 0,
-        "rejection_count": 0,
-        "exclusions": {},
-        "representation_sha256": representation_sha256(provenance),
-        "row_order": "accepted_canonical_record_order",
-        "shards": [{"path": shard.name, "sha256": file_sha256(shard), **counts}],
-        "rejections_sha256": file_sha256(path / "rejections.jsonl"),
-        **counts,
-    }
-    (path / "manifest.json").write_text(json.dumps(manifest))
     return path

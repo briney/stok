@@ -149,7 +149,7 @@ def test_native_eval_has_no_duplicates_or_dropped_tail(tmp_path, eval_n):
 def test_mdlm_two_rank_update_matches_global_reference(tmp_path, coverage):
     import torch
     from tests.integration.test_mdlm_training import training_fixture
-    from tests.utils.synthetic import make_mdlm_rows, declare_synthetic_source
+    from tests.utils.synthetic import make_mdlm_rows
 
     rows = []
     for i in range(8):
@@ -165,7 +165,7 @@ def test_mdlm_two_rank_update_matches_global_reference(tmp_path, coverage):
             )
             if coverage == "empty-rank":
                 row["sequence"] = "XXX"
-        rows.append(declare_synthetic_source(row, source_accession=f"training-{i}"))
+        rows.append(row)
     training_fixture(tmp_path, rows=rows)
     command = [
         sys.executable,

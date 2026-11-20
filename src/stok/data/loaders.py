@@ -1,6 +1,5 @@
 """Training and evaluation loader construction and residue alignment."""
 
-from collections.abc import Mapping
 from typing import Any
 
 import torch
@@ -131,11 +130,7 @@ def _parse_train_configs(cfg: DictConfig) -> list[dict[str, Any]]:
     raise ValueError(f"Invalid data.train config type: {type(raw_train)}")
 
 
-def _build_dataloaders(
-    cfg: DictConfig,
-    *,
-    identity: Mapping[str, Any],
-) -> tuple[DataLoader, dict[str, DataLoader]]:
+def _build_dataloaders(cfg: DictConfig) -> tuple[DataLoader, dict[str, DataLoader]]:
     """Build raw aligned MDLM loaders; all derived state stays in consumers."""
     rank, _ = distributed_rank()
     batch_size = cfg.train.batch_size
@@ -159,9 +154,7 @@ def _build_dataloaders(
         kwargs: dict[str, Any] = dict(
             dataset_path=path,
             max_length=None,
-            dataset_name=identity["sources"][name]["replay_sha256"]
-            if training
-            else name,
+            dataset_name=name,
             load_coords=load_coords,
             require_structure_tokens=training,
         )
@@ -223,11 +216,7 @@ def _build_dataloaders(
             dataset(options["path"], options, name, training=False),
             shuffle=False,
             drop_last=False,
-            generator=torch.Generator().manual_seed(
-                identity["shared_cases"]["request"]["seed"]
-                if identity.get("shared_cases")
-                else 0
-            ),
+            generator=torch.Generator().manual_seed(0),
             **loader_kwargs(options.get("batch_size", batch_size)),
         )
     return train_loader, eval_loaders

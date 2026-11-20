@@ -10,7 +10,7 @@ import pytest
 import torch
 
 from stok.data.loaders import _build_dataloaders
-from stok.data.mdlm import CANONICAL_AA, prepare_mdlm_batch, validate_mdlm_sources
+from stok.data.mdlm import CANONICAL_AA, data_identity, prepare_mdlm_batch
 from stok.eval.mdlm import validate_mdlm_decoder
 from stok.models.decoder import load_pretrained_decoder
 from stok.models.mdlm import STokMDLM
@@ -36,15 +36,13 @@ def test_real_paired_bf16_overfit_and_conditioned_decode():
             config_name="config", overrides=["model=mdlm_150m", "train=mdlm_pilot"]
         )
     codebook = load_codebook(path=archive)
-    identity = validate_mdlm_sources(
-        {"diagnostic": source}, {}, codebook=codebook, split_manifest=None
-    )
+    identity = data_identity({"diagnostic": source}, {}, codebook=codebook)
     OmegaConf.set_struct(cfg, False)
     cfg.data.train = {"diagnostic": {"path": source}}
     cfg.data.max_len, cfg.data.num_workers = 66, 0
     cfg.data.shuffle_rows = cfg.data.shuffle_shards = False
     cfg.data.load_coords = True
-    loader, _ = _build_dataloaders(cfg, identity=identity)
+    loader, _ = _build_dataloaders(cfg)
     tokenizer = Tokenizer()
     batch = prepare_mdlm_batch(
         next(iter(loader)),

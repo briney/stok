@@ -66,17 +66,20 @@ def parquet_shards(directory: Path) -> list[Path]:
 def read_source(directory: str | Path) -> dict[str, Any]:
     """Summarize a dataset directory from its shard footers, without reading rows."""
     directory = Path(directory)
-    shards, tokenizer, columns = [], None, None
+    shards, tokenizer, columns, coordinates = [], None, None, False
     for path in parquet_shards(directory):
         footer = pq.ParquetFile(path)
         schema = footer.schema_arrow
         context = f"{directory}: {path.name}"
         if {"sequence_id", "sequence"} - set(schema.names):
             raise ValueError(f"{context} lacks sequence_id/sequence columns")
+        coordinates = coordinates or "coordinates" in schema.names
         if columns is None:
             columns = schema.names
-        elif set(columns) != set(schema.names):
-            raise ValueError(f"{context} columns disagree with other shards")
+        elif ("structure_tokens" in columns) != ("structure_tokens" in schema.names):
+            raise ValueError(f"{context} disagrees on structure_tokens presence")
+        # Optional columns (coordinates, carried metadata) may vary by shard.
+        columns = [name for name in columns if name in schema.names]
         if "structure_tokens" in schema.names:
             raw = (schema.metadata or {}).get(TOKENIZER_KEY)
             if raw is None:
@@ -103,6 +106,6 @@ def read_source(directory: str | Path) -> dict[str, Any]:
         "rows": sum(shard["rows"] for shard in shards),
         "tokenizer": tokenizer,
         "structure": "structure_tokens" in columns,
-        "coordinates": "coordinates" in columns,
+        "coordinates": coordinates,
         "columns": columns,
     }

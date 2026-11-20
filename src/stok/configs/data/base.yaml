@@ -1,9 +1,8 @@
-# Completed paired Parquet exports with matching artifact provenance.
+# Plain Parquet dataset directories (see stok.data.format).
 max_len: 1280
 num_workers: 4
 pin_memory: true
 prefetch_factor: 4
-split_manifest: null
 load_coords: null  # null loads coordinates only for decoded evaluation
 # Single path, or named sources with path/fraction/load_coords.
 train: {}

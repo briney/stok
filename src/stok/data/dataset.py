@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-import json
 from collections.abc import Sequence
 from typing import Any
 
@@ -10,42 +9,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
 from torch.utils.data import IterableDataset, get_worker_info
-from ..utils.pretrained import json_sha256
-
-PARQUET_EXTENSIONS = {".parquet", ".parq", ".pq"}
-
-
-def parquet_shards(directory: Path) -> list[Path]:
-    """Files consumed by the directory reader and completed-export audit."""
-    return sorted(
-        path
-        for path in directory.iterdir()
-        if path.is_file() and path.suffix.lower() in PARQUET_EXTENSIONS
-    )
-
-
-def _structure_provenance(path: Path, schema: pa.Schema):
-    """Generic Parquet is permitted; representation exports require current provenance."""
-    metadata = schema.metadata or {}
-    keys = (b"stok.provenance", b"stok.tokenizer_sha256", b"stok.policy_sha256")
-    if not any(key in metadata for key in keys):
-        return None
-    try:
-        provenance = json.loads(metadata[keys[0]])
-        if (
-            type(provenance["schema_version"]) is not int
-            or provenance["schema_version"] != 2
-            or json_sha256(provenance["tokenizer"]) != metadata[keys[1]].decode()
-            or json_sha256(provenance["policy"]) != metadata[keys[2]].decode()
-        ):
-            raise ValueError("digest mismatch")
-        return (
-            metadata[keys[1]],
-            metadata[keys[2]],
-            json_sha256(provenance["execution"]),
-        )
-    except (KeyError, TypeError, ValueError, UnicodeDecodeError) as error:
-        raise ValueError(f"{path}: invalid structure-token provenance") from error
+from .format import parquet_shards
 
 
 def distributed_rank() -> tuple[int, int]:
@@ -106,20 +70,7 @@ def _parquet_columns(
     load_coords: bool,
 ) -> list[str]:
     """Validate a file's schema and select the columns consumed by the dataset."""
-    _structure_provenance(path, schema)
     required = {"sequence_id", "sequence"}
-    if (schema.metadata or {}).get(b"stok.provenance") is not None:
-        required.update(
-            {
-                "canonical_id",
-                "canonical_content_sha256",
-                "residue_map_sha256",
-                "canonical_identity",
-                "parent_ids",
-                "source",
-                "residue_map",
-            }
-        )
     if require_structure_tokens:
         required.add("structure_tokens")
     missing = required - set(schema.names)
@@ -158,19 +109,6 @@ def _parquet_columns(
                 f"{path}: coordinates must be three nested lists of integers or floats, got {dtype}"
             )
         columns.append("coordinates")
-    columns.extend(
-        name
-        for name in (
-            "source",
-            "residue_map",
-            "canonical_id",
-            "canonical_content_sha256",
-            "residue_map_sha256",
-            "canonical_identity",
-            "parent_ids",
-        )
-        if name in schema.names
-    )
     return columns
 
 
@@ -188,17 +126,6 @@ def _build_output_from_row(
         "sequence_id": sequence_id,
         "sequence": sequence,
     }
-    for name in (
-        "source",
-        "residue_map",
-        "canonical_id",
-        "canonical_content_sha256",
-        "residue_map_sha256",
-        "canonical_identity",
-        "parent_ids",
-    ):
-        if name in row:
-            out[name] = row[name]
     if "structure_tokens" in row:
         tokens = row["structure_tokens"]
         if tokens is None:
@@ -289,10 +216,8 @@ class IterableTokenizedDataset(IterableDataset):
         self._shards: list[Path] = []
         self._rows_per_shard: list[int] = []
         self._columns: list[list[str]] = []
-        provenances = set()
         for sp in shard_paths:
             pf = pq.ParquetFile(sp)
-            provenances.add(_structure_provenance(sp, pf.schema_arrow))
             self._columns.append(
                 _parquet_columns(
                     sp,
@@ -303,8 +228,6 @@ class IterableTokenizedDataset(IterableDataset):
             )
             self._shards.append(sp)
             self._rows_per_shard.append(int(pf.metadata.num_rows))
-        if len(provenances) != 1:
-            raise ValueError("Shards have incompatible structure-token provenance")
         self._total_rows = int(sum(self._rows_per_shard))
         self.num_samples = self._total_rows
         self.has_labels = any("structure_tokens" in cols for cols in self._columns)

@@ -71,14 +71,14 @@ def sample_cmd(
     decoder_path,
     decoder_preset,
 ):
-    """Generate aligned sequence/structure tokens from a version-4 MDLM checkpoint."""
+    """Generate aligned sequence/structure tokens from a version-5 MDLM checkpoint."""
     if output.exists():
         raise click.ClickException(f"Refusing to overwrite output: {output}")
     try:
         payload = read_training_checkpoint(checkpoint)
         cfg = OmegaConf.create(payload["config"])
         OmegaConf.set_readonly(cfg, True)
-        identity = OmegaConf.create(payload["runtime"]["mdlm_identity"])
+        identity = OmegaConf.create(payload["runtime"]["data"])
         codebook = payload["model"]["structure_codebook"]
         tokenizer = Tokenizer()
         expected_vocabulary = {
@@ -124,18 +124,18 @@ def sample_cmd(
                 not isinstance(sequence, str) or len(sequence) != length
             ):
                 raise ValueError("Input sequence length does not match length")
-            if structure is not None:
-                for name in ("tokenizer_sha256", "codebook_sha256"):
-                    if row.get(name) != identity[name]:
-                        raise ValueError(
-                            f"Input structure {name} does not match checkpoint"
-                        )
+            if (
+                structure is not None
+                and row.get("codebook_sha256") != identity.codebook_sha256
+            ):
+                raise ValueError(
+                    "Input structure codebook_sha256 does not match checkpoint"
+                )
             # Existing batch preparation validates residue tokens, clean code IDs and lengths.
             batch = prepare_mdlm_batch(
                 [
                     {
                         "dataset": "cli",
-                        "canonical_id": json_sha256({"sampling_input": row}),
                         "sequence_id": sequence_id,
                         "sequence": sequence if sequence is not None else "A" * length,
                         "structure_tokens": structure
@@ -175,9 +175,7 @@ def sample_cmd(
             "sampling_schedule": OmegaConf.to_container(sampling_schedule),
             "training_noise": OmegaConf.to_container(cfg.train.mdlm.noise),
             "regime_weights": model.mdlm_regime_weights,
-            "tokenizer_sha256": identity.tokenizer_sha256,
             "codebook_sha256": identity.codebook_sha256,
-            "policy_sha256": identity.policy_sha256,
             "conditioning_policy": "inverse_folding_like_native_sequence_tokenizer",
             "label_context": "native_full_chain",
             "device": device,

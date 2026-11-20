@@ -1,17 +1,14 @@
-"""Clean aligned pairs and read-only semantic preflight for masked diffusion."""
+"""Clean aligned pairs and footer-only source identity for masked diffusion."""
 
 from collections.abc import Mapping
-import json
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
-import pyarrow.parquet as pq
 import torch
 
-from .canonical import _digest
 from .collate import tokenize_residues
-from .structure_export import validate_structure_dataset
-from ..utils.pretrained import file_sha256, json_sha256, state_sha256
+from .format import TOKENIZER_IDENTITY, read_source
+from ..utils.pretrained import json_sha256, state_sha256
 from ..utils.tokenizer import Tokenizer
 
 CANONICAL_AA = "ACDEFGHIKLMNPQRSTVWY"
@@ -32,22 +29,6 @@ class MDLMBatch(TypedDict):
     noncanonical_sequence_count: int
 
 
-class MDLMRunIdentity(TypedDict):
-    sources: dict[str, dict[str, Any]]
-    canonical_population_sha256: str
-    population: dict[str, dict[str, Any]]
-    splits: dict[str, dict[str, Any]]
-    split_sha256: str | None
-    split_manifest_sha256: str | None
-    tokenizer_sha256: str
-    policy_sha256: str
-    codebook_sha256: str
-    vocabulary: dict[str, int | str]
-    training_signature: str
-    shared_cases: dict[str, Any] | None
-    coverage: dict[str, dict[str, Any]]
-
-
 def mdlm_vocabulary(codebook: torch.Tensor) -> dict[str, int | str]:
     return {
         "codebook_size": codebook.shape[0],
@@ -57,34 +38,6 @@ def mdlm_vocabulary(codebook: torch.Tensor) -> dict[str, int | str]:
         "sequence_targets": CANONICAL_AA,
         "sequence_vocab_sha256": json_sha256(Tokenizer().get_vocab()),
     }
-
-
-def mdlm_training_signature(identity) -> str:
-    """Bind training replay and its canonical/split projection, without artifacts."""
-    sources = [
-        {"dataset": name, **source}
-        for name, source in identity["sources"].items()
-        if source["kind"] == "train"
-    ]
-    members = sorted({key for source in sources for key in source["member_ids"]})
-    return json_sha256(
-        {
-            "sources": sources,
-            "population": [identity["population"][key] for key in members],
-            "splits": [identity["splits"][key] for key in members]
-            if identity["splits"]
-            else [],
-            **{
-                key: identity[key]
-                for key in (
-                    "codebook_sha256",
-                    "tokenizer_sha256",
-                    "policy_sha256",
-                    "vocabulary",
-                )
-            },
-        }
-    )
 
 
 def prepare_mdlm_batch(
@@ -99,7 +52,7 @@ def prepare_mdlm_batch(
 ) -> MDLMBatch:
     """Validate full rows, crop once, then add boundary and padding slots.
 
-    Biological keys are canonical IDs; dataset names retain replay identity.
+    Sample keys are sequence IDs; dataset names are source names.
     Coordinates must be read with max_length=None so crop offsets remain valid.
     """
     if not rows or len(seeds) != len(rows):
@@ -148,9 +101,9 @@ def prepare_mdlm_batch(
     for i, (row, seed) in enumerate(zip(rows, seeds)):
         context = f"Sample {row.get('dataset', '?')}/{row.get('sequence_id', '?')}"
         try:
-            canonical_id = row["canonical_id"]
-            if not _digest(canonical_id):
-                raise ValueError("canonical_id must be a SHA-256 digest")
+            sequence_id = row["sequence_id"]
+            if not isinstance(sequence_id, str) or not sequence_id:
+                raise ValueError("sequence_id must be a nonempty string")
             seq = row["sequence"]
             if not isinstance(seq, str) or not seq:
                 raise ValueError("sequence must be a nonempty string")
@@ -230,7 +183,7 @@ def prepare_mdlm_batch(
             if coords is not None and observed is not None:
                 coords[i, positions] = observed[start : start + length]
             offsets.append(start)
-            sample_keys.append(canonical_id)
+            sample_keys.append(sequence_id)
         except (KeyError, TypeError, ValueError, RuntimeError, OverflowError) as error:
             raise ValueError(f"{context}: {error}") from error
     return {
@@ -249,191 +202,53 @@ def prepare_mdlm_batch(
     }
 
 
-def validate_mdlm_sources(
+def data_identity(
     train_sources: Mapping,
     eval_sources: Mapping,
     *,
     codebook: torch.Tensor,
-    split_manifest: str | Path | None,
-    case_manifest: str | Path | None = None,
-) -> MDLMRunIdentity:
-    """Audit complete inventory unions before admitting native loader rows."""
-    from .canonical import iter_canonical_records
-    from ..eval.cases import audit_canonical_splits, read_evaluation_cases
-
+) -> dict[str, Any]:
+    """Summarize sources from shard footers and refuse a mismatched codebook."""
     if not train_sources:
-        raise ValueError("train_sources must contain a completed paired dataset")
-    if codebook.ndim != 2 or not codebook.numel() or not torch.isfinite(codebook).all():
-        raise ValueError("train codebook must be a nonempty finite matrix")
+        raise ValueError("train_sources must contain a paired dataset")
     if set(train_sources) & set(eval_sources):
         raise ValueError("train/eval sources must have distinct dataset names")
-    if split_manifest is None and (
-        eval_sources or len(train_sources) != 1 or case_manifest
-    ):
-        raise ValueError(
-            "train/eval sources and cases require a split manifest; only one-source overfit may omit splits"
-        )
-    shared = read_evaluation_cases(case_manifest) if case_manifest is not None else None
-    directories = (
-        {Path(ref["directory"]).resolve() for ref in shared["canonical_inventories"]}
-        if shared
-        else set()
-    )
-    sources, coverage = {}, {}
-    compatible = None
     digest = state_sha256({"codebook": codebook})
+    sources, tokenizer = {}, None
     for kind, configured in (("train", train_sources), ("eval", eval_sources)):
         for name, options in configured.items():
-            context = f"{kind} source {name}"
             try:
-                if not isinstance(name, str) or not name:
-                    raise ValueError("source name must be a nonempty string")
-                path = Path(
-                    options["path"] if isinstance(options, Mapping) else options
-                ).resolve()
-                summary = validate_structure_dataset(path)
-                tokenizer = summary["provenance"]["tokenizer"]
-                if (
-                    tokenizer["codebook_sha256"] != digest
-                    or tokenizer["codebook_size"] != codebook.shape[0]
-                ):
-                    raise ValueError(
-                        "selected codebook does not match dataset codebook digest/size"
-                    )
-                semantics = summary["tokenizer_sha256"], summary["policy_sha256"]
-                if compatible is not None and semantics != compatible:
-                    raise ValueError(
-                        "incompatible tokenizer/policy identity across train/eval sources"
-                    )
-                compatible = semantics
-                directory = Path(summary["canonical_directory"])
-                directory = (
-                    (path / directory).resolve()
-                    if not directory.is_absolute()
-                    else directory.resolve()
-                )
-                directories.add(directory)
-                members = [
-                    record["canonical_id"]
-                    for record in iter_canonical_records(directory)
-                ]
-                admitted = [
-                    row["canonical_id"]
-                    for shard in summary["shards"]
-                    for row in pq.read_table(
-                        path / shard["path"], columns=["canonical_id"]
-                    ).to_pylist()
-                ]
-                rejected = [
-                    json.loads(line)
-                    for line in (path / "rejections.jsonl").read_text().splitlines()
-                    if line.strip()
-                ]
-                rejected_by_id = {row["canonical_id"]: row for row in rejected}
-                for key in members:
-                    if key in coverage:
-                        raise ValueError(f"duplicate canonical source membership {key}")
-                    rejection = rejected_by_id.get(key)
-                    coverage[key] = {
-                        "source": name,
-                        "status": "rejected" if rejection else "admitted",
-                        "reason": rejection["reason"] if rejection else None,
-                    }
-                replay = {
-                    "shards": summary["shards"],
-                    "row_order": summary["row_order"],
-                    "admitted_ids": admitted,
-                    "rejections": rejected,
-                    "manifest_sha256": file_sha256(path / "manifest.json"),
-                }
+                path = options["path"] if isinstance(options, Mapping) else options
+                if not isinstance(path, (str, Path)):
+                    raise ValueError("source path must be a string")
+                summary = read_source(path)
+                current = summary["tokenizer"]
+                if current is not None:
+                    if (
+                        current["codebook_sha256"] != digest
+                        or current["codebook_size"] != codebook.shape[0]
+                    ):
+                        raise ValueError(
+                            "dataset codebook digest/size does not match the model codebook"
+                        )
+                    if tokenizer is not None and any(
+                        current[field] != tokenizer[field]
+                        for field in TOKENIZER_IDENTITY
+                    ):
+                        raise ValueError(
+                            "tokenizer identity differs from other sources"
+                        )
+                    tokenizer = current
                 sources[name] = {
-                    "path": str(path),
                     "kind": kind,
-                    "row_count": summary["row_count"],
-                    "member_ids": sorted(members),
-                    "canonical_population_sha256": summary[
-                        "canonical_population_sha256"
-                    ],
-                    "representation_sha256": summary["representation_sha256"],
-                    "provenance": summary["provenance"],
-                    "replay": replay,
-                    "replay_sha256": json_sha256(replay),
-                    "tokenizer_sha256": semantics[0],
-                    "policy_sha256": semantics[1],
-                    "policy": summary["provenance"]["policy"],
-                    "tokenizer_context": "full_chain",
+                    "path": str(Path(path).resolve()),
+                    **summary,
                 }
             except (OSError, KeyError, TypeError, ValueError) as error:
-                raise ValueError(f"{context}: {error}") from error
-    assert compatible is not None
-
-    # ponytail: compact population metadata stays in RAM; use indexed storage if it outgrows memory.
-    def records():
-        for directory in sorted(directories):
-            yield from iter_canonical_records(directory)
-
-    audit: dict[str, Any]
-    if split_manifest is not None:
-        audit = audit_canonical_splits(records(), split_manifest)
-        population, splits = audit["members"], audit["assignments"]
-        for key, entry in coverage.items():
-            if (sources[entry["source"]]["kind"] == "train") != (
-                splits[key]["split"] == "train"
-            ):
-                raise ValueError(
-                    f"split disagrees with train/eval source: {entry['source']} {key}"
-                )
-        if shared and any(
-            shared[key] != audit[key]
-            for key in ("population_sha256", "split_sha256", "split_manifest_sha256")
-        ):
-            raise ValueError("Frozen cases disagree with canonical population/splits")
-    else:
-        population = {
-            r["canonical_id"]: {
-                key: r[key]
-                for key in (
-                    "canonical_id",
-                    "content_sha256",
-                    "residue_map_sha256",
-                    "parent_ids",
-                )
-            }
-            | {"full_length": len(r["sequence"])}
-            for r in records()
-        }
-        splits = {}
-        audit = {
-            "population_sha256": json_sha256(
-                sorted(
-                    (key, r["content_sha256"], r["residue_map_sha256"], r["parent_ids"])
-                    for key, r in population.items()
-                )
-            ),
-            "split_sha256": None,
-            "split_manifest_sha256": None,
-        }
-    if shared:
-        for case in shared["cases"]:
-            entry = coverage.get(case["canonical_id"])
-            if not entry or sources[entry["source"]]["kind"] != "eval":
-                raise ValueError(
-                    f"Frozen case missing admitted/rejected evaluation source: {case['canonical_id']}"
-                )
-    identity: MDLMRunIdentity = {
+                raise ValueError(f"{kind} source {name}: {error}") from error
+    return {
         "sources": sources,
-        "population": population,
-        "splits": splits,
-        "canonical_population_sha256": audit["population_sha256"],
-        "split_sha256": audit["split_sha256"],
-        "split_manifest_sha256": audit["split_manifest_sha256"],
-        "tokenizer_sha256": compatible[0],
-        "policy_sha256": compatible[1],
         "codebook_sha256": digest,
+        "tokenizer": tokenizer,
         "vocabulary": mdlm_vocabulary(codebook),
-        "training_signature": "",
-        "shared_cases": shared,
-        "coverage": coverage,
     }
-    identity["training_signature"] = mdlm_training_signature(identity)
-    return identity
