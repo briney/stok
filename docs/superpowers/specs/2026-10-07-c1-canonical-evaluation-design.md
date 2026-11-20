@@ -1,5 +1,6 @@
 # C1: canonical data and frozen evaluation cases
 
+**Superseded:** removed by the [plain Parquet data design](2026-11-20-plain-parquet-data-design.md) (2026-11-20). Kept as history.
 **Status:** Design and implementation approved October 7, 2026; implementation, qualification and independent task/final reviews complete; consolidated final correction approved at `8167a0b`. Qualification limits and separate source boundaries remain explicit.
 **Evidence:** [C1 implementation and qualification record](../../experiments/refactor/c1.md).
 **Base:** `main` at `71f4524`, after merged C0 / PR #16.
