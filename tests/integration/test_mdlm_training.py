@@ -157,14 +157,14 @@ def test_paired_parquet_update_both_heads_and_compute_accounting(tmp_path):
 def test_raw_loader_defers_crop_and_reads_full_coordinates_when_requested(tmp_path):
     source, codebook = training_fixture(tmp_path)
     cfg = mdlm_config(tmp_path / "run", source, codebook, **{"data.load_coords": True})
-    loader, _ = _build_dataloaders(cfg)
+    loader, *_ = _build_dataloaders(cfg)
     batch = next(iter(loader))
     assert isinstance(batch, list) and isinstance(batch[0], dict)
     assert loader.collate_fn is list
     assert batch[0]["coords"].shape[0] == len(batch[0]["sequence"])
     assert batch[0]["dataset"] == "local"
     cfg.data.load_coords = False
-    loader, _ = _build_dataloaders(cfg)
+    loader, *_ = _build_dataloaders(cfg)
     assert "coords" not in next(iter(loader))[0]
 
 
@@ -471,7 +471,7 @@ def test_real_zero_mask_draw_still_updates_adamw(tmp_path):
         codebook,
         **{"train.max_steps": 1, "train.mdlm.regime_weights": {"sequence_only": 1}},
     )
-    loader, _ = _build_dataloaders(cfg)
+    loader, *_ = _build_dataloaders(cfg)
     rows = next(iter(loader))
     # Draws key on the source name and sequence ID, so find an actual empty
     # draw for this fixture. The training run below must reproduce it unchanged.

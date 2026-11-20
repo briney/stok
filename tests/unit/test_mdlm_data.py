@@ -122,32 +122,14 @@ def test_batch_preserves_distinct_absent_coordinates():
     assert batch["structure_valid"].sum() == 3
 
 
-def test_batch_keys_are_sequence_ids_and_recorded_crop_is_kept():
+def test_batch_keys_are_sequence_ids():
     from stok.data.mdlm import prepare_mdlm_batch
 
     row = make_mdlm_rows()[0]
     batch = prepare_mdlm_batch(
-        [row],
-        Tokenizer(),
-        max_len=8,
-        codebook_size=C,
-        crop="center",
-        seeds=[0],
-        crop_intervals=[(3, 7)],
+        [row], Tokenizer(), max_len=8, codebook_size=C, crop="center", seeds=[0]
     )
     assert batch["sample_keys"] == [row["sequence_id"]]
-    assert batch["crop_offsets"].tolist() == [3]
-    assert batch["residue_mask"].sum().item() == 4
-    with pytest.raises(ValueError, match="crop"):
-        prepare_mdlm_batch(
-            [row],
-            Tokenizer(),
-            max_len=8,
-            codebook_size=C,
-            crop="center",
-            seeds=[0],
-            crop_intervals=[(3, 10)],
-        )
 
 
 def test_data_identity_summarizes_sources_from_footers(tmp_path):

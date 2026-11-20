@@ -50,10 +50,8 @@ def test_pilot_composes_pinned_values_and_parameter_count():
     assert "split_manifest" not in cfg.data and cfg.train.resume_from is None
     assert cfg.train.eval.steps == 250
     assert cfg.train.eval.mdlm.enabled and cfg.train.eval.mdlm.generation.enabled
-    assert cfg.train.eval.mdlm.case_manifest is None
     assert cfg.train.eval.mdlm.generation.steps == 1000
     assert cfg.train.eval.mdlm.generation.sampling_steps == 64
-    assert cfg.train.eval.mdlm.generation.max_cases == 16
     assert cfg.train.eval.mdlm.generation.decode is False
     with torch.device("meta"):
         enc = cfg.model.encoder
@@ -72,11 +70,8 @@ def test_pilot_composes_pinned_values_and_parameter_count():
     assert sum(p.numel() for p in model.parameters() if p.requires_grad) == 144797472
     cfg.train.eval.mdlm.enabled = cfg.train.eval.mdlm.generation.enabled = False
     resolved = resolve_mdlm_eval_config(cfg)
-    assert resolved.families is None and resolved.generation.families is None
-    assert not any(
-        key in cfg.train.eval.mdlm
-        for key in ("mask_probabilities", "regimes", "placements", "generation_steps")
-    )
+    assert list(resolved.mask_probabilities) == [0.15, 0.5, 0.85]
+    assert resolved.generation.num_samples == 64
 
 
 @pytest.mark.parametrize("regime", REGIMES)
@@ -136,7 +131,7 @@ def test_mdlm_smoke_dispatch_uses_paired_model():
         "populated_project",
         "missing_source",
         "bare_parquet",
-        "missing_cohort",
+        "bad_mask_probability",
         "precision",
         "gumbel",
     ],
@@ -154,8 +149,8 @@ def test_startup_fails_before_artifacts_or_wandb(tmp_path, monkeypatch, kind):
         cfg.data.train.local.path = str(tmp_path / "absent")
     elif kind == "bare_parquet":
         cfg.data.train.local.path = str(source / "part-000000.parquet")
-    elif kind == "missing_cohort":
-        cfg.train.eval.mdlm = {"enabled": True}
+    elif kind == "bad_mask_probability":
+        cfg.train.eval.mdlm = {"enabled": True, "mask_probabilities": [2.0]}
     elif kind == "precision":
         cfg.train.mixed_precision = "fp16"
     else:
@@ -166,7 +161,7 @@ def test_startup_fails_before_artifacts_or_wandb(tmp_path, monkeypatch, kind):
     )
     with pytest.raises(
         (ValueError, RuntimeError),
-        match="MDLM|precision|output_dir|populated|gumbel|train source",
+        match="MDLM|precision|output_dir|populated|gumbel|train source|mask_probabilities",
     ):
         run_training(cfg)
     assert not project.exists() or sorted(p.name for p in project.iterdir()) == ["keep"]
@@ -380,16 +375,6 @@ def test_invalid_or_unqualified_checkpoint_fails_closed(tmp_path, trained, chang
     assert result.exit_code != 0 and not output.exists()
     if change == "conditional":
         assert "joint" in result.output and "qualified" in result.output
-
-
-def test_family_selection_is_an_explicit_evaluation_override():
-    cfg = pilot(
-        "train.eval.mdlm.enabled=false",
-        "train.eval.mdlm.generation.enabled=false",
-        "train.eval.mdlm.families=[diagnostic]",
-    )
-    resolved = resolve_mdlm_eval_config(cfg)
-    assert list(resolved.families) == ["diagnostic"]
 
 
 def test_cpu_launch_logs_device_precision_and_identity(tmp_path, capsys):

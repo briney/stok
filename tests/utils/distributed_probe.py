@@ -77,7 +77,7 @@ def main():
     else:
         cfg.data.train = str(root / "shards")
     cfg.data.eval = str(root / "eval_shards")
-    train, evaluations = _build_dataloaders(cfg)
+    train, evaluations, _ = _build_dataloaders(cfg)
     loader = train if args.case == "coverage" else evaluations["default"]
     ids, batches = [], 0
     for batch in loader:

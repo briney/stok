@@ -174,13 +174,9 @@ def test_obsolete_inactive_and_unknown_keys_are_rejected(tmp_path, key, value):
     OmegaConf.update(overlay, key, value, force_add=True)
     path = tmp_path / "invalid.yaml"
     OmegaConf.save(overlay, path)
-    with pytest.raises(
-        ValueError, match="families" if key.endswith("families") else key
-    ):
+    with pytest.raises(ValueError, match=key):
         load_training_config(base_config=path)
-    with pytest.raises(
-        ValueError, match="families" if key.endswith("families") else key
-    ):
+    with pytest.raises(ValueError, match=key):
         load_training_config([f"++{key}={str(value).lower()}"])
 
 
@@ -274,7 +270,7 @@ def test_custom_yaml_requires_an_overlay_mapping(tmp_path, monkeypatch, contents
     "key,value",
     [
         ("train.eval.mdlm.generation.schedule.power", 2),
-        ("train.eval.mdlm.families", 8),
+        ("train.eval.mdlm.max_samples", 0),
     ],
 )
 def test_inactive_component_parameters_fail_before_execution(
@@ -291,9 +287,7 @@ def test_inactive_component_parameters_fail_before_execution(
         "_maybe_get_accelerator",
         lambda *a, **k: pytest.fail("inactive config reached device initialization"),
     )
-    with pytest.raises(
-        ValueError, match="families" if key.endswith("families") else key
-    ):
+    with pytest.raises(ValueError, match=key):
         engine.run_training(cfg)
     assert not (tmp_path / "run").exists()
 
@@ -321,32 +315,6 @@ def test_malformed_nested_settings_raise_useful_validation_errors(tmp_path, key,
     OmegaConf.update(cfg, key, value, force_add=True, merge=False)
     with pytest.raises(ValueError):
         validate_training_config(cfg)
-
-
-@pytest.mark.parametrize(
-    "field,value",
-    [
-        ("label_context", "observed_only"),
-        ("conditioning_policy", "sequence_independent"),
-    ],
-)
-def test_false_evaluation_policy_labels_fail_before_side_effects(
-    tmp_path, monkeypatch, field, value
-):
-    from stok.config import load_training_config
-    from stok.training import engine
-
-    cfg = load_training_config([f"train.output_dir={tmp_path / 'run'}"])
-    OmegaConf.set_struct(cfg, False)
-    cfg.train.eval.mdlm[field] = value
-    monkeypatch.setattr(
-        engine,
-        "_maybe_get_accelerator",
-        lambda *a, **k: pytest.fail("false policy reached devices"),
-    )
-    with pytest.raises(ValueError, match=field):
-        engine.run_training(cfg)
-    assert not (tmp_path / "run").exists()
 
 
 def test_all_explicit_zero_source_fractions_fail_before_side_effects(
@@ -507,10 +475,6 @@ def test_decoded_eval_coordinate_precedence_is_immutable_and_early(
         cfg.data.eval.heldout.load_coords = source_setting
     cfg.train.eval.mdlm.generation.enabled = True
     cfg.train.eval.mdlm.generation.decode = True
-    from tests.integration.test_mdlm_evaluation import config, rows
-
-    case_cfg, _ = config(rows(1), generation=True)
-    cfg.train.eval.mdlm.case_manifest = case_cfg.train.eval.mdlm.case_manifest
     before = OmegaConf.to_yaml(cfg, resolve=False)
     OmegaConf.set_readonly(cfg, True)
 

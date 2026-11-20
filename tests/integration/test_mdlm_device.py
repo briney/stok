@@ -42,7 +42,7 @@ def test_real_paired_bf16_overfit_and_conditioned_decode():
     cfg.data.max_len, cfg.data.num_workers = 66, 0
     cfg.data.shuffle_rows = cfg.data.shuffle_shards = False
     cfg.data.load_coords = True
-    loader, _ = _build_dataloaders(cfg)
+    loader, *_ = _build_dataloaders(cfg)
     tokenizer = Tokenizer()
     batch = prepare_mdlm_batch(
         next(iter(loader)),

@@ -678,7 +678,7 @@ def test_resume_evaluation_overrides_change_measurement_not_training(tmp_path):
     cfg.train.resume_from = str(tmp_path / "interrupted/checkpoints/step_00000002.pt")
     cfg.train.output_dir = str(tmp_path / "resumed")
     cfg.train.eval.mdlm.generation.sampling_steps = 2
-    cfg.train.eval.mdlm.families = ["full"]
+    cfg.train.eval.mdlm.mask_probabilities = [0.5]
     execute(cfg, tmp_path / "resumed.yaml")
     full = torch.load(tmp_path / "full/model/final.pt", weights_only=True)
     resumed = torch.load(tmp_path / "resumed/model/final.pt", weights_only=True)
@@ -694,13 +694,12 @@ def test_resume_evaluation_overrides_change_measurement_not_training(tmp_path):
         "signature",
     ):
         equal(full[key], resumed[key])
-    assert (
-        full["runtime"]["mdlm_identity"]["shared_cases"]
-        == resumed["runtime"]["mdlm_identity"]["shared_cases"]
-    )
+    assert full["runtime"]["data"] == resumed["runtime"]["data"]
     summaries = [
         json.loads(path.read_text())
         for path in (tmp_path / "resumed/logs/evaluations").glob("*.json")
     ]
     assert {summary["global_step"] for summary in summaries} == {3, 4}
-    assert all(summary["settings"]["families"] == ["full"] for summary in summaries)
+    assert all(
+        summary["settings"]["mask_probabilities"] == [0.5] for summary in summaries
+    )

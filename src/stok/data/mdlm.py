@@ -48,7 +48,6 @@ def prepare_mdlm_batch(
     codebook_size: int,
     crop: Literal["random", "center"],
     seeds: list[int],
-    crop_intervals: list[tuple[int, int]] | None = None,
 ) -> MDLMBatch:
     """Validate full rows, crop once, then add boundary and padding slots.
 
@@ -63,8 +62,6 @@ def prepare_mdlm_batch(
         raise ValueError("codebook_size must be a positive integer")
     if crop not in {"random", "center"}:
         raise ValueError("crop must be random or center")
-    if crop_intervals is not None and len(crop_intervals) != len(rows):
-        raise ValueError("crop_intervals requires one crop per row")
     mask_id = tokenizer.mask_token_id
     if (
         type(mask_id) is not int
@@ -156,16 +153,6 @@ def prepare_mdlm_batch(
                     )
                 )
             )
-            if crop_intervals is not None:
-                start, stop = crop_intervals[i]
-                if (
-                    type(start) is not int
-                    or type(stop) is not int
-                    or not 0 <= start < stop <= len(seq)
-                    or stop - start > max_len - 2
-                ):
-                    raise ValueError("unsupported or invalid recorded crop")
-                length = stop - start
             positions = slice(1, length + 1)
             sequence_tokens[i, 0] = tokenizer.bos_token_id
             sequence_tokens[i, length + 1] = tokenizer.eos_token_id

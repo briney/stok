@@ -130,8 +130,14 @@ def _parse_train_configs(cfg: DictConfig) -> list[dict[str, Any]]:
     raise ValueError(f"Invalid data.train config type: {type(raw_train)}")
 
 
-def _build_dataloaders(cfg: DictConfig) -> tuple[DataLoader, dict[str, DataLoader]]:
-    """Build raw aligned MDLM loaders; all derived state stays in consumers."""
+def _build_dataloaders(
+    cfg: DictConfig,
+) -> tuple[DataLoader, dict[str, DataLoader], dict[str, DataLoader]]:
+    """Build raw aligned MDLM loaders: training, denoising and generation evaluation.
+
+    Evaluation loaders read the leading rows of each source in directory order,
+    capped at ``max_samples`` (denoising) and ``generation.num_samples``.
+    """
     rank, _ = distributed_rank()
     batch_size = cfg.train.batch_size
     num_workers = cfg.data.num_workers
@@ -210,13 +216,22 @@ def _build_dataloaders(cfg: DictConfig) -> tuple[DataLoader, dict[str, DataLoade
         drop_last=True,
         **loader_kwargs(batch_size),
     )
-    eval_loaders = {}
+    settings = OmegaConf.select(cfg, "train.eval.mdlm", default={}) or {}
+    caps = (
+        settings.get("max_samples"),
+        OmegaConf.select(cfg, "train.eval.mdlm.generation.num_samples", default=64),
+    )
+    eval_loaders: tuple[dict[str, DataLoader], dict[str, DataLoader]] = ({}, {})
     for name, options in eval_configs.items():
-        eval_loaders[name] = DataLoader(
-            dataset(options["path"], options, name, training=False),
-            shuffle=False,
-            drop_last=False,
-            generator=torch.Generator().manual_seed(0),
-            **loader_kwargs(options.get("batch_size", batch_size)),
-        )
-    return train_loader, eval_loaders
+        for loaders, cap in zip(eval_loaders, caps):
+            ds = dataset(options["path"], options, name, training=False)
+            if cap is not None:
+                ds.num_samples = min(ds.num_samples, int(cap))
+            loaders[name] = DataLoader(
+                ds,
+                shuffle=False,
+                drop_last=False,
+                generator=torch.Generator().manual_seed(0),
+                **loader_kwargs(options.get("batch_size", batch_size)),
+            )
+    return train_loader, *eval_loaders

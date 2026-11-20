@@ -236,14 +236,6 @@ def run_training(cfg: DictConfig) -> None:
     for regime in REGIMES:
         cfg.train.mdlm.regime_weights.setdefault(regime, 0.0)
     cfg.train.eval.mdlm = resolve_mdlm_eval_config(cfg)
-    from stok.eval.cases import read_evaluation_cases
-
-    shared = (
-        read_evaluation_cases(cfg.train.eval.mdlm.case_manifest)
-        if cfg.train.eval.mdlm.case_manifest
-        else None
-    )
-    resolve_mdlm_eval_config(cfg, identity={"shared_cases": shared})
     OmegaConf.set_readonly(cfg, True)
     project = cfg.train.output_dir
     if not isinstance(project, str) or not project.strip():
@@ -307,8 +299,8 @@ def run_training(cfg: DictConfig) -> None:
         "effective_precision": effective_precision,
         "data": mdlm_identity,
     }
-    mdlm_eval = resolve_mdlm_eval_config(cfg, identity=mdlm_identity)
-    train_loader, eval_loaders = _build_dataloaders(cfg)
+    mdlm_eval = resolve_mdlm_eval_config(cfg)
+    train_loader, eval_loaders, generation_loaders = _build_dataloaders(cfg)
     model = build_model(cfg, codebook=codebook)
     if mdlm_eval.generation.enabled and mdlm_eval.generation.decode:
         from stok.utils.sampling import inference_context
@@ -625,12 +617,12 @@ def run_training(cfg: DictConfig) -> None:
                 and current_step % mdlm_eval.generation.steps == 0
             )
             if denoising_due or generation_due:
-                all_eval_metrics, coverage = evaluate_mdlm(
+                all_eval_metrics = evaluate_mdlm(
                     model,
                     eval_loaders,
+                    generation_loaders,
                     cfg,
                     accelerator=accelerator,
-                    identity=mdlm_identity,
                     decoder=decoder,
                     run_denoising=denoising_due,
                     run_generation=generation_due,
@@ -642,14 +634,9 @@ def run_training(cfg: DictConfig) -> None:
                         json.dumps(
                             {
                                 "global_step": current_step,
-                                # Enabled evaluation requires frozen cases.
-                                "shared_cases_sha256": cast(
-                                    dict, mdlm_identity["shared_cases"]
-                                )["shared_cases_sha256"],
                                 "settings": OmegaConf.to_container(
                                     mdlm_eval, resolve=True
                                 ),
-                                "coverage": coverage,
                                 "metrics": all_eval_metrics,
                             },
                             sort_keys=True,
