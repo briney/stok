@@ -720,3 +720,96 @@ def test_resume_evaluation_overrides_change_measurement_not_training(tmp_path):
     assert all(
         summary["settings"]["mask_probabilities"] == [0.5] for summary in summaries
     )
+
+
+def warm_start_source(tmp_path):
+    """A finished tiny run whose final weights seed a warm start."""
+    from stok.training.engine import run_training
+
+    source, codebook = training_fixture(tmp_path / "source-data")
+    cfg = mdlm_config(tmp_path / "source-run", source, codebook)
+    run_training(cfg)
+    return tmp_path / "source-run/model/final.pt", source, codebook
+
+
+def test_init_from_loads_weights_only(tmp_path):
+    from stok.training.engine import run_training
+
+    (tmp_path / "source-data").mkdir()
+    warm, source, codebook = warm_start_source(tmp_path)
+    cfg = mdlm_config(
+        tmp_path / "warm",
+        source,
+        codebook,
+        **{"train.init_from": str(warm), "train.max_steps": 1, "train.lr": 0.0},
+    )
+    run_training(cfg)
+    before = torch.load(warm, weights_only=True)
+    after = torch.load(tmp_path / "warm/model/final.pt", weights_only=True)
+    equal(before["model"], after["model"])  # lr=0: weights are exactly the warm start
+    assert after["global_step"] == 1 and before["global_step"] == 2
+    assert all(
+        int(state["step"]) == 1 for state in after["optimizer"]["state"].values()
+    )
+    assert after["signature"]["init_from_sha256"] is not None
+    assert "init_from" not in after["signature"]["config"]["train"]
+
+
+@pytest.mark.parametrize("change", ["d_model", "codebook"])
+def test_init_from_refuses_mismatch_before_side_effects(tmp_path, monkeypatch, change):
+    from stok.training.engine import run_training
+
+    (tmp_path / "source-data").mkdir()
+    warm, source, codebook = warm_start_source(tmp_path)
+    options = {"train.init_from": str(warm)}
+    if change == "d_model":
+        options.update({"model.encoder.d_model": 32, "model.encoder.n_heads": 2})
+    else:
+        # Data and model share a different codebook; only the warm start disagrees.
+        (tmp_path / "other-data").mkdir()
+        source, codebook = training_fixture(
+            tmp_path / "other-data", codebook=torch.zeros(32, 2)
+        )
+    cfg = mdlm_config(tmp_path / "warm", source, codebook, **options)
+    monkeypatch.setattr(
+        "stok.training.engine._maybe_init_wandb",
+        lambda *a, **kw: pytest.fail("W&B reached before init_from checks"),
+    )
+    with pytest.raises(ValueError, match="init_from"):
+        run_training(cfg)
+    assert not (tmp_path / "warm").exists()
+
+
+def test_resume_warm_started_run_without_init_file(tmp_path):
+    (tmp_path / "source-data").mkdir()
+    warm, _, _ = warm_start_source(tmp_path)
+    cfg = config_for(tmp_path)
+    cfg.model.encoder.dropout = 0
+    cfg.train.init_from = str(warm)
+    execute(cfg, tmp_path / "full.yaml")
+    cfg.train.output_dir = str(tmp_path / "interrupted")
+    execute(cfg, tmp_path / "interrupted.yaml", stop=2, ok=False)
+    moved = tmp_path / "gone.pt"
+    warm.rename(moved)
+    cfg.train.resume_from = str(tmp_path / "interrupted/checkpoints/step_00000002.pt")
+    execute(cfg, tmp_path / "resumed.yaml")
+    full = torch.load(tmp_path / "full/model/final.pt", weights_only=True)
+    resumed = torch.load(tmp_path / "interrupted/model/final.pt", weights_only=True)
+    for key in ("model", "optimizer", "global_step", "signature"):
+        equal(full[key], resumed[key])
+
+
+@pytest.mark.parametrize("original", [True, False])
+def test_resume_refuses_added_or_dropped_init_from(tmp_path, original):
+    (tmp_path / "source-data").mkdir()
+    warm, _, _ = warm_start_source(tmp_path)
+    cfg = config_for(tmp_path)
+    cfg.model.encoder.dropout = 0
+    if original:
+        cfg.train.init_from = str(warm)
+    execute(cfg, tmp_path / "before.yaml", stop=2, ok=False)
+    cfg.train.init_from = None if original else str(warm)
+    cfg.train.resume_from = str(tmp_path / "full/checkpoints/step_00000002.pt")
+    cfg.train.output_dir = str(tmp_path / "rejected")
+    result = execute(cfg, tmp_path / "after.yaml", ok=False)[0]
+    assert "init_from" in result.stdout + result.stderr

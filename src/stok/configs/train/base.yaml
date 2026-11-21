@@ -31,7 +31,8 @@ max_grad_norm: 1.0
 
 # IO paths
 output_dir: null
-resume_from: null  # complete version-4 continuation with the original budget
+resume_from: null  # complete version-5 continuation with the original budget
+init_from: null  # warm start: model weights only from a version-5 checkpoint
 
 # logging
 wandb:

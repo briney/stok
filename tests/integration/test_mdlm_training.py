@@ -62,8 +62,9 @@ def mdlm_config(project, source, codebook_path, **options):
     return cfg
 
 
-def training_fixture(tmp_path, n=8, rows=None):
-    codebook = torch.arange(64, dtype=torch.float32).reshape(32, 2)
+def training_fixture(tmp_path, n=8, rows=None, codebook=None):
+    if codebook is None:
+        codebook = torch.arange(64, dtype=torch.float32).reshape(32, 2)
     path = tmp_path / "codebook.pt"
     torch.save({"codebook": codebook}, path)
     if rows is None:

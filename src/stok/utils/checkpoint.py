@@ -69,6 +69,7 @@ def scientific_config(cfg):
     for key in (
         "output_dir",
         "resume_from",
+        "init_from",
         "wandb",
         "console",
         "log_every",
@@ -90,8 +91,9 @@ def execution_identity(accelerator) -> dict:
     }
 
 
-def resume_signature(cfg, *, codebook, accelerator, identity):
+def resume_signature(cfg, *, codebook, accelerator, identity, init_from_sha256=None):
     return {
+        "init_from_sha256": init_from_sha256,
         "config": scientific_config(cfg),
         "data": {
             name: {key: source[key] for key in ("shards", "rows", "tokenizer")}
