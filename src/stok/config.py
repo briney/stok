@@ -50,8 +50,15 @@ def validate_training_config(cfg: DictConfig) -> None:
                 continue
             path = f"data.{section}.{name}"
             reject_unknown_keys(
-                source, {"path": None, "load_coords": None, option: None}, path
+                source,
+                {"path": None, "load_coords": None, "min_plddt": None, option: None},
+                path,
             )
+            score = source.get("min_plddt")
+            if score is not None and (
+                type(score) not in (int, float) or not 0 <= score <= 100
+            ):
+                raise ValueError(f"{path}.min_plddt must be a number in [0, 100]")
             if "batch_size" in source and (
                 type(source.batch_size) is not int or source.batch_size < 1
             ):

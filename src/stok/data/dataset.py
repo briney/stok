@@ -82,14 +82,10 @@ def _parquet_columns(
     path: Path,
     schema: pa.Schema,
     *,
-    require_structure_tokens: bool,
     load_coords: bool,
 ) -> list[str]:
     """Validate a file's schema and select the columns consumed by the dataset."""
-    required = {"sequence_id", "sequence"}
-    if require_structure_tokens:
-        required.add("structure_tokens")
-    missing = required - set(schema.names)
+    missing = {"sequence_id", "sequence"} - set(schema.names)
     if missing:
         raise ValueError(f"{path}: Missing required columns: {sorted(missing)}")
 
@@ -162,6 +158,9 @@ def _build_output_from_row(
             [-1 if t is None else t for t in tokens],
             dtype=torch.long,
         )
+    else:
+        # Sequence-only sources (e.g. UniRef): every structure position is unavailable.
+        out["structure_tokens"] = torch.full((len(sequence),), -1, dtype=torch.long)
 
     if has_coords:
         coords = row.get("coordinates")
@@ -193,7 +192,7 @@ class IterableTokenizedDataset(IterableDataset):
         shuffle_rows: Whether to shuffle selected row indices per shard per epoch.
         seed: Optional base seed for deterministic epoch shuffles.
         load_coords: Whether to load 3D coordinates.
-        require_structure_tokens: Whether structure_tokens is required. Set to False for MLM.
+        min_plddt: Keep only rows whose mean_plddt column is at least this value.
     """
 
     training_batch_size: int
@@ -208,8 +207,8 @@ class IterableTokenizedDataset(IterableDataset):
         shuffle_rows: bool = True,
         seed: int = 0,
         load_coords: bool = True,
-        require_structure_tokens: bool = True,
         dataset_name: str | None = None,
+        min_plddt: float | None = None,
     ):
         self.dataset_path = Path(dataset_path)
         if not self.dataset_path.is_dir():
@@ -238,13 +237,34 @@ class IterableTokenizedDataset(IterableDataset):
                 _parquet_columns(
                     sp,
                     pf.schema_arrow,
-                    require_structure_tokens=require_structure_tokens,
                     load_coords=load_coords,
                 )
             )
+            if ("structure_tokens" in self._columns[0]) != (
+                "structure_tokens" in self._columns[-1]
+            ):
+                raise ValueError(
+                    f"{sp}: structure_tokens presence disagrees with other shards"
+                )
             self._shards.append(sp)
             self._rows_per_shard.append(int(pf.metadata.num_rows))
-        self._total_rows = int(sum(self._rows_per_shard))
+        # Row indices kept per shard by min_plddt; None streams every row.
+        self._kept: list[np.ndarray] | None = None
+        if min_plddt is not None:
+            self._kept = []
+            for sp in self._shards:
+                if "mean_plddt" not in pq.read_schema(sp).names:
+                    raise ValueError(f"{sp}: min_plddt needs a mean_plddt column")
+                scores = pq.read_table(sp, columns=["mean_plddt"]).column(0)
+                keep = np.asarray(scores.fill_null(-np.inf), dtype=np.float64)
+                self._kept.append(np.flatnonzero(keep >= min_plddt))
+            if not sum(len(kept) for kept in self._kept):
+                raise ValueError(f"{self.dataset_path}: min_plddt keeps no rows")
+        self._total_rows = int(
+            sum(self._rows_per_shard)
+            if self._kept is None
+            else sum(len(kept) for kept in self._kept)
+        )
         self.num_samples = self._total_rows
         self.has_labels = any("structure_tokens" in cols for cols in self._columns)
         self.has_coords = any("coordinates" in cols for cols in self._columns)
@@ -267,7 +287,11 @@ class IterableTokenizedDataset(IterableDataset):
         for s_idx in shard_indices:
             path = self._shards[s_idx]
             table = pq.ParquetFile(path).read(columns=self._columns[s_idx])
-            rows = list(range(table.num_rows))
+            rows = (
+                list(range(table.num_rows))
+                if self._kept is None
+                else self._kept[s_idx].tolist()
+            )
             if self.shuffle_rows:
                 np.random.RandomState((seed_base + 1009 + s_idx) & 0xFFFFFFFF).shuffle(
                     rows

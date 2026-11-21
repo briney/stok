@@ -49,11 +49,49 @@ def test_null_tokens_preserve_residue_alignment(tmp_path, token_type):
     assert truncated["structure_tokens"].tolist() == [[8, 10, 7, 8]]
 
 
-def test_sequence_only_parquet_for_diagnostics(tmp_path):
+def test_sequence_only_rows_have_unavailable_structure(tmp_path):
     path = tmp_path / "data.parquet"
     pq.write_table(pa.table({"sequence_id": ["p1"], "sequence": ["ACDE"]}), path)
-    item = next(iter(ordered(tmp_path, max_length=8, require_structure_tokens=False)))
-    assert item == {"sequence_id": "p1", "sequence": "ACDE"}
+    item = next(iter(ordered(tmp_path, max_length=8)))
+    assert item["sequence"] == "ACDE"
+    assert item["structure_tokens"].tolist() == [-1] * 4
+    item["dataset"] = "uniref"
+    batch = prepare_mdlm_batch(
+        [item], Tokenizer(), max_len=8, codebook_size=8, crop="center", seeds=[0]
+    )
+    assert not batch["structure_valid"].any()
+    assert batch["sequence_valid"].sum() == 4
+
+
+def plddt_shard(path, values):
+    pq.write_table(
+        pa.table(
+            {
+                "sequence_id": [f"p{i}" for i in range(len(values))],
+                "sequence": ["ACDE"] * len(values),
+                "structure_tokens": [[1, 2, 3, 4]] * len(values),
+                "mean_plddt": pa.array(values, type=pa.float64()),
+            }
+        ),
+        path,
+    )
+
+
+def test_min_plddt_keeps_rows_at_or_above_threshold(tmp_path):
+    plddt_shard(tmp_path / "a.parquet", [50.0, 70.0, None])
+    plddt_shard(tmp_path / "b.parquet", [90.0])
+    ds = ordered(tmp_path, max_length=8, min_plddt=70)
+    assert ds.num_samples == 2
+    assert [row["sequence_id"] for row in ds] == ["p1", "p0"]
+
+
+def test_min_plddt_refusals(tmp_path):
+    plddt_shard(tmp_path / "a.parquet", [50.0])
+    with pytest.raises(ValueError, match="min_plddt keeps no rows"):
+        ordered(tmp_path, max_length=8, min_plddt=70)
+    write_parquet(tmp_path / "b.parquet")
+    with pytest.raises(ValueError, match="b.parquet.*mean_plddt"):
+        ordered(tmp_path, max_length=8, min_plddt=10)
 
 
 @pytest.mark.parametrize(

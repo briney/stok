@@ -78,9 +78,10 @@ def _parse_train_configs(cfg: DictConfig) -> list[dict[str, Any]]:
                     continue
                 entry: dict[str, Any] = {"name": str(name), "path": str(p)}
                 entry["fraction"] = value.get("fraction")
-                # optional per-dataset toggles (currently only load_coords is supported)
-                if "load_coords" in value:
-                    entry["load_coords"] = value.get("load_coords")
+                # optional per-dataset toggles
+                for option in ("load_coords", "min_plddt"):
+                    if option in value:
+                        entry[option] = value.get(option)
                 out.append(entry)
             else:
                 raise ValueError(f"Invalid train config for '{name}': {type(value)}")
@@ -162,7 +163,7 @@ def _build_dataloaders(
             max_length=None,
             dataset_name=name,
             load_coords=load_coords,
-            require_structure_tokens=training,
+            min_plddt=options.get("min_plddt"),
         )
         ds = IterableTokenizedDataset(
             **kwargs,

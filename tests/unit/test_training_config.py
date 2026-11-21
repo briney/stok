@@ -500,3 +500,32 @@ def test_decoded_eval_coordinate_precedence_is_immutable_and_early(
     assert OmegaConf.to_yaml(cfg, resolve=False) == before
     assert OmegaConf.is_readonly(cfg)
     assert not (tmp_path / "run").exists()
+
+
+@pytest.mark.parametrize("value", [150, -1, "high"])
+def test_min_plddt_must_be_a_score(tmp_path, value):
+    from stok.config import load_training_config
+
+    with pytest.raises(ValueError, match="min_plddt"):
+        load_training_config(
+            [
+                f"train.output_dir={tmp_path / 'run'}",
+                f"+data.train.afdb.path={tmp_path}",
+                f"+data.train.afdb.min_plddt={value}",
+            ]
+        )
+
+
+def test_min_plddt_is_a_source_option(tmp_path):
+    from stok.config import load_training_config
+
+    cfg = load_training_config(
+        [
+            f"train.output_dir={tmp_path / 'run'}",
+            f"+data.train.afdb.path={tmp_path}",
+            "+data.train.afdb.min_plddt=70",
+            f"+data.eval.val.path={tmp_path}",
+            "+data.eval.val.min_plddt=70",
+        ]
+    )
+    assert cfg.data.train.afdb.min_plddt == 70

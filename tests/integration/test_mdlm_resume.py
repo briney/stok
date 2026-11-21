@@ -151,6 +151,22 @@ def config_for(tmp_path, source_kind="sharded", workers=0):
             "data.shuffle_shards": True,
         },
     )
+    if source_kind == "sequence_mixed":
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        uniref = tmp_path / "uniref"
+        uniref.mkdir()
+        pq.write_table(
+            pa.table(
+                {
+                    "sequence_id": [f"u{i}" for i in range(20)],
+                    "sequence": ["MKUXLAGVSERTIPDKQ"[: 3 + i % 12] for i in range(20)],
+                }
+            ),
+            uniref / "00000.parquet",
+        )
+        cfg.data.train.other = {"path": str(uniref), "fraction": 0.5}
     if source_kind == "mixed":
         rows = [{**make_mdlm_rows()[i % 2], "sequence_id": f"b{i}"} for i in range(20)]
         rows = [{**row, "sequence_id": f"second-{i}"} for i, row in enumerate(rows)]
@@ -166,6 +182,7 @@ def config_for(tmp_path, source_kind="sharded", workers=0):
         ("sharded", 2),
         ("sharded", 4),
         ("mixed", 2),
+        ("sequence_mixed", 2),
     ],
 )
 def test_resume_matches_uninterrupted_training(tmp_path, workers, source_kind, stop):
