@@ -200,7 +200,15 @@ refuses a source whose `codebook_sha256`/`codebook_size` disagrees with the
 model's codebook, or sources with different tokenizer identities. Cropping keeps
 both modalities and coordinates aligned; unavailable labels keep their slots.
 
-Choose packaged groups with `model=mdlm_150m` or `train=mdlm_pilot`. Defaults use
+A directory without a `structure_tokens` column, such as `brineylab/uniref50`
+(`sequence_id`, `sequence`), is a **sequence-only source**: every structure
+position is unavailable, so only sequence targets count toward the loss. It mixes
+with structure sources by `fraction` like any other source. A directory must not
+mix sequence-only and structure shards.
+
+Choose packaged groups with `model=mdlm_150m` (144,797,472 trainable parameters),
+`model=mdlm_300m` (d_model 1024, 24 layers, 16 heads; 312,615,968) or
+`train=mdlm_pilot`. Defaults use
 paired MDLM and the 150M group; the pilot selects BF16 and evaluation.
 Only paired MDLM training is supported. Unknown or obsolete keys, including
 typos in YAML overlays, are rejected before devices, artifacts, W&B, or outputs.
@@ -218,7 +226,11 @@ Section files contain their contents without a `model`/`train`/`data` wrapper.
 Overlays cannot contain Hydra `defaults` lists. Dictionaries merge recursively
 and lists replace lists. Native Hydra additions, replacements, deletions and
 OmegaConf interpolations remain available for supported fields. Named sources
-accept only `path`, `load_coords`, and `fraction` (train) or `batch_size` (eval).
+accept only `path`, `load_coords`, `min_plddt`, and `fraction` (train) or
+`batch_size` (eval). `min_plddt` (0–100) keeps rows whose `mean_plddt` column is
+at least that value, for example `+data.train.afdb.min_plddt=70`; rows with a
+null score are dropped, and a source without the column, or a threshold that keeps
+nothing, is refused at startup.
 
 ```yaml
 data:
@@ -346,6 +358,18 @@ training source's shard names, sizes, row counts and tokenizer identity: adding,
 removing or rewriting a shard refuses the resume. Output/log/evaluation/checkpoint
 cadence and evaluation settings may change. Only version-5 checkpoints are read;
 populated run directories require an explicit resume checkpoint.
+
+Warm-start a fresh run from another run's weights with
+`train.init_from=/runs/pretrain/model/final.pt`: only the model weights load;
+the optimizer, schedule, step count, data stream and W&B run start fresh. The
+checkpoint's encoder architecture (every field but dropout) and codebook must
+match this run's. To resume a warm-started run, keep `train.init_from` and add
+`train.resume_from`; the weights come from the resume checkpoint, and the
+warm-start file need not still exist (its digest, recorded at the fresh start, is
+compared). Adding or dropping `init_from` on resume is refused. A sequence-only
+pretraining run followed by joint training is two runs: pretrain on the
+sequence-only source, then start the joint run with `train.init_from` pointing at
+the pretraining run's final checkpoint.
 
 Generate biological tokens using a complete version-5 MDLM checkpoint:
 
