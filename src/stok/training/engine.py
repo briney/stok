@@ -22,7 +22,7 @@ from stok.data.loaders import (
 from stok.config import validate_training_config
 from stok.models.decoder import load_pretrained_decoder
 from stok.models.build import build_model
-from stok.data.mdlm import validate_mdlm_sources
+from stok.data.mdlm import data_identity
 from stok.utils.codebook import load_codebook
 from tqdm import tqdm
 from stok.training.tasks import MDLMTask
@@ -144,7 +144,7 @@ def _save_checkpoint(
     rank_states = gather_object([rank_state])
     if accelerator.is_main_process:
         payload = {
-            "format_version": 4,
+            "format_version": 5,
             "model": accelerator.unwrap_model(model).state_dict(),
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
@@ -236,14 +236,6 @@ def run_training(cfg: DictConfig) -> None:
     for regime in REGIMES:
         cfg.train.mdlm.regime_weights.setdefault(regime, 0.0)
     cfg.train.eval.mdlm = resolve_mdlm_eval_config(cfg)
-    from stok.eval.cases import read_evaluation_cases
-
-    shared = (
-        read_evaluation_cases(cfg.train.eval.mdlm.case_manifest)
-        if cfg.train.eval.mdlm.case_manifest
-        else None
-    )
-    resolve_mdlm_eval_config(cfg, identity={"shared_cases": shared})
     OmegaConf.set_readonly(cfg, True)
     project = cfg.train.output_dir
     if not isinstance(project, str) or not project.strip():
@@ -300,22 +292,15 @@ def run_training(cfg: DictConfig) -> None:
         path=cfg.model.codebook.get("path"),
     )
     codebook_size = codebook.shape[0]
-    mdlm_identity = validate_mdlm_sources(
-        train_sources,
-        _parse_eval_configs(cfg),
-        codebook=codebook,
-        split_manifest=cfg.data.get("split_manifest"),
-        case_manifest=cfg.train.eval.mdlm.case_manifest,
+    mdlm_identity = data_identity(
+        train_sources, _parse_eval_configs(cfg), codebook=codebook
     )
     runtime: dict[str, Any] = {
         "effective_precision": effective_precision,
-        "mdlm_identity": mdlm_identity,
+        "data": mdlm_identity,
     }
-    mdlm_eval = resolve_mdlm_eval_config(cfg, identity=mdlm_identity)
-    train_loader, eval_loaders = _build_dataloaders(
-        cfg,
-        identity=mdlm_identity,
-    )
+    mdlm_eval = resolve_mdlm_eval_config(cfg)
+    train_loader, eval_loaders, generation_loaders = _build_dataloaders(cfg)
     model = build_model(cfg, codebook=codebook)
     if mdlm_eval.generation.enabled and mdlm_eval.generation.decode:
         from stok.utils.sampling import inference_context
@@ -357,7 +342,11 @@ def run_training(cfg: DictConfig) -> None:
         mdlm_startup = [
             f"Trainable parameters: {num_params:,}",
             f"MDLM hardware: device={device}, hardware={hardware}, requested_precision={cfg.train.get('mixed_precision')}, mixed_precision={effective_precision}",
-            f"MDLM data identity: {mdlm_identity}",
+            "MDLM data: "
+            + ", ".join(
+                f"{name} ({source['kind']}, {len(source['shards'])} shards, {source['rows']} rows)"
+                for name, source in mdlm_identity["sources"].items()
+            ),
         ]
         for line in mdlm_startup[1:]:
             printer(line)
@@ -628,12 +617,12 @@ def run_training(cfg: DictConfig) -> None:
                 and current_step % mdlm_eval.generation.steps == 0
             )
             if denoising_due or generation_due:
-                all_eval_metrics, coverage = evaluate_mdlm(
+                all_eval_metrics = evaluate_mdlm(
                     model,
                     eval_loaders,
+                    generation_loaders,
                     cfg,
                     accelerator=accelerator,
-                    identity=mdlm_identity,
                     decoder=decoder,
                     run_denoising=denoising_due,
                     run_generation=generation_due,
@@ -645,14 +634,9 @@ def run_training(cfg: DictConfig) -> None:
                         json.dumps(
                             {
                                 "global_step": current_step,
-                                # Enabled evaluation requires frozen cases.
-                                "shared_cases_sha256": cast(
-                                    dict, mdlm_identity["shared_cases"]
-                                )["shared_cases_sha256"],
                                 "settings": OmegaConf.to_container(
                                     mdlm_eval, resolve=True
                                 ),
-                                "coverage": coverage,
                                 "metrics": all_eval_metrics,
                             },
                             sort_keys=True,

@@ -34,14 +34,12 @@ def test_resume_rejects_changed_current_budget(cuda_resume):
 
 @pytest.fixture
 def cuda_resume(tmp_path):
-    from stok.data.mdlm import validate_mdlm_sources
+    from stok.data.mdlm import data_identity
 
     source, artifact = training_fixture(tmp_path)
     codebook = torch.load(artifact, weights_only=True)["codebook"]
     cfg = mdlm_config(tmp_path / "run", source, artifact)
-    identity = validate_mdlm_sources(
-        {"local": {"path": str(source)}}, {}, codebook=codebook, split_manifest=None
-    )
+    identity = data_identity({"local": {"path": str(source)}}, {}, codebook=codebook)
     model = torch.nn.Linear(2, 1)
     model.register_buffer("structure_codebook", codebook)
     optimizer = torch.optim.AdamW(model.parameters())
@@ -85,7 +83,7 @@ def cuda_resume(tmp_path):
             },
             "effective_precision": "no",
             "execution": signature["execution"],
-            "mdlm_identity": identity,
+            "data": identity,
         },
         signature=signature,
         rank_states=[copy.deepcopy(rank), {**rank, "rank": 1}],
@@ -156,7 +154,7 @@ def test_cpu_record_does_not_initialize_unused_cuda(
         else None
     )
     signature = ck.resume_signature(
-        cfg, codebook=None, accelerator=accelerator, identity={"training_signature": {}}
+        cfg, codebook=None, accelerator=accelerator, identity={"sources": {}}
     )
     assert "cuda" not in rng
     assert signature["execution"] == {
@@ -167,9 +165,9 @@ def test_cpu_record_does_not_initialize_unused_cuda(
     ck.restore_rng_state(rng)
 
 
-@pytest.mark.parametrize("old", [None, 1, 2, 3, 99])
+@pytest.mark.parametrize("old", [None, 1, 2, 3, 4, 99])
 def test_reader_rejects_unsupported_checkpoints_clearly(tmp_path, old):
     path = tmp_path / "old.pt"
     torch.save({"format_version": old, "model": {}}, path)
-    with pytest.raises(ValueError, match="version 4"):
+    with pytest.raises(ValueError, match="version 5"):
         ck.read_training_checkpoint(path)

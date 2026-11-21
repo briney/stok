@@ -67,13 +67,13 @@ eval:
   steps: 1000
   mdlm:
     enabled: false
-    case_manifest: null
-    families: null
+    # Seeded by sequence ID only: identical masks in every run.
+    mask_probabilities: [0.15, 0.5, 0.85]
+    max_samples: null  # leading validation rows per source; null = all
     generation:
       enabled: false
       steps: 10000
       sampling_steps: 64
-      max_cases: 16
-      families: null
+      num_samples: 64  # leading validation rows for folding/inverse folding
       decode: false
       schedule: {name: linear}

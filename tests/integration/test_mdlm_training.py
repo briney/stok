@@ -1,9 +1,9 @@
 """Real paired-Parquet training through the shared optimizer lifecycle."""
 
-import json
 from pathlib import Path
 
 import pytest
+import pyarrow.parquet as pq
 import torch
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
@@ -17,7 +17,6 @@ from stok.utils.tokenizer import Tokenizer
 from tests.utils.synthetic import (
     make_mdlm_rows,
     write_dataset,
-    declare_synthetic_source,
 )
 
 
@@ -72,7 +71,7 @@ def training_fixture(tmp_path, n=8, rows=None):
         for i in range(n):
             row = originals[i % 2].copy()
             row["sequence_id"] = str(i)
-            rows.append(declare_synthetic_source(row, source_accession=f"training-{i}"))
+            rows.append(row)
     return write_dataset(tmp_path / "data", rows, codebook=codebook), path
 
 
@@ -142,7 +141,7 @@ def test_paired_parquet_update_both_heads_and_compute_accounting(tmp_path):
     assert state["executed_positions"] == 2 * 2 * 8
     assert state["residues_seen"] == 2 * (6 + 3)
     assert state["runtime"]["effective_precision"] == "no"
-    assert state["runtime"]["mdlm_identity"]["training_signature"]
+    assert state["runtime"]["data"]["sources"]["local"]["rows"] == 8
     log = (tmp_path / "run/logs/train.log").read_text()
     assert "diffusion_loss" in log and "sequence_ce" in log and "structure_ce" in log
     assert "ppl" not in log
@@ -158,22 +157,14 @@ def test_paired_parquet_update_both_heads_and_compute_accounting(tmp_path):
 def test_raw_loader_defers_crop_and_reads_full_coordinates_when_requested(tmp_path):
     source, codebook = training_fixture(tmp_path)
     cfg = mdlm_config(tmp_path / "run", source, codebook, **{"data.load_coords": True})
-    from stok.data.mdlm import validate_mdlm_sources
-
-    identity = validate_mdlm_sources(
-        {"local": str(source)},
-        {},
-        codebook=torch.load(codebook, weights_only=True)["codebook"],
-        split_manifest=None,
-    )
-    loader, _ = _build_dataloaders(cfg, identity=identity)
+    loader, *_ = _build_dataloaders(cfg)
     batch = next(iter(loader))
     assert isinstance(batch, list) and isinstance(batch[0], dict)
     assert loader.collate_fn is list
     assert batch[0]["coords"].shape[0] == len(batch[0]["sequence"])
-    assert batch[0]["dataset"] == identity["sources"]["local"]["replay_sha256"]
+    assert batch[0]["dataset"] == "local"
     cfg.data.load_coords = False
-    loader, _ = _build_dataloaders(cfg, identity=identity)
+    loader, *_ = _build_dataloaders(cfg)
     assert "coords" not in next(iter(loader))[0]
 
 
@@ -234,10 +225,7 @@ def test_tiny_paired_subset_learns(tmp_path):
         }
         for i in range(2)
     ]
-    rows = [
-        declare_synthetic_source(row, source_accession=f"training-{i}")
-        for i, row in enumerate(rows)
-    ]
+    rows = [{**row, "sequence_id": f"training-{i}"} for i, row in enumerate(rows)]
     source, codebook = training_fixture(tmp_path, rows=rows)
     states = []
     for steps in (0, 60):
@@ -352,10 +340,9 @@ def test_unsupported_config_fails_before_artifacts(tmp_path, key, value):
 
 def test_bad_source_fails_before_wandb_or_artifacts(tmp_path, monkeypatch):
     source, codebook = training_fixture(tmp_path)
-    manifest = source / "manifest.json"
-    data = json.loads(manifest.read_text())
-    data["status"] = "incomplete"
-    manifest.write_text(json.dumps(data))
+    # Structure tokens without their tokenizer identity are refused at preflight.
+    shard = source / "part-000000.parquet"
+    pq.write_table(pq.read_table(shard).replace_schema_metadata(None), shard)
     from stok.training import engine as train
 
     def forbidden(*args, **kwargs):
@@ -376,10 +363,7 @@ def test_no_eligible_window_skips_but_preserves_consumed_cursor(tmp_path):
         }
         for i in range(4)
     ]
-    rows = [
-        declare_synthetic_source(row, source_accession=f"training-{i}")
-        for i, row in enumerate(rows)
-    ]
+    rows = [{**row, "sequence_id": f"training-{i}"} for i, row in enumerate(rows)]
     source, codebook = training_fixture(tmp_path, rows=rows)
     state = checkpoint(
         mdlm_config(
@@ -406,10 +390,7 @@ def test_all_unusable_mdlm_pass_fails_without_update(tmp_path):
         {**make_mdlm_rows()[1], "sequence_id": str(i), "structure_tokens": [None] * 3}
         for i in range(4)
     ]
-    rows = [
-        declare_synthetic_source(row, source_accession=f"training-{i}")
-        for i, row in enumerate(rows)
-    ]
+    rows = [{**row, "sequence_id": f"training-{i}"} for i, row in enumerate(rows)]
     source, codebook = training_fixture(tmp_path, rows=rows)
     cfg = mdlm_config(
         tmp_path / "run",
@@ -477,16 +458,11 @@ def test_real_zero_mask_draw_still_updates_adamw(tmp_path):
             "sequence": "A",
             "structure_tokens": [None],
             "coordinates": original["coordinates"][:1],
-            "residue_map": original["residue_map"][:1],
         }
         for i in range(2)
     ]
-    rows = [
-        declare_synthetic_source(row, source_accession=f"training-{i}")
-        for i, row in enumerate(rows)
-    ]
+    rows = [{**row, "sequence_id": f"training-{i}"} for i, row in enumerate(rows)]
     source, codebook = training_fixture(tmp_path, rows=rows)
-    from stok.data.mdlm import validate_mdlm_sources
     from stok.training.tasks import MDLMTask
 
     cfg = mdlm_config(
@@ -495,15 +471,9 @@ def test_real_zero_mask_draw_still_updates_adamw(tmp_path):
         codebook,
         **{"train.max_steps": 1, "train.mdlm.regime_weights": {"sequence_only": 1}},
     )
-    identity = validate_mdlm_sources(
-        {"local": str(source)},
-        {},
-        codebook=torch.load(codebook, weights_only=True)["codebook"],
-        split_manifest=None,
-    )
-    loader, _ = _build_dataloaders(cfg, identity=identity)
+    loader, *_ = _build_dataloaders(cfg)
     rows = next(iter(loader))
-    # Exact replay includes this export's provenance path, so find an actual empty
+    # Draws key on the source name and sequence ID, so find an actual empty
     # draw for this fixture. The training run below must reproduce it unchanged.
     for seed in range(100):
         cfg.train.seed = seed
@@ -623,3 +593,17 @@ def test_active_logging_restore_rejects_corruption(tmp_path, damage):
         saved["running_cls_loss"] = 0
     with pytest.raises(ValueError, match="logging"):
         task.restore_logging_state(saved)
+
+
+def test_zero_row_shard_trains(tmp_path):
+    source, codebook = training_fixture(tmp_path)
+    # A tokenize shard whose rows were all rejected is empty but complete.
+    table = pq.read_table(source / "part-000000.parquet")
+    pq.write_table(table.slice(0, 0), source / "part-000001.parquet")
+    cfg = mdlm_config(tmp_path / "run", source, codebook, **{"train.max_steps": 1})
+    run_training(cfg)
+    state = torch.load(tmp_path / "run/model/final.pt", weights_only=True)
+    assert state["global_step"] == 1
+    assert [
+        s["rows"] for s in state["runtime"]["data"]["sources"]["local"]["shards"]
+    ] == [8, 0]

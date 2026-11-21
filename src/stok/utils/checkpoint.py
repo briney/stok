@@ -93,7 +93,11 @@ def execution_identity(accelerator) -> dict:
 def resume_signature(cfg, *, codebook, accelerator, identity):
     return {
         "config": scientific_config(cfg),
-        "mdlm_identity": identity["training_signature"],
+        "data": {
+            name: {key: source[key] for key in ("shards", "rows", "tokenizer")}
+            for name, source in identity["sources"].items()
+            if source["kind"] == "train"
+        },
         "codebook": state_sha256({"codebook": codebook})
         if codebook is not None
         else None,
@@ -103,8 +107,8 @@ def resume_signature(cfg, *, codebook, accelerator, identity):
 
 def read_training_checkpoint(path: Path) -> dict:
     payload = torch.load(path, map_location="cpu", weights_only=True)
-    if not isinstance(payload, dict) or payload.get("format_version") != 4:
-        raise ValueError("STok requires a version 4 training checkpoint")
+    if not isinstance(payload, dict) or payload.get("format_version") != 5:
+        raise ValueError("STok requires a version 5 training checkpoint")
     return payload
 
 

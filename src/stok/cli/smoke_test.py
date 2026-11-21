@@ -33,7 +33,6 @@ def run_smoke_test(cfg: DictConfig):
         [
             {
                 "dataset": "synthetic-smoke",
-                "canonical_id": "0" * 64,
                 "sequence_id": "0",
                 "sequence": "ACDE",
                 "structure_tokens": [0, 1, None, 0],

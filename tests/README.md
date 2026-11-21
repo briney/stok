@@ -15,13 +15,14 @@ HIP_VISIBLE_DEVICES='' ROCR_VISIBLE_DEVICES='' python -m pytest -q
 | Read-only authored settings and scientific/runtime artifacts | `integration/test_run_training_programmatic.py`, `integration/test_mdlm_evaluation.py` |
 | Global weighted MDLM loss, partial/empty windows, AMP skips | `unit/test_mdlm_loss.py`, `integration/test_mdlm_training.py`, `integration/test_distributed_training.py` |
 | Crop/alignment/missingness and stream coverage | `unit/test_mdlm_data.py`, `unit/test_parquet_dataset.py`, `integration/test_distributed_training.py` |
-| Frozen canonical cases, explicit coverage, worker/rank tails, RNG/mode restoration | `integration/test_mdlm_evaluation.py` |
-| Full canonical split/lineage audit, frozen cases/replicates and arm availability | `unit/test_eval_cases.py`, `unit/test_canonical_data.py`, `unit/test_mdlm_corruption.py` |
+| Seeded evaluation independent of training choices, caps, worker/rank tails, RNG/mode restoration | `integration/test_mdlm_evaluation.py` |
+| Plain Parquet format, footer-only source summaries, tokenizer identity | `unit/test_data_format.py`, `unit/test_mdlm_data.py` |
+| Parallel, resumable structure tokenization | `integration/test_tokenize_structures.py` |
 | Exact continuation, stochastic dropout/workers, scaler/cursor/rank state | `integration/test_mdlm_resume.py` |
 | Current checkpoint-only sample and real matching decode | `integration/test_mdlm_cli.py` |
 | Reusable prototype comparison | `unit/test_model_builder.py` |
 | Encoder/attention and geometric algorithms | `unit/test_attention.py`, `unit/test_fape_loss.py`, `unit/test_metrics.py`, `unit/test_eval_structure_metrics.py` |
-| Qualified GCP artifacts, polymer alignment/export/decode | GCP-VQVAE, structure export/directory and decoding tests below |
+| Qualified GCP artifacts, polymer alignment/tokenization/decode | GCP-VQVAE, tokenization and decoding tests below |
 
 Standalone MLM/classification/FAPE training and their objective-only tests were
 removed with the old forwarding module and configuration translator. Meaningful
@@ -243,12 +244,11 @@ shard boundaries. This costs throughput compared with true tensor batching;
 mixed-length reference batching retains its documented terminal-feature
 behavior. `iter_structure_manifest` validates JSONL identifiers, fields/types,
 chain namespaces, selected models, sequences, and paths with file/line context;
-relative paths resolve against the manifest directory. Explicit source namespace/accession
-and sorted unique parent IDs are required; repeated resolved source selections and
-unknown fields are fatal. Display labels may repeat for distinct canonical IDs. Structure-folder evaluation masks now require finite
-original N/CA/C observations rather than merely a sequence position.
+relative paths resolve against the manifest directory; the GCP-VQVAE experiment
+scripts use it. Structure-folder evaluation masks require finite original N/CA/C
+observations rather than merely a sequence position.
 
-### Policy experiments and aligned export
+### Policy experiments and tokenization
 
 The fixed native/unknown × reference/linear/observed-only matrix and separate
 polymer/reference ablation use the shared parser, preparation, model and metrics.
@@ -259,16 +259,12 @@ checks linear observation preservation/rigid transforms/coincident endpoints
 and observed-only sequence-stencil gating. Reference filling's displacement and
 orientation dependence are deliberately retained as baseline evidence.
 
-`integration/test_structure_tokenization_export.py` exercises typed nullable
-int64 shards, exact mapped positions, partial atoms, unresolved termini/internal
-positions, unique IDs, exclusions, independent grouping/sharding identity,
-metadata checks, interruption and concurrent-destination publication. It feeds
-both existing readers and collators, checks BOS/EOS/padding and sequence targets
-at missing structure labels, compares decoder outputs after serialization, and
-runs a tiny local one-update training/evaluation smoke on generated shards. Generic
-typed Parquet remains useful for diagnostics; representation exports require
-schema-2 provenance and complete canonical row/inventory correspondence.
-All-rejected runs and numerical model failures cannot publish a dataset.
+`integration/test_tokenize_structures.py` checks that `tokenize_directory` token
+values equal direct singleton `tokenize_structures` output (including missing
+residues and null coordinates), Parquet mmCIF-text input with carried columns,
+job splitting, resume that skips finished shards and redoes interrupted ones,
+empty shards and `rejected/` listings for all-rejected input, refusal of a
+mismatched tokenizer identity, FP32 inside an outer autocast, and the CLI.
 
 The [fixture report](../docs/experiments/gcp-vqvae/smoke-report.md) records both
 published models' measured quality/context limitations, all 60 attempted
@@ -282,11 +278,8 @@ historical selection arithmetic and numerical audit counts, and the archived
 fixed-1280 release evidence. Native/reference was checked for both Lite and
 Large on the recorded ROCm FP32 configuration. Variable-padding comparisons
 remain diagnostic; the report records correction of the original overstrict gate.
-Current export uses one fixed training-native-reference policy for both directory
-and JSONL inputs through the CLI and Python APIs. Tests preserve large missing
-blocks without coverage exclusions, reject missing sequence metadata, verify
-recursive directory discovery and publication, and retain execution provenance
-without binding exports to an experimental machine-specific profile.
+Tokenization uses one fixed training-native-reference policy for structure files
+and Parquet mmCIF text through the CLI and Python API.
 
 The [full public roundtrip experiment](../docs/experiments/gcp-vqvae/public-roundtrip-report.md)
 compares both complete released STok/upstream encoder, VQ and decoder stacks on
@@ -312,12 +305,12 @@ exact-ID stability on GPU.
 
 ### Paired MDLM qualification
 
-Unit tests cover aligned preparation, canonical population/split/case identities, all four
+Unit tests cover aligned preparation, footer-only source identity, all four
 corruption regimes, token/span grouping, schedules, absorbing reverse sampling,
 paired model heads and per-modality normalization. Integration tests cover the
 production optimizer lifecycle, denoising/generation filtering, decoder identity,
 CLI/package composition, successful-update counting, replicated CPU DDP and
-fresh-process version-4 continuation with workers/dropout/accumulation, all-rank
+fresh-process version-5 continuation with workers/dropout/accumulation, all-rank
 log reset, current source/software manifests, and active-state corruption rejection.
 
 Run the full suite with local IPC permitted and CPU selection:
@@ -344,11 +337,11 @@ install into `/tmp/stok-mdlm-wheel-installed`, then checked config composition,
 override precedence and CLI discovery there.
 
 The new `integration/test_mdlm_device.py` is opt-in; a default CPU skip provides
-no GPU evidence. Run it with actual completed real paired data and the matching
+no GPU evidence. Run it with a real structure-token dataset and the matching
 full Large tokenizer archive:
 
 ```bash
-STOK_MDLM_SOURCE=/path/to/completed/real-export \
+STOK_MDLM_SOURCE=/path/to/real/token-dataset \
 STOK_MDLM_ARCHIVE=/path/to/matching/large/best_valid.pth \
   OMP_NUM_THREADS=1 TOKENIZERS_PARALLELISM=false ACCELERATE_USE_CPU=false \
   python -m pytest tests/integration/test_mdlm_device.py -q -s
@@ -362,8 +355,6 @@ The [reproducible qualification report](../docs/experiments/mdlm/qualification-2
 and [bounded full-model probe](../docs/experiments/mdlm/qualify_device.py) retain
 actual Radeon evidence at context 514 and selected worker/precision continuation.
 They identify phase memory/timing, backend limits, versions and pending controls.
-The real production frozen-validation `evaluate_mdlm` boundary remains pending
-frozen validation-only cases; training-subset utility checks are distinct.
 Actual GPU FP16 scaler overflow and multi-GPU launch are not qualified by BF16
 or CPU tests. Longer experiments require explicit identities/hardware/budgets.
 
@@ -380,32 +371,6 @@ Fault injection follows actual lookup ownership: construction in
 `stok.models.build`, preparation/loss in `stok.training.tasks`, runtime/checkpoint
 transport in `stok.training.engine`, and loaders in `stok.data.loaders`.
 
-
-`unit/test_canonical_data.py` checks path/display invariance, model/chain/revision
-identity, original four-atom roundtrip with missing oxygen, strict booleans/digests,
-sequence-only absent observations, duplicate alias selections, explicit lineage,
-conflicting mapping/content, raw-file mutation and zero-record parser audits.
-The export integration tests retokenize and reshard one canonical inventory,
-partition requests into parser rejections/canonical records and canonical records
-into admitted/representation-rejected rows, preserve original coordinates, audit
-corruption and publication failures, and verify canonical validation occurs before
-tokenizer setup. `make_mdlm_rows`/`write_dataset` produce complete local schema-2
-fixtures including original oxygen observations and explicit source identities.
-
-`unit/test_eval_cases.py` checks literal native token/span mask goldens (seed
-1729, `AXCDEF`, original oxygen absent at residue 2), record-order independence,
-replicate-safe row projection, missing representation codes/conditioning, and
-strict full-inventory split/parent/cluster/source checks. It also runs the actual
-preparation → freezing CLI without model setup or downloads, checks all 32 default
-denoising families, verifies stored reads do not draw RNG, and separates raw-file,
-shared-case, protocol and measurement identities. Synthetic `original_atom_mask`
-keeps canonical observations independent of a projection-only arm's missing
-codes; native export availability validation remains strict.
-
-Current C1 uses complete format-4 training checkpoints and schema-2 exports.
-The amended tests retain independent loss/gradient, successful-update, exact
-resume, RNG, mode and distributed-tail assertions. Case tests cover unavailable
-representation targets, rejected members, replicated controls and early caps;
-checkpoint-only tests remove original exports/canonical inventories/case files.
-See [C1 qualification](../docs/experiments/refactor/c1.md) for its recorded source
-boundary, commands, package checks, warnings and opt-in exclusions.
+C1's canonical inventories, frozen evaluation cases and their tests were removed
+by the [plain Parquet design](../docs/superpowers/specs/2026-11-20-plain-parquet-data-design.md);
+[C1 qualification](../docs/experiments/refactor/c1.md) remains historical evidence.

@@ -25,14 +25,10 @@ train:
     steps: 250
     mdlm:
       enabled: true
-      case_manifest: null
-      families: null
       generation:
         enabled: true
         steps: 1000
         sampling_steps: 64
-        max_cases: 16
-        families: null
         decode: false
         schedule: {name: linear}
 

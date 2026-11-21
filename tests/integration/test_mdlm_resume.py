@@ -15,7 +15,6 @@ from tests.integration.test_distributed_training import run_distributed
 from tests.utils.synthetic import (
     make_mdlm_rows,
     write_dataset,
-    declare_synthetic_source,
 )
 
 PROBE = r"""
@@ -154,32 +153,9 @@ def config_for(tmp_path, source_kind="sharded", workers=0):
     )
     if source_kind == "mixed":
         rows = [{**make_mdlm_rows()[i % 2], "sequence_id": f"b{i}"} for i in range(20)]
-        rows = [
-            declare_synthetic_source(row, source_accession=f"second-{i}")
-            for i, row in enumerate(rows)
-        ]
+        rows = [{**row, "sequence_id": f"second-{i}"} for i, row in enumerate(rows)]
         second = write_dataset(tmp_path / "second", rows)
         cfg.data.train.other = {"path": str(second), "fraction": 0.4}
-        split = tmp_path / "split.jsonl"
-        import pyarrow.parquet as pq
-
-        split.write_text(
-            "".join(
-                json.dumps(
-                    {
-                        "canonical_id": row["canonical_id"],
-                        "split": "train",
-                        "cluster_id": row["canonical_id"],
-                    }
-                )
-                + "\n"
-                for directory in (source, second)
-                for row in pq.read_table(
-                    directory / "part-000000.parquet", columns=["canonical_id"]
-                ).to_pylist()
-            )
-        )
-        cfg.data.split_manifest = str(split)
     return cfg
 
 
@@ -203,7 +179,7 @@ def test_resume_matches_uninterrupted_training(tmp_path, workers, source_kind, s
     execute(cfg, tmp_path / "resumed.yaml")
     full = torch.load(tmp_path / "full/model/final.pt", weights_only=True)
     resumed = torch.load(tmp_path / "interrupted/model/final.pt", weights_only=True)
-    assert full["format_version"] == resumed["format_version"] == 4
+    assert full["format_version"] == resumed["format_version"] == 5
     for key in (
         "model",
         "optimizer",
@@ -480,10 +456,7 @@ def test_no_eligible_windows_are_in_resume_cursor(tmp_path):
         }
         for i in range(12)
     ]
-    rows = [
-        declare_synthetic_source(row, source_accession=f"training-{i}")
-        for i, row in enumerate(rows)
-    ]
+    rows = [{**row, "sequence_id": f"training-{i}"} for i, row in enumerate(rows)]
     source, codebook = training_fixture(tmp_path, rows=rows)
     cfg = mdlm_config(
         tmp_path / "full",
@@ -588,14 +561,12 @@ def test_optimizer_coverage_preserves_unused_and_frozen_parameters(tmp_path):
         restore_training_state,
         resume_signature,
     )
-    from stok.data.mdlm import validate_mdlm_sources
+    from stok.data.mdlm import data_identity
 
     source, artifact = training_fixture(tmp_path)
     codebook = torch.load(artifact, weights_only=True)["codebook"]
     cfg = mdlm_config(tmp_path / "run", source, artifact)
-    identity = validate_mdlm_sources(
-        {"local": {"path": str(source)}}, {}, codebook=codebook, split_manifest=None
-    )
+    identity = data_identity({"local": {"path": str(source)}}, {}, codebook=codebook)
     signature = resume_signature(
         cfg, codebook=codebook, accelerator=None, identity=identity
     )
@@ -642,7 +613,7 @@ def test_optimizer_coverage_preserves_unused_and_frozen_parameters(tmp_path):
             },
             "effective_precision": "no",
             "execution": signature["execution"],
-            "mdlm_identity": identity,
+            "data": identity,
         },
         cfg=cfg,
         accelerator=_maybe_get_accelerator(),
@@ -677,40 +648,20 @@ def test_optimizer_coverage_preserves_unused_and_frozen_parameters(tmp_path):
     equal(optimizer.state_dict(), restored_optimizer.state_dict())
 
 
-def test_resume_rejects_resharding_despite_equal_canonical_population(tmp_path):
-    from stok.data.mdlm import validate_mdlm_sources
+def test_resume_rejects_changed_shards(tmp_path):
+    import shutil
 
     cfg = config_for(tmp_path)
     execute(cfg, tmp_path / "before.yaml", stop=2, ok=False)
     saved_path = tmp_path / "full/checkpoints/step_00000002.pt"
-    saved = torch.load(saved_path, weights_only=True)
     source = Path(cfg.data.train.local.path)
-    manifest = json.loads((source / "manifest.json").read_text())
-    previous = source / manifest["shards"][0]["path"]
-    current = source / "resharded-000000.parquet"
-    previous.rename(current)
-    manifest["shards"][0]["path"] = current.name
-    (source / "manifest.json").write_text(json.dumps(manifest))
-    identity = validate_mdlm_sources(
-        {"local": {"path": str(source)}},
-        {},
-        codebook=saved["model"]["structure_codebook"],
-        split_manifest=None,
-    )
-    old = saved["runtime"]["mdlm_identity"]
-    assert identity["canonical_population_sha256"] == old["canonical_population_sha256"]
-    assert (
-        identity["sources"]["local"]["representation_sha256"]
-        == old["sources"]["local"]["representation_sha256"]
-    )
-    assert (
-        identity["sources"]["local"]["replay_sha256"]
-        != old["sources"]["local"]["replay_sha256"]
-    )
+    shard = sorted(source.glob("*.parquet"))[0]
+    shutil.copyfile(shard, source / "zz-appended.parquet")
     cfg.train.resume_from = str(saved_path)
     cfg.train.output_dir = str(tmp_path / "rejected")
     result = execute(cfg, tmp_path / "after.yaml", ok=False)[0]
-    assert "signature mismatch" in result.stdout + result.stderr
+    output = result.stdout + result.stderr
+    assert "signature mismatch" in output and "data" in output
     assert not (tmp_path / "rejected").exists()
 
 
@@ -727,7 +678,7 @@ def test_resume_evaluation_overrides_change_measurement_not_training(tmp_path):
     cfg.train.resume_from = str(tmp_path / "interrupted/checkpoints/step_00000002.pt")
     cfg.train.output_dir = str(tmp_path / "resumed")
     cfg.train.eval.mdlm.generation.sampling_steps = 2
-    cfg.train.eval.mdlm.families = ["full"]
+    cfg.train.eval.mdlm.mask_probabilities = [0.5]
     execute(cfg, tmp_path / "resumed.yaml")
     full = torch.load(tmp_path / "full/model/final.pt", weights_only=True)
     resumed = torch.load(tmp_path / "resumed/model/final.pt", weights_only=True)
@@ -743,13 +694,12 @@ def test_resume_evaluation_overrides_change_measurement_not_training(tmp_path):
         "signature",
     ):
         equal(full[key], resumed[key])
-    assert (
-        full["runtime"]["mdlm_identity"]["shared_cases"]
-        == resumed["runtime"]["mdlm_identity"]["shared_cases"]
-    )
+    assert full["runtime"]["data"] == resumed["runtime"]["data"]
     summaries = [
         json.loads(path.read_text())
         for path in (tmp_path / "resumed/logs/evaluations").glob("*.json")
     ]
     assert {summary["global_step"] for summary in summaries} == {3, 4}
-    assert all(summary["settings"]["families"] == ["full"] for summary in summaries)
+    assert all(
+        summary["settings"]["mask_probabilities"] == [0.5] for summary in summaries
+    )

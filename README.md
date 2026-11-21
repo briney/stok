@@ -147,165 +147,61 @@ experiment evidence; their snapshots live under
 [historical-policies](docs/experiments/gcp-vqvae/historical-policies/).
 Native inputs make these structure tokens sequence-conditioned.
 
-Prepare a JSONL manifest with explicit source identities, then encode its frozen
-canonical inventory:
 
-```json
-{"sequence_id":"sample-A","source_namespace":"pdb","source_accession":"1ABC","path":"structures/sample.pdb","chain_id":"A","model_index":0}
-```
+## structure-token datasets
 
-```bash
-stok prepare-structures /data/inputs.jsonl /data/canonical
-stok tokenize-structures /data/canonical /data/stok-mdlm/train \
-  --preset large --device cuda:0 --rows-per-shard 2000
-```
+A dataset is a directory of Parquet shards (top-level `*.parquet`; subdirectories
+are ignored). Each row has a string `sequence_id`, a full biological `sequence`,
+and, for structure data, one nullable `int16` `structure_tokens` element per
+residue. Optional `coordinates` hold observed `[L,3,3]` N/CA/C positions with null
+for unobserved atoms; any other column (for example `mean_plddt`) is carried
+along. Structure shards carry one Parquet metadata key, `stok.tokenizer`:
+`{preset, checkpoint_sha256, codebook_sha256, codebook_size, stok_version}`.
+Shards in a directory must agree on everything but `stok_version`. A split is a
+directory: `train/`, `validation/` and `test/` side by side, decided once by
+whoever builds the dataset.
 
-Paths resolve relative to the input manifest; `chain_namespace` defaults to
-`author`, `model_index` to 0. An optional `sequence` supplies the full construct
-sequence. PDBs otherwise require SEQRES; mmCIF uses deposited polymer sequence.
-STok does not infer the full sequence from observed atoms. Namespace/accession
-are explicit case-sensitive identifiers; the verified raw-file SHA-256 is the
-source revision. Optional `parent_ids` declares unique canonical parent IDs.
-Display labels may repeat for distinct records; repeated resolved selections,
-unknown fields, malformed rows, and missing files are fatal.
-
-The canonical directory contains `records.jsonl`, categorized parser
-`rejections.jsonl` (with the input `sequence_id` and path), and a completed
-`manifest.json` with file digests and counts. Records
-retain original float32 N/CA/C/O observations, boolean masks, complete residue
-correspondence, source declarations, and identity/content/map hashes. Missing
-coordinates are JSON null. Its sorted population digest excludes paths, labels,
-physical order, tokenizer state and shards. Parsed records remain canonical even
-if a tokenizer later rejects them. Consumers read frozen artifacts without
-requiring the original structure files. A zero-record inventory can retain a
-complete parser-failure audit, but cannot produce a representation dataset.
-
-Representation exports contain numbered Zstd-compressed schema-2 Parquet shards,
-representation `rejections.jsonl`, and a completed `manifest.json` referencing the
-shared canonical inventory. Each row carries `canonical_id`,
-`canonical_content_sha256`, `residue_map_sha256`, `canonical_identity`, `parent_ids`,
-`sequence_id`, `sequence`, nullable `list<int64>` `structure_tokens`, `residue_map`,
-and `source`. `--include-coordinates` retains original-frame `[L,3,3]` N/CA/C with
-null missing observations, never imputed targets. The reader converts missing
-values to NaNs for geometry masks.
-
-The representation digest binds population, encoder/quantizer/codebook state,
-preparation, conditioning, context/alignment and numerical execution settings.
-Physical shard order/layout and runtime remain separate replay/audit details.
-MDLM requires the completed export directory and its referenced canonical
-inventory. Schema-1 representation exports are rejected.
-
-The installed command downloads the pinned tokenizer archive once into its local
-cache. Use `--checkpoint /weights/best_valid.pth` for offline encoding. Canonical
-validation precedes tokenizer/device setup.
-
-Freeze validation evaluation controls using all canonical inventories covered by
-the split manifest, including train/test and representation-rejected records:
+Encode a directory of structure files (`.pdb`, `.ent`, `.cif`, `.mmcif`,
+recursive, sorted; one output shard per `--rows-per-shard` files):
 
 ```bash
-stok freeze-eval-cases /data/evaluation.yaml /data/evaluation-cases \
-  --canonical-dir /data/train-canonical \
-  --canonical-dir /data/validation-canonical \
-  --canonical-dir /data/test-canonical \
-  --split-manifest /data/splits.jsonl
+stok tokenize-structures /data/structures /data/stok/train --preset large --device cuda:0
 ```
 
-Split JSONL rows contain exactly `canonical_id`, `split` (`train`, `validation`,
-or `test`), and nonempty `cluster_id`. Every canonical record needs exactly one
-assignment. Cluster labels are supplied; source families, identical raw revisions
-and declared parent lineage cannot cross splits. Selected monitoring members must
-be validation records. Repeated references to one inventory are read once;
-overlapping records or raw-revision/model/chain selections in distinct inventories
-are rejected.
+or Parquet shards that hold mmCIF text, such as `brineylab/afdb-rep`, with one
+output shard per input shard:
 
-```yaml
-schema_version: 1
-seed: 1729
-crop_residues: 128
-members: ["<validation canonical_id>"]
-replicates: 2
-denoising:
-  joint_token:
-    regime: joint_independent
-    placement: token
-    probability: 0.5
-generation:
-  folding:
-    regime: structure_only
-    placement: token
+```bash
+stok tokenize-structures /data/afdb-rep/data /data/afdb-rep-tokens \
+  --preset large --device cuda:0 \
+  --text-column cif --id-column id --keep-column mean_plddt \
+  --num-jobs 32 --job-index 7
 ```
 
-Omitting `denoising` freezes the 32 native regime/token-or-span/probability
-families (probabilities 0.15, 0.5, 0.85, 1.0; span mean 8.0). An empty map disables
-that kind; `generation` defaults to empty. At least one family is required. Family
-keys are unique across both kinds. Expansion preserves member order, then
-denoising/generation order, sorted family keys, and ascending replicate indices.
-The command reports exact denoising/generation case counts and unique biological
-sample counts; it does not apply the monitoring execution cap of 16 generation
-cases.
-
-The completed directory contains `manifest.json` and `cases.jsonl`. Cases retain
-explicit ordinals, canonical content/map digests, center crops, full-residue
-positions, original eligibility, group IDs and realized boolean masks. Case and
-shared-case identities exclude representation and filesystem paths. Readers
-check the completion manifest and the `cases.jsonl` digest, and never redraw
-stored controls. `stok.eval.cases.project_case_controls`
-pairs one case with each batch row, keeps replicates distinct, applies the BOS
-offset, and intersects controls with available targets. Missing generation
-conditioning is reported explicitly.
-
-The Python API uses the same two stages:
-
-```python
-from stok.data.canonical import prepare_canonical_dataset
-from stok.data.structure_export import write_structure_dataset
-from stok.models.gcp_vqvae import load_pretrained_tokenizer
-
-prepare_canonical_dataset("/data/inputs.jsonl", "/data/canonical")
-tokenizer = load_pretrained_tokenizer("large", device="cuda:0")
-summary = write_structure_dataset(
-    "/data/canonical",
-    "/data/stok-mdlm/train",
-    tokenizer=tokenizer,
-    rows_per_shard=2000,
-)
-```
-
-`iter_structure_directory(directory, recursive=True)` remains available for
-uncompressed `.pdb`, `.ent`, `.cif`, and `.mmcif` discovery. It selects protein
-chains from the first model; callers must add explicit source namespace/accession
-before writing a preparation manifest. Neither API accepts a policy argument.
-`validate_canonical_dataset(path)` and `validate_structure_dataset(path)` check
-that an artifact is complete: the manifest status, the canonical file digests,
-and the export's shard inventory and row counts. Record contents are checked when
-they are written, not re-derived on every read.
-
-`--rows-per-shard` bounds each output shard; the default is 1000 chain rows.
-`--batch-size` groups chains using independent singleton forwards, preserving
-full-chain context across group/shard boundaries; it does not perform mixed-chain
-GPU batching. One process and one selected device are used. Directory discovery
-sorts paths in memory. For large collections, use bounded manifests or input
-directories and separate completed exports. There is no automatic export resume.
-Training crops paired windows later without changing the stored full-chain tokens.
-
-Parser and representation admission exclusions have separate stable reason audits;
-unexpected numerical/model errors abort. Existing destinations are refused.
-Outputs are written to a hidden sibling staging directory and renamed into place
-once complete, so a failed run never advertises a completed dataset.
+Job `I` of `N` takes every `N`-th input shard, so many jobs can run at once. Each
+shard is written to a temporary name and renamed when complete; a rerun skips
+finished shards and redoes interrupted ones. Rejected structures (parse failures,
+lengths outside 25–1280, policy exclusions) are listed in
+`rejected/<shard>.jsonl` as `{sequence_id, reason}`; a shard whose rows were all
+rejected is still written, empty. The command refuses to add shards to a
+directory whose existing shards carry a different tokenizer identity. mmCIF input
+uses its deposited polymer sequence; PDB files need SEQRES. Select a chain with
+`--chain`; a multi-chain file without it is rejected. `--include-coordinates`
+keeps observed N/CA/C. The installed command downloads the pinned tokenizer
+archive once into its local cache; use `--checkpoint /weights/best_valid.pth` for
+offline encoding.
 
 ## training
 
 `stok train` and `python -m stok.train` share Hydra/Click parsing and support
-`accelerate launch -m stok.train` and replicated CPU/GPU DDP. Training requires
-completed paired Parquet exports with matching tokenizer/codebook identity.
-Use the export command above; bare shards do not carry the completion contract.
-Each row has a string `sequence_id`, a full biological `sequence`, and one
-nullable integer `structure_tokens` element per residue. Coordinates, when
-present, retain observed `[L,3,3]` N/CA/C positions. Cropping keeps both
-modalities and coordinates aligned; unavailable labels keep their slots.
+`accelerate launch -m stok.train` and replicated CPU/GPU DDP. Training reads
+structure-token dataset directories (above). Startup reads shard footers only: it
+refuses a source whose `codebook_sha256`/`codebook_size` disagrees with the
+model's codebook, or sources with different tokenizer identities. Cropping keeps
+both modalities and coordinates aligned; unavailable labels keep their slots.
 
 Choose packaged groups with `model=mdlm_150m` or `train=mdlm_pilot`. Defaults use
-paired MDLM and the 150M group; the pilot selects BF16 and frozen evaluation.
+paired MDLM and the 150M group; the pilot selects BF16 and evaluation.
 Only paired MDLM training is supported. Unknown or obsolete keys, including
 typos in YAML overlays, are rejected before devices, artifacts, W&B, or outputs.
 `train.mdlm.span_mean` is read only for span placement, and `noise.power` only
@@ -327,10 +223,11 @@ accept only `path`, `load_coords`, and `fraction` (train) or `batch_size` (eval)
 ```yaml
 data:
   train:
-    natural: {path: /data/completed/natural, fraction: 0.8}
-    synthetic: {path: /data/completed/synthetic, fraction: 0.2}
+    natural: {path: /data/natural/train, fraction: 0.8}
+    synthetic: {path: /data/synthetic/train, fraction: 0.2}
+  eval:
+    validation: {path: /data/natural/validation}
   num_workers: 2
-  split_manifest: /data/splits.jsonl
 train:
   batch_size: 2
   gradient_accumulation_steps: 8
@@ -338,11 +235,11 @@ train:
   output_dir: /runs/stok/attempt-001
 ```
 
-Fractions normalize to one; unspecified fractions share remaining mass. Source
-order and content hashes participate in exact continuation. Multiple paired
-sources require a split manifest declaring their training/validation/test
-membership. DataLoader workers and batch size are per rank. Full-window batch
-size is `batch_size × gradient_accumulation_steps × world_size`.
+Fractions normalize to one; unspecified fractions share remaining mass.
+DataLoader workers and batch size are per rank. Full-window batch size is
+`batch_size × gradient_accumulation_steps × world_size`. Training draws (crop,
+regime, masks) are seeded by the run seed, epoch, stream position, source name
+and `sequence_id`.
 
 Training supports AdamW with `lr`, `weight_decay`, `adam_beta1`, `adam_beta2` and
 `adam_eps`. Select `warmup_linear`, `warmup_cosine`, `wsd_linear` or `wsd_cosine`
@@ -358,16 +255,34 @@ The engine resolves and freezes a private scientific configuration. The supplied
 configuration, including read-only inputs and authored interpolations, stays
 unchanged. Each run writes `configs/run.yaml` (resolved settings, including
 evaluation defaults). Checkpoints contain the resolved `config` and a derived
-`runtime` (data identity, execution and effective precision). Resume requires the same training configuration, data identity, world
-size, precision and device type; package upgrades and code edits do not block it.
-`residues_seen` counts globally consumed biological residues, including empty
-supervision; `executed_positions` counts globally forwarded padded positions,
-including AMP-skipped updates. `global_step` counts successful optimizer updates.
-Checkpoints require completed accumulation boundaries and keep only active MDLM
-metrics plus per-rank loader, RNG and scaler state. Prior formats are rejected.
+`runtime` (source summaries, codebook digest, vocabulary, execution and effective
+precision). `residues_seen` counts globally consumed biological residues,
+including empty supervision; `executed_positions` counts globally forwarded
+padded positions, including AMP-skipped updates. `global_step` counts successful
+optimizer updates. Checkpoints require completed accumulation boundaries and keep
+only active MDLM metrics plus per-rank loader, RNG and scaler state.
 
-Fresh runs require a new output directory. Resume requires matching data,
-model, seed, workers, batching, execution, optimizer and original budget.
+## evaluation
+
+With `train.eval.mdlm.enabled`, every `train.eval.steps` updates each `data.eval`
+source is scored by denoising: center crops, `joint_independent` masking with
+token placement at each `mask_probabilities` value (default `[0.15, 0.5, 0.85]`),
+reporting masked cross-entropy and accuracy per modality as
+`eval/<source>/denoise_p<p>/<sequence|structure>/<masked_ce|acc>`.
+`max_samples` caps the rows scored, taking the leading rows in directory order.
+
+With `generation.enabled`, every `generation.steps` updates the leading
+`generation.num_samples` rows (default 64) are generated with `sampling_steps`
+reverse steps: folding (sequence given, every structure token hidden) reports
+`folding/structure_acc`, and inverse folding (structure given) reports
+`inverse_folding/sequence_recovery`. With `generation.decode=true` and coordinates
+in the source, folding also reports decoded lDDT/RMSD/TM, next to a
+`true_token_control` that decodes the true tokens.
+
+Evaluation masks and draws are seeded by task, mask probability and
+`sequence_id` only, never by the training seed, placement, model or source name,
+so every run scores identical masks. Each evaluation also writes
+`logs/evaluations/step-<update>.json` with the resolved settings and metrics.
 
 ## Paired MDLM pilot
 
@@ -377,68 +292,33 @@ preset starts at 10,000 successful optimizer updates, length 514 including
 BOS/EOS, batch 2, accumulation 1, and bf16. These values require hardware
 qualification; choose precision/batch/accumulation before freezing a comparison
 series. CPU correctness checks use `train.mixed_precision=no`. Startup reports the
-exact parameter count, actual device/hardware/mixed precision, and data hashes.
-
-Supply **completed exported dataset directories**, including their export
-summary/provenance and Parquet shards; bare Parquet and unfinished exports are
-rejected. Choose a new nonempty `train.output_dir` for every fresh MDLM run.
-The following paths are placeholders to replace with actual local artifacts:
+exact parameter count, actual device/hardware/mixed precision, and each source's
+shard and row counts. Choose a new nonempty `train.output_dir` for every fresh
+run. The paths below are placeholders:
 
 ```bash
 stok train model=mdlm_150m train=mdlm_pilot \
-  +data.train.pilot.path=/data/stok-mdlm/completed/train \
-  +data.eval.validation.path=/data/stok-mdlm/completed/validation \
-  data.split_manifest=/data/stok-mdlm/splits-v1.jsonl \
-  train.eval.mdlm.case_manifest=/data/stok-mdlm/cases-v1 \
+  +data.train.pilot.path=/data/stok-mdlm/train \
+  +data.eval.validation.path=/data/stok-mdlm/validation \
   train.output_dir=/runs/stok-mdlm/baseline-001
 ```
 
-Split JSONL rows contain exactly `canonical_id`, `split` (`train`, `validation`,
-`test`), and `cluster_id`. Full canonical inventories, including representation
-rejections and test members, are audited for cluster/source/parent leakage.
-Monitoring cases select validation members only. Source names and display aliases
-do not identify biological samples. Exported tokenizer/policy/codebook identities
-must agree across sources. A custom export requires its matching
-`model.codebook.path`, independently of encoder size.
-
-Freeze family definitions, manifest seed, crops and residue controls with
-`stok freeze-eval-cases` before launching. The preset runs denoising every 250
-successful updates and generation every 1000 updates, using 64 reverse steps and
-a linear schedule. `train.eval.mdlm.families` and
-`train.eval.mdlm.generation.families` select unique family keys from that artifact;
-null selects all families of that kind. Generation is capped at **16 expanded
-cases**, including families and replicates, by `generation.max_cases`.
-The old cohort paths, live `cases` maps, `train.eval.seed` and `max_samples` fields
-are rejected. For example, select an already frozen denoising family with:
-
-```bash
-train.eval.mdlm.families=[probe]
-```
-
-Cases retain canonical positions, group IDs and realized masks when an arm lacks
-codes. Unavailable targets affect coverage and denominators; missing conditional
-inputs and unsupported crops are explicitly reported. Evaluation never silently
-recrops or redraws a case. Each evaluation also writes
-`logs/evaluations/step-<update>.json` with the frozen-case digest, resolved
-evaluation settings, coverage counts and metrics. Summaries distinguish case
-counts from unique proteins. Evaluation-only overrides on resume do not change
-the training identity.
-
-For a bounded one-source overfit diagnostic, supply an actual completed export,
-a new run directory, a small budget, and disable both benchmark controls:
+The preset runs denoising every 250 successful updates and generation every 1000
+updates, using 64 reverse steps and a linear schedule. For a bounded one-source
+overfit diagnostic, disable both:
 
 ```bash
 stok train model=mdlm_150m train=mdlm_pilot \
-  +data.train.diagnostic.path=/data/stok-mdlm/completed/diagnostic \
+  +data.train.diagnostic.path=/data/stok-mdlm/diagnostic \
   train.output_dir=/runs/stok-mdlm/diagnostic-001 \
   train.max_steps=20 train.warmup_steps=0 \
   train.eval.mdlm.enabled=false train.eval.mdlm.generation.enabled=false \
   train.wandb.enabled=false
 ```
 
-`train.eval.mdlm.generation.steps=null` also disables generation and removes its
-case requirement. `stok smoke-test model=mdlm_150m train=mdlm_pilot` is an
-explicit synthetic paired forward check; training has no dummy-data fallback.
+`train.eval.mdlm.generation.steps=null` also disables generation.
+`stok smoke-test model=mdlm_150m train=mdlm_pilot` is an explicit synthetic
+paired forward check; training has no dummy-data fallback.
 
 Use Hydra overrides for each isolated experiment; they retain normal override
 precedence. For spans and a power schedule append:
@@ -460,17 +340,14 @@ train.mdlm.regime_weights.joint_tied=1
 Resume with the original launch arguments and original update budget, adding
 `train.resume_from=/runs/stok-mdlm/baseline-001/checkpoints/step_00000500.pt`.
 The checkpoint records the deterministic stream, optimizer/scheduler/rank state,
-identities, precision/topology, and regime provenance. Keep model, training
-objective/masking, dataset contents/order, seed, workers, batch/accumulation,
-execution, learning rate, and original budget unchanged. Output/log/evaluation/
-checkpoint cadence changes are allowed. Scientific evaluation overrides create a new
-protocol identity while retaining exact training replay; changed sharding/order
-is rejected even when the canonical population matches. Saved readers recompute
-format-4 canonical, case, representation and protocol bindings without reopening
-original artifacts. Previous training formats are unsupported. Populated MDLM run directories require
-an explicit complete version-4 resume checkpoint.
+precision/topology and regime provenance. Its resume signature binds the
+scientific configuration, the codebook digest, the execution identity and each
+training source's shard names, sizes, row counts and tokenizer identity: adding,
+removing or rewriting a shard refuses the resume. Output/log/evaluation/checkpoint
+cadence and evaluation settings may change. Only version-5 checkpoints are read;
+populated run directories require an explicit resume checkpoint.
 
-Generate biological tokens using a complete version-4 MDLM checkpoint:
+Generate biological tokens using a complete version-5 MDLM checkpoint:
 
 ```bash
 stok sample --checkpoint /runs/stok-mdlm/baseline-001/model/final.pt \
@@ -485,12 +362,11 @@ requires positive `length`. Supply `length` explicitly or let a conditional mode
 infer it from its condition. Arrays/strings contain exactly one slot per
 biological residue, without BOS/EOS/PAD/MASK. `null` structure entries represent
 permanently unavailable conditioning cells. Structure-supplied rows must include
-`tokenizer_sha256` and `codebook_sha256` matching the saved
-`runtime.mdlm_identity`. For example:
+a `codebook_sha256` matching the saved `runtime.data`. For example:
 
 ```json
 {"sequence_id":"fold-1","sequence":"ACDE","length":4}
-{"sequence_id":"inverse-1","structure_tokens":[2,null,7,4],"length":4,"tokenizer_sha256":"<saved tokenizer digest>","codebook_sha256":"<saved codebook digest>"}
+{"sequence_id":"inverse-1","structure_tokens":[2,null,7,4],"length":4,"codebook_sha256":"<saved codebook digest>"}
 {"sequence_id":"joint-1","length":4}
 ```
 
@@ -498,7 +374,7 @@ Use each example with its corresponding mode in its own manifest. Joint
 sampling requires saved positive joint training-regime provenance. Conditions
 stay clamped, including unavailable cells; every requested output is masked
 before the first forward. Output JSONL contains aligned sequence/structure
-tokens and checkpoint/tokenizer/codebook/policy, training-noise, sampling-noise,
+tokens and checkpoint/codebook, training-noise, sampling-noise,
 seed/step provenance. Sampling needs no original training dataset or codebook
 file. `--schedule cosine` or `--schedule power --power 2` and `--steps` change
 sampling independently of training. CPU is the default; use `--device cuda` for
@@ -515,15 +391,14 @@ records bounded real-data BF16 Radeon diagnostics: the full architecture at
 `[2,514]`, finite gradients and both modality updates, checkpoint continuation,
 denoising/generation and matching frozen FP32 geometry decode. A separate tiny
 dropout-zero model improved both available-target losses on its training subset.
-These are implementation diagnostics. Operational launch remains pending actual
-frozen pilot splits/cases, intended hardware/topology and explicit run budgets;
-the preset's 10,000 updates are not a measured or authorized scientific run.
+These are implementation diagnostics; the preset's 10,000 updates are not a
+measured or authorized scientific run.
 
 ## Research contract
 
 Use `stok.config.load_training_config` for composition and
 `stok.training.engine.run_training` for programmatic execution. Loader and
-evaluator consumers receive runtime identities explicitly. Legacy
+evaluator consumers receive resolved configuration explicitly. Legacy
 `stok.cli.train` imports and configuration translation were removed.
 Historical baseline qualification remains in
 [the extraction report](docs/experiments/refactor/baseline.md); current contracts
