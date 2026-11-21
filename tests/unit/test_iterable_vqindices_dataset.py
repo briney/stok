@@ -3,7 +3,7 @@ import pyarrow.parquet as pq
 import pytest
 from pathlib import Path
 
-from stok.data.dataset import IterableTokenizedDataset
+from stok.data.dataset import InterleavedIterableDataset, IterableTokenizedDataset
 
 
 pytest.importorskip("pyarrow")
@@ -87,3 +87,61 @@ def test_mixed_optional_columns_and_required_schema(tmp_path):
     pq.write_table(pa.Table.from_pylist([written]), tmp_path / "bad.parquet")
     with pytest.raises(ValueError, match="bad.parquet.*structure_tokens"):
         IterableTokenizedDataset(str(tmp_path), max_length=8)
+
+
+def _three_shard_source(root, name, offset):
+    root.mkdir()
+    for shard in range(3):
+        rows = [
+            {
+                "sequence_id": f"{name}{offset + shard * 10 + i}",
+                "sequence": "ACD",
+                "structure_tokens": [0, 1, 2],
+            }
+            for i in range(4)
+        ]
+        pq.write_table(pa.Table.from_pylist(rows), root / f"{shard}.parquet")
+    return IterableTokenizedDataset(
+        str(root), max_length=None, seed=7, dataset_name=name
+    )
+
+
+def test_rows_are_built_only_by_their_owner(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from stok.data import dataset as module
+
+    built = []
+    original = module._build_output_from_row
+    monkeypatch.setattr(
+        module,
+        "_build_output_from_row",
+        lambda row, **kw: built.append(row["sequence_id"]) or original(row, **kw),
+    )
+    ds = _three_shard_source(tmp_path / "a", "a", 0)
+    seen = []
+    for rank in range(2):
+        for worker in range(2):
+            ds.rank, ds.world_size = rank, 2
+            ds.set_epoch(0)
+            monkeypatch.setattr(
+                module,
+                "get_worker_info",
+                lambda w=worker: SimpleNamespace(id=w, num_workers=2),
+            )
+            seen.extend(row["sequence_id"] for row in ds)
+    assert sorted(built) == sorted(seen) and len(seen) == 12
+
+
+def test_stream_order_unchanged_by_lazy_rows(tmp_path):
+    a = _three_shard_source(tmp_path / "a", "a", 0)
+    b = _three_shard_source(tmp_path / "b", "b", 100)
+    # Recorded on main before rows became lazy references.
+    assert [row["sequence_id"] for row in a] == [
+        "a1", "a2", "a3", "a0", "a12", "a13", "a10", "a11", "a22", "a20", "a23", "a21"
+    ]  # fmt: skip
+    mixture = InterleavedIterableDataset([a, b], [0.5, 0.5], seed=3)
+    assert [row["sequence_id"] for row in mixture] == [
+        "b101", "b102", "b103", "b100", "b112", "a1", "a2", "a3", "a0", "b113",
+        "a12", "b110", "b111", "a13", "a10", "b122", "a11", "b120", "b123", "b121",
+        "a22", "b123", "b122", "b121",
+    ]  # fmt: skip

@@ -608,3 +608,27 @@ def test_reader_and_sampling_allow_operational_overrides_and_inference_backend(
     finally:
         torch.backends.cuda.enable_flash_sdp(original_flash)
     assert torch.backends.cuda.flash_sdp_enabled() == original_flash
+
+
+def test_mdlm_300m_parameter_count():
+    with initialize_config_dir(
+        config_dir=str(files("stok") / "configs"), version_base=None
+    ):
+        cfg = compose(config_name="config", overrides=["model=mdlm_300m"])
+    enc = cfg.model.encoder
+    assert (enc.d_model, enc.n_layers, enc.n_heads) == (1024, 24, 16)
+    with torch.device("meta"):
+        model = STokMDLM(
+            vocab_size=32,
+            pad_id=1,
+            codebook=torch.empty(4096, 32),
+            d_model=enc.d_model,
+            n_heads=enc.n_heads,
+            n_layers=enc.n_layers,
+            ffn_mult=enc.ffn_mult,
+            dropout=enc.dropout,
+            attn_dropout=enc.attn_dropout,
+            norm_type=enc.norm,
+        )
+    count = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    assert count == 312615968

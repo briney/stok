@@ -18,6 +18,8 @@ HIP_VISIBLE_DEVICES='' ROCR_VISIBLE_DEVICES='' python -m pytest -q
 | Seeded evaluation independent of training choices, caps, worker/rank tails, RNG/mode restoration | `integration/test_mdlm_evaluation.py` |
 | Plain Parquet format, footer-only source summaries, tokenizer identity | `unit/test_data_format.py`, `unit/test_mdlm_data.py` |
 | Parallel, resumable structure tokenization | `integration/test_tokenize_structures.py` |
+| Sequence-only sources, `min_plddt`, own-row decoding | `unit/test_parquet_dataset.py`, `unit/test_iterable_vqindices_dataset.py`, `integration/test_mdlm_training.py` |
+| Warm start (`train.init_from`) and its resume rules | `integration/test_mdlm_resume.py` |
 | Exact continuation, stochastic dropout/workers, scaler/cursor/rank state | `integration/test_mdlm_resume.py` |
 | Current checkpoint-only sample and real matching decode | `integration/test_mdlm_cli.py` |
 | Reusable prototype comparison | `unit/test_model_builder.py` |

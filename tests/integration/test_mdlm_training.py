@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import pytest
+import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
 from hydra import compose, initialize_config_dir
@@ -61,8 +62,9 @@ def mdlm_config(project, source, codebook_path, **options):
     return cfg
 
 
-def training_fixture(tmp_path, n=8, rows=None):
-    codebook = torch.arange(64, dtype=torch.float32).reshape(32, 2)
+def training_fixture(tmp_path, n=8, rows=None, codebook=None):
+    if codebook is None:
+        codebook = torch.arange(64, dtype=torch.float32).reshape(32, 2)
     path = tmp_path / "codebook.pt"
     torch.save({"codebook": codebook}, path)
     if rows is None:
@@ -607,3 +609,34 @@ def test_zero_row_shard_trains(tmp_path):
     assert [
         s["rows"] for s in state["runtime"]["data"]["sources"]["local"]["shards"]
     ] == [8, 0]
+
+
+def test_sequence_only_source_trains_sequence_loss_only(tmp_path):
+    _, codebook = training_fixture(tmp_path)
+    uniref = tmp_path / "uniref"
+    uniref.mkdir()
+    sequences = [
+        "MKUXLAGVS",
+        "ACDEFGHIKLMNPQRSTVWYBZO" * 26,
+        "MSTNPKPQRKTKRNTNRRPQDVKFPGG",
+    ]
+    pq.write_table(
+        pa.table(
+            {
+                "sequence_id": [f"UniRef50_{i}" for i in range(len(sequences) * 2)],
+                "sequence": sequences * 2,
+            }
+        ),
+        uniref / "00000.parquet",
+    )
+    cfg = mdlm_config(
+        tmp_path / "run", uniref, codebook, **{"train.max_steps": 2, "data.max_len": 16}
+    )
+    run_training(cfg)
+    state = torch.load(tmp_path / "run/model/final.pt", weights_only=True)
+    assert state["global_step"] == 2
+    logging = state["rank_states"][0]["logging"]
+    # Every residue lacks structure; only sequence targets were ever eligible.
+    assert logging["total_missing_structure"] == state["residues_seen"] > 0
+    log = (tmp_path / "run/logs/train.log").read_text()
+    assert "sequence_ce" in log

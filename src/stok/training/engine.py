@@ -24,6 +24,7 @@ from stok.models.decoder import load_pretrained_decoder
 from stok.models.build import build_model
 from stok.data.mdlm import data_identity
 from stok.utils.codebook import load_codebook
+from stok.utils.pretrained import file_sha256, state_sha256
 from tqdm import tqdm
 from stok.training.tasks import MDLMTask
 from stok.utils.checkpoint import (
@@ -222,6 +223,45 @@ def iter_windows(loader, size: int):
         yield window
 
 
+def _warm_start(cfg, model, resume_payload, identity) -> str | None:
+    """Load ``train.init_from`` weights into a fresh run; return its file digest.
+
+    A resumed run takes its weights from ``resume_from`` and reuses the digest its
+    checkpoint recorded, so the warm-start file need not still exist.
+    """
+    path = cfg.train.get("init_from")
+    if resume_payload is not None:
+        recorded = resume_payload["signature"].get("init_from_sha256")
+        if bool(path) != (recorded is not None):
+            raise ValueError(
+                "train.init_from must match the resumed run's warm start (added or dropped)"
+            )
+        return recorded
+    if not path:
+        return None
+    warm = read_training_checkpoint(Path(path))
+
+    def shape(encoder):
+        # Dropout changes no weight; every other encoder field fixes the architecture.
+        return {
+            key: value
+            for key, value in encoder.items()
+            if key not in ("dropout", "attn_dropout")
+        }
+
+    if shape(warm["config"]["model"]["encoder"]) != shape(
+        OmegaConf.to_container(cfg.model.encoder, resolve=True)
+    ):
+        raise ValueError("train.init_from encoder architecture differs from this model")
+    if (
+        state_sha256({"codebook": warm["model"]["structure_codebook"]})
+        != identity["codebook_sha256"]
+    ):
+        raise ValueError("train.init_from codebook differs from this model's codebook")
+    model.load_state_dict(warm["model"], strict=True)
+    return file_sha256(path)
+
+
 def run_training(cfg: DictConfig) -> None:
     validate_training_config(cfg)
     cfg = cast(DictConfig, OmegaConf.create(OmegaConf.to_container(cfg, resolve=True)))
@@ -302,6 +342,12 @@ def run_training(cfg: DictConfig) -> None:
     mdlm_eval = resolve_mdlm_eval_config(cfg)
     train_loader, eval_loaders, generation_loaders = _build_dataloaders(cfg)
     model = build_model(cfg, codebook=codebook)
+    resume_payload = (
+        read_training_checkpoint(Path(cfg.train.resume_from))
+        if cfg.train.get("resume_from")
+        else None
+    )
+    init_from_sha256 = _warm_start(cfg, model, resume_payload, mdlm_identity)
     if mdlm_eval.generation.enabled and mdlm_eval.generation.decode:
         from stok.utils.sampling import inference_context
 
@@ -385,7 +431,6 @@ def run_training(cfg: DictConfig) -> None:
 
     model, optimizer = accelerator.prepare(model, optimizer)
 
-    resume_payload = None
     progress = None
     resume_stream = None
     signature = resume_signature(
@@ -393,10 +438,10 @@ def run_training(cfg: DictConfig) -> None:
         codebook=codebook,
         accelerator=accelerator,
         identity=mdlm_identity,
+        init_from_sha256=init_from_sha256,
     )
     runtime["execution"] = signature["execution"]
-    if cfg.train.get("resume_from"):
-        resume_payload = read_training_checkpoint(Path(cfg.train.resume_from))
+    if resume_payload is not None:
         validate_resume_signature(resume_payload, signature)
         progress = restore_training_state(
             resume_payload,
