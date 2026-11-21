@@ -256,6 +256,10 @@ class IterableTokenizedDataset(IterableDataset):
                 if "mean_plddt" not in pq.read_schema(sp).names:
                     raise ValueError(f"{sp}: min_plddt needs a mean_plddt column")
                 scores = pq.read_table(sp, columns=["mean_plddt"]).column(0)
+                try:
+                    scores = scores.cast(pa.float64())
+                except (pa.ArrowInvalid, pa.ArrowNotImplementedError) as error:
+                    raise ValueError(f"{sp}: mean_plddt must be numeric") from error
                 keep = np.asarray(scores.fill_null(-np.inf), dtype=np.float64)
                 self._kept.append(np.flatnonzero(keep >= min_plddt))
             if not sum(len(kept) for kept in self._kept):

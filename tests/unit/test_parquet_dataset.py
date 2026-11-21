@@ -297,3 +297,36 @@ def test_raw_coordinate_length_mode_preserves_integer_semantics(tmp_path, max_le
     assert torch.isnan(observed["coords"][5:]).all()
     assert torch.isnan(missing["coords"]).all()
     assert observed["dataset"] == "corpus"
+
+
+@pytest.mark.parametrize("kind", [pa.int64(), pa.uint8()])
+def test_min_plddt_accepts_integer_scores(tmp_path, kind):
+    pq.write_table(
+        pa.table(
+            {
+                "sequence_id": ["p0", "p1", "p2"],
+                "sequence": ["ACDE"] * 3,
+                "structure_tokens": [[1, 2, 3, 4]] * 3,
+                "mean_plddt": pa.array([50, 70, None], type=kind),
+            }
+        ),
+        tmp_path / "a.parquet",
+    )
+    ds = ordered(tmp_path, max_length=8, min_plddt=70)
+    assert [row["sequence_id"] for row in ds] == ["p1"]
+
+
+def test_min_plddt_refuses_non_numeric_scores(tmp_path):
+    pq.write_table(
+        pa.table(
+            {
+                "sequence_id": ["p0"],
+                "sequence": ["ACDE"],
+                "structure_tokens": [[1, 2, 3, 4]],
+                "mean_plddt": ["high"],
+            }
+        ),
+        tmp_path / "a.parquet",
+    )
+    with pytest.raises(ValueError, match="mean_plddt must be numeric"):
+        ordered(tmp_path, max_length=8, min_plddt=70)
