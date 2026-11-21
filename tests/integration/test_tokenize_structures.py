@@ -191,7 +191,6 @@ def test_resume_skips_finished_and_redoes_partial(tmp_path, model):
     summary = tokenize(model, source, out, **options)
     assert summary["shards_skipped"] == 1 and summary["shards_written"] == 1
     assert finished.stat().st_mtime == 1
-    assert not (out / ".00001.parquet.tmp").exists()
     assert read_source(out)["rows"] == 2
 
 
@@ -295,3 +294,103 @@ def test_tokenization_forces_fp32_inside_outer_autocast(tmp_path, model):
     finally:
         hook.remove()
     assert observed and set(observed) == {torch.float32}
+
+
+def test_text_input_streams_without_reading_whole_shard(tmp_path, model, monkeypatch):
+    from stok.data import tokenize as module
+
+    source = tmp_path / "source"
+    source.mkdir()
+    text_shard(source / "00000.parquet", cif_rows(("AF-1", {}), ("AF-2", {})))
+    monkeypatch.setattr(
+        module.pq, "read_table", lambda *a, **k: pytest.fail("read whole shard")
+    )
+    summary = tokenize(
+        model, source, tmp_path / "out", text_column="cif", id_column="id"
+    )
+    assert summary["rows"] == 2
+
+
+def test_leaves_another_writers_temp_file_alone(tmp_path, model):
+    source = tmp_path / "source"
+    source.mkdir()
+    text_shard(source / "00000.parquet", cif_rows(("AF-1", {})))
+    out = tmp_path / "out"
+    out.mkdir()
+    # A requeued twin of this job may still be writing under its own temp name.
+    other = out / ".00000.parquet.tmp"
+    other.write_text("another writer")
+    tokenize(model, source, out, text_column="cif", id_column="id")
+    assert other.read_text() == "another writer"
+    assert read_source(out)["rows"] == 1
+
+
+@pytest.mark.parametrize("text_column", [None, "cif"])
+def test_no_inputs_is_an_error(tmp_path, model, text_column):
+    source = tmp_path / "source"
+    source.mkdir()
+    if text_column is None:
+        # Parquet shards without --text-column: a forgotten flag, not an empty job.
+        text_shard(source / "00000.parquet", cif_rows(("AF-1", {})))
+    with pytest.raises(ValueError, match="no input"):
+        tokenize(model, source, tmp_path / "out", text_column=text_column)
+
+
+def test_null_id_or_text_rejects_row(tmp_path, model):
+    source = tmp_path / "source"
+    source.mkdir()
+    rows = cif_rows(("AF-1", {}), ("AF-2", {}), ("AF-3", {}))
+    rows[1]["id"] = None
+    rows[2]["cif"] = None
+    text_shard(source / "00000.parquet", rows)
+    summary = tokenize(
+        model, source, tmp_path / "out", text_column="cif", id_column="id"
+    )
+    assert summary["rows"] == 1 and summary["rejected"] == 2
+    rejected = [
+        json.loads(line)
+        for line in (tmp_path / "out/rejected/00000.jsonl").read_text().splitlines()
+    ]
+    assert [entry["reason"] for entry in rejected] == ["missing_input"] * 2
+
+
+def test_missing_keep_column_is_a_clear_error(tmp_path, model):
+    source = tmp_path / "source"
+    source.mkdir()
+    text_shard(source / "00000.parquet", cif_rows(("AF-1", {})))
+    with pytest.raises(ValueError, match="absent"):
+        tokenize(
+            model,
+            source,
+            tmp_path / "out",
+            text_column="cif",
+            id_column="id",
+            keep_columns=["absent"],
+        )
+
+
+def test_unexpected_parse_error_rejects_row_not_job(tmp_path, model, monkeypatch):
+    from stok.data import tokenize as module
+
+    source = tmp_path / "source"
+    source.mkdir()
+    text_shard(source / "00000.parquet", cif_rows(("AF-1", {}), ("AF-bad", {})))
+    original = module.parse_polymer_structure
+    calls = []
+
+    def parse(path, **kwargs):
+        calls.append(path)
+        if len(calls) == 2:
+            raise ValueError("malformed polymer")
+        return original(path, **kwargs)
+
+    monkeypatch.setattr(module, "parse_polymer_structure", parse)
+    summary = tokenize(
+        model, source, tmp_path / "out", text_column="cif", id_column="id"
+    )
+    assert summary["rows"] == 1 and summary["rejected"] == 1
+    (entry,) = [
+        json.loads(line)
+        for line in (tmp_path / "out/rejected/00000.jsonl").read_text().splitlines()
+    ]
+    assert entry == {"sequence_id": "AF-bad", "reason": "parse_error"}

@@ -31,22 +31,33 @@ def _structures_from_text(
     keep_columns: Sequence[str],
     chain_id,
 ) -> Iterator[tuple[str, Any, dict]]:
-    """Yield (sequence_id, parsed structure or error, kept values) per row."""
-    table = pq.read_table(path, columns=[id_column, text_column, *keep_columns])
+    """Yield (sequence_id, parsed structure or error, kept values) per row.
+
+    Streams record batches: an afdb-rep shard holds several GB of mmCIF text.
+    """
+    columns = [id_column, text_column, *keep_columns]
     with tempfile.TemporaryDirectory() as scratch:
         # ponytail: the parser reads files; a temp file per row keeps it unchanged.
         file = Path(scratch) / "structure.cif"
-        for row in table.to_pylist():
-            file.write_text(row[text_column])
-            kept = {name: row[name] for name in keep_columns}
-            yield str(row[id_column]), _parse(file, chain_id), kept
+        for batch in pq.ParquetFile(path).iter_batches(batch_size=256, columns=columns):
+            for row in batch.to_pylist():
+                kept = {name: row[name] for name in keep_columns}
+                if row[id_column] is None or row[text_column] is None:
+                    missing = StructureMappingError("missing_input", "null id or text")
+                    yield row[id_column], missing, kept
+                    continue
+                file.write_text(row[text_column])
+                yield str(row[id_column]), _parse(file, chain_id), kept
 
 
 def _parse(path: Path, chain_id):
+    """Parse one input; a malformed input rejects its row, never the whole job."""
     try:
         return parse_polymer_structure(path, chain_id=chain_id)
     except StructureMappingError as error:
         return error
+    except (ValueError, TypeError) as error:
+        return StructureMappingError("parse_error", f"{path}: {error}")
 
 
 def _coordinates(structure: PolymerStructure) -> list:
@@ -106,6 +117,11 @@ def tokenize_directory(
         names = [paths[0].stem for paths in inputs]
         if inputs:
             schema = pq.read_schema(inputs[0][0])
+            missing = {id_column, text_column, *keep_columns} - set(schema.names)
+            if missing:
+                raise ValueError(
+                    f"{inputs[0][0]}: missing input columns {sorted(missing)}"
+                )
             extra = [schema.field(name) for name in keep_columns]
     else:
         files = sorted(
@@ -118,6 +134,11 @@ def tokenize_directory(
             for start in range(0, len(files), rows_per_shard)
         ]
         names = [f"part-{k:06d}" for k in range(len(inputs))]
+    if not inputs:
+        kind = "Parquet shards" if text_column is not None else "structure files"
+        raise ValueError(
+            f"{input_dir}: no input {kind} (Parquet input needs --text-column)"
+        )
     schema = shard_schema(
         structure=True,
         coordinates=include_coordinates,
@@ -205,11 +226,20 @@ def tokenize_directory(
             (output_dir / "rejected" / f"{name}.jsonl").write_text(
                 "".join(json.dumps(entry) + "\n" for entry in rejected)
             )
-        temporary = output_dir / f".{name}.parquet.tmp"
-        pq.write_table(
-            pa.Table.from_pylist(rows, schema=schema), temporary, compression="zstd"
+        # A unique hidden temp name: a requeued twin of this job may be writing too.
+        handle, temporary = tempfile.mkstemp(
+            prefix=f".{name}.", suffix=".tmp", dir=output_dir
         )
-        os.replace(temporary, destination)
+        os.close(handle)
+        try:
+            pq.write_table(
+                pa.Table.from_pylist(rows, schema=schema),
+                temporary,
+                compression="zstd",
+            )
+            os.replace(temporary, destination)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
         summary["shards_written"] += 1
         summary["rows"] += len(rows)
         summary["rejected"] += len(rejected)
