@@ -42,15 +42,31 @@ def _partition_stream(dataset):
     worker = get_worker_info()
     worker_id, workers = (worker.id, worker.num_workers) if worker else (0, 1)
     usable = _usable_samples(dataset)
-    # ponytail: each rank scans the deterministic stream; index shards if parsing becomes a bottleneck.
-    for position, item in enumerate(dataset._iter_unsharded(dataset._epoch)):
+    # Every owner walks the same cheap reference stream; only owned rows are built.
+    for position, ref in enumerate(dataset._iter_unsharded(dataset._epoch)):
         if position >= usable:
             break
         if (
             position % dataset.world_size == dataset.rank
             and (position // dataset.world_size) % workers == worker_id
         ):
-            yield item
+            yield _materialize(ref)
+
+
+def _materialize(ref) -> dict[str, Any]:
+    """Build one row from a (dataset, shard path, table, index) reference."""
+    dataset, path, table, index = ref
+    try:
+        out = _build_output_from_row(
+            table.slice(index, 1).to_pylist()[0],
+            max_length=dataset.max_length,
+            has_coords=dataset.has_coords,
+        )
+    except ValueError as exc:
+        raise ValueError(f"Shard {path}: {exc}") from exc
+    if dataset.dataset_name is not None:
+        out["dataset"] = dataset.dataset_name
+    return out
 
 
 def set_dataset_epoch(dataset, epoch: int):
@@ -257,17 +273,7 @@ class IterableTokenizedDataset(IterableDataset):
                     rows
                 )
             for i in rows:
-                try:
-                    out = _build_output_from_row(
-                        table.slice(i, 1).to_pylist()[0],
-                        max_length=self.max_length,
-                        has_coords=self.has_coords,
-                    )
-                    if self.dataset_name is not None:
-                        out["dataset"] = self.dataset_name
-                    yield out
-                except ValueError as exc:
-                    raise ValueError(f"Shard {path}: {exc}") from exc
+                yield self, path, table, i
 
 
 class InterleavedIterableDataset(IterableDataset):
