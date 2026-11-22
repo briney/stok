@@ -764,3 +764,8 @@ def run_training(cfg: DictConfig) -> None:
         if log_file_handle is not None:
             print("Training complete.", file=log_file_handle, flush=True)
             log_file_handle.close()
+    if wb is not None:
+        wb.finish()
+    # Ranks that exit with a live process group abort at interpreter exit (#42).
+    accelerator.wait_for_everyone()
+    accelerator.end_training()

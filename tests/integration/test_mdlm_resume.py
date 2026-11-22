@@ -352,7 +352,7 @@ def test_partial_accumulation_cursor_rejected_before_output(tmp_path):
 WANDB_MOCK = r"""
 from types import SimpleNamespace
 import json
-record = {'init': [], 'history': []}
+record = {'init': [], 'history': [], 'finish': 0}
 wb = SimpleNamespace()
 def init(**kwargs):
     import random, numpy as np
@@ -366,7 +366,9 @@ def log(payload, *, step):
     random.random(); np.random.rand(); torch.rand(5)
     if os.environ.get('WB_LOG_FAIL'): raise RuntimeError('visible W&B history failure')
     record['history'].append(step)
-wb.init, wb.log = init, log
+def finish():
+    record['finish'] += 1
+wb.init, wb.log, wb.finish = init, log, finish
 sys.modules['wandb'] = wb
 import atexit
 atexit.register(lambda: Path(str(sys.argv[1])+'.wandb.json').write_text(json.dumps(record)))
@@ -395,7 +397,8 @@ def test_wandb_resumes_recorded_run_id(tmp_path):
     cfg.train.log_every = 1
     cfg.train.wandb.enabled = True
     cfg.train.wandb.mode = "offline"
-    execute_wandb(cfg, tmp_path / "full.yaml")
+    _, record = execute_wandb(cfg, tmp_path / "full.yaml")
+    assert record["finish"] == 1
     cfg.train.output_dir = str(tmp_path / "interrupted")
     execute_wandb(cfg, tmp_path / "interrupted.yaml", stop=2, ok=False)
     cfg.train.resume_from = str(tmp_path / "interrupted/checkpoints/step_00000002.pt")
