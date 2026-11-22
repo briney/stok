@@ -66,8 +66,9 @@ def main():
         if args.case == "mdlm-unused-head":
             cfg.train.mdlm.regime_weights = {"sequence_only": 1}
         run_training(cfg)
+        # A process group left behind aborts the ranks at interpreter exit (#42).
         if torch.distributed.is_initialized():
-            torch.distributed.destroy_process_group()
+            raise SystemExit("run_training left the process group initialized")
         return
     if args.source == "mixture":
         cfg.data.train = {
