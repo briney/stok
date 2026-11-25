@@ -285,7 +285,9 @@ reporting masked cross-entropy and accuracy per modality as
 
 With `generation.enabled`, every `generation.steps` updates the leading
 `generation.num_samples` rows (default 64) are generated with `sampling_steps`
-reverse steps: folding (sequence given, every structure token hidden) reports
+reverse steps, `order` (`random`, `max_prob`, or `min_entropy`), and
+`temperature` (`>= 0.0`, where `0.0` is greedy argmax): folding (sequence given,
+every structure token hidden) reports
 `folding/structure_acc`, and inverse folding (structure given) reports
 `inverse_folding/sequence_recovery`. With `generation.decode=true` and coordinates
 in the source, folding also reports decoded lDDT/RMSD/TM, next to a
@@ -400,7 +402,8 @@ stay clamped, including unavailable cells; every requested output is masked
 before the first forward. Output JSONL contains aligned sequence/structure
 tokens and checkpoint/codebook, training-noise, sampling-noise,
 seed/step provenance. Sampling needs no original training dataset or codebook
-file. `--schedule cosine` or `--schedule power --power 2` and `--steps` change
+file. `--schedule cosine` or `--schedule power --power 2`, `--steps`,
+`--order max_prob|min_entropy`, and `--temperature` change
 sampling independently of training. CPU is the default; use `--device cuda` for
 an available CUDA device. Existing output files are always refused.
 

@@ -213,6 +213,25 @@ def test_generation_metrics():
     assert "inverse_folding/sequence_recovery" in metrics
 
 
+def test_generation_forwards_order_and_temperature(monkeypatch):
+    from stok.eval import mdlm as eval_mdlm
+
+    seen = []
+    real = eval_mdlm.sample_mdlm
+
+    def capture(*args, **kwargs):
+        seen.append((kwargs["order"], kwargs["temperature"]))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(eval_mdlm, "sample_mdlm", capture)
+    cfg = config(generation=True)
+    cfg.train.eval.mdlm.enabled = False
+    cfg.train.eval.mdlm.generation.order = "max_prob"
+    cfg.train.eval.mdlm.generation.temperature = 0.2
+    evaluate(FixedModel(), rows(1), cfg)
+    assert seen == [("max_prob", 0.2), ("max_prob", 0.2)]
+
+
 def test_generation_masks_one_track_fully():
     model = FixedModel()
     population = rows(1)

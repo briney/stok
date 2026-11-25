@@ -632,3 +632,58 @@ def test_mdlm_300m_parameter_count():
         )
     count = sum(p.numel() for p in model.parameters() if p.requires_grad)
     assert count == 312615968
+
+
+@pytest.mark.parametrize("order", ["max_prob", "min_entropy"])
+def test_cli_sample_accepts_order_and_temperature_and_records_provenance(
+    tmp_path, trained, order
+):
+    checkpoint, payload = trained
+    rows = [row_for(payload, "folding")]
+    result, output = invoke_sample(
+        tmp_path,
+        checkpoint,
+        rows,
+        "folding",
+        "--order",
+        order,
+        "--temperature",
+        "0.2",
+    )
+    assert result.exit_code == 0, result.output
+    record = json.loads(output.read_text())
+    assert record["provenance"]["sampling_order"] == order
+    assert record["provenance"]["sampling_temperature"] == 0.2
+    # Zero temperature is deterministic across seeds.
+    out_a = tmp_path / "a.jsonl"
+    out_b = tmp_path / "b.jsonl"
+    manifest = tmp_path / "m.jsonl"
+    manifest.write_text(json.dumps(rows[0]) + "\n")
+    for dst, seed in ((out_a, "1"), (out_b, "2")):
+        res = CliRunner().invoke(
+            cli,
+            [
+                "sample",
+                "--checkpoint",
+                str(checkpoint),
+                "--input",
+                str(manifest),
+                "--output",
+                str(dst),
+                "--mode",
+                "folding",
+                "--steps",
+                "3",
+                "--seed",
+                seed,
+                "--order",
+                order,
+                "--temperature",
+                "0.0",
+            ],
+        )
+        assert res.exit_code == 0, res.output
+    assert (
+        json.loads(out_a.read_text())["structure_tokens"]
+        == json.loads(out_b.read_text())["structure_tokens"]
+    )
