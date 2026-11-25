@@ -380,3 +380,158 @@ def test_small_clean_support_remains_usable_for_finite_state_sampling():
     generate = batch["residue_mask"][..., None].expand(-1, -1, 2).clone()
     result = run(model, batch, aa, generate)
     assert torch.isin(result["sequence_tokens"][generate[..., 0]], aa).all()
+
+
+class RankedConfidenceDenoiser(nn.Module):
+    """Per-position distinct confidence levels for testing ordered unmasking."""
+
+    def __init__(self, tokenizer, aa):
+        super().__init__()
+        self.pad_id = tokenizer.pad_token_id
+        self.embed = nn.Embedding(len(tokenizer), 2)
+        self.codebook_size = 4
+        self.mdlm_regime_weights = {"joint_independent": 1}
+        self.aa = aa
+        self.calls = []
+
+    def forward(self, sequence_tokens, structure_tokens):
+        self.calls.append((sequence_tokens.clone(), structure_tokens.clone()))
+        B, L = sequence_tokens.shape
+        seq = torch.full((B, L, self.embed.num_embeddings), -1000.0)
+        seq[..., self.aa[0]] = 2.0
+        seq[..., self.aa[1]] = 0.0
+        # 4 residue slots (positions 1..4) with distinct structure distributions:
+        # pos 1: [0.40, 0.20, 0.20, 0.20] (max_prob=0.40, entropy=1.332)
+        # pos 2: [0.55, 0.43, 0.01, 0.01] (max_prob=0.55, entropy=0.779)
+        # pos 3: [0.60, 0.14, 0.13, 0.13] (max_prob=0.60, entropy=1.132)
+        # pos 4: [0.95, 0.02, 0.02, 0.01] (max_prob=0.95, entropy=0.251)
+        # max_prob order: pos 4 > pos 3 > pos 2 > pos 1
+        # min_entropy order: pos 4 > pos 2 > pos 3 > pos 1
+        probs = torch.tensor(
+            [
+                [0.25, 0.25, 0.25, 0.25],  # BOS
+                [0.40, 0.20, 0.20, 0.20],  # pos 1
+                [0.55, 0.43, 0.01, 0.01],  # pos 2
+                [0.60, 0.14, 0.13, 0.13],  # pos 3
+                [0.95, 0.02, 0.02, 0.01],  # pos 4
+                [0.25, 0.25, 0.25, 0.25],  # EOS
+            ],
+            dtype=torch.float32,
+        )
+        struct = probs[:L].log().unsqueeze(0).expand(B, -1, -1).clone()
+        return {"sequence_logits": seq, "structure_logits": struct}
+
+
+@pytest.mark.parametrize(
+    "order,expected_first_two",
+    [("max_prob", {3, 4}), ("min_entropy", {2, 4})],
+)
+def test_confidence_order_reveals_highest_confidence_groups_first(
+    order, expected_first_two
+):
+    tokenizer = Tokenizer()
+    batch = prepare_mdlm_batch(
+        [
+            {
+                "dataset": "fixture",
+                "sequence_id": "ranked",
+                "sequence": "ACDE",
+                "structure_tokens": [0, 1, 2, 3],
+            }
+        ],
+        tokenizer,
+        max_len=6,
+        codebook_size=4,
+        crop="center",
+        seeds=[0],
+    )
+    aa = torch.tensor(tokenizer.convert_tokens_to_ids(list(CANONICAL_AA)))
+    model = RankedConfidenceDenoiser(tokenizer, aa)
+    generate = torch.zeros((*batch["residue_mask"].shape, 2), dtype=torch.bool)
+    generate[..., 1] = batch["residue_mask"]
+    ids = groups(batch, generate, placement="token", tied=False)
+    result = run(
+        model,
+        batch,
+        aa,
+        generate,
+        ids=ids,
+        steps=2,
+        order=order,
+        temperature=0.0,
+    )
+    # After step 1 (p=0.5), exactly 2 of the 4 structure positions must be revealed.
+    step1_struct = model.calls[1][1][0]
+    revealed = set(
+        torch.nonzero(step1_struct[1:5].ne(5), as_tuple=False)
+        .squeeze(-1)
+        .add(1)
+        .tolist()
+    )
+    assert revealed == expected_first_two
+    assert not result["structure_tokens"][generate[..., 1]].eq(5).any()
+    assert (result["structure_tokens"][generate[..., 1]] == 0).all()
+
+
+@pytest.mark.parametrize("order", ["random", "max_prob", "min_entropy"])
+def test_zero_temperature_is_deterministic_argmax_and_respects_groups(order):
+    model, batch, aa = fixture("ACDEFG", count=4)
+    generate = batch["residue_mask"][..., None].expand(-1, -1, 2).clone()
+    ids = groups(batch, generate, placement="span", tied=True)
+    r1 = run(
+        model,
+        batch,
+        aa,
+        generate,
+        ids=ids,
+        steps=4,
+        seeds=[1, 2, 3, 4],
+        order=order,
+        temperature=0.0,
+    )
+    r2 = run(
+        model,
+        batch,
+        aa,
+        generate,
+        ids=ids,
+        steps=4,
+        seeds=[9, 8, 7, 6],
+        order=order,
+        temperature=0.0,
+    )
+    # FixedDenoiser argmax is aa[0] for sequence and 1 for structure everywhere.
+    assert (r1["sequence_tokens"][generate[..., 0]] == aa[0]).all()
+    assert (r1["structure_tokens"][generate[..., 1]] == 1).all()
+    assert torch.equal(r1["sequence_tokens"], r2["sequence_tokens"])
+    assert torch.equal(r1["structure_tokens"], r2["structure_tokens"])
+
+
+def test_low_temperature_sharpens_posterior_draws():
+    model, batch, aa = fixture(count=400)
+    generate = batch["residue_mask"][..., None].expand(-1, -1, 2).clone()
+    hot = run(model, batch, aa, generate, steps=1, order="random", temperature=1.0)
+    cold = run(model, batch, aa, generate, steps=1, order="random", temperature=0.1)
+    hot_argmax = float((hot["structure_tokens"][generate[..., 1]] == 1).float().mean())
+    cold_argmax = float(
+        (cold["structure_tokens"][generate[..., 1]] == 1).float().mean()
+    )
+    assert abs(hot_argmax - 0.7) < 0.08
+    assert cold_argmax > 0.98
+
+
+@pytest.mark.parametrize(
+    "kwargs,match",
+    [
+        ({"order": "bogus"}, "order"),
+        ({"temperature": -0.1}, "temperature"),
+        ({"temperature": float("nan")}, "temperature"),
+        ({"temperature": float("inf")}, "temperature"),
+    ],
+)
+def test_invalid_order_or_temperature_fails_before_forward(kwargs, match):
+    model, batch, aa = fixture()
+    generate = batch["residue_mask"][..., None].expand(-1, -1, 2).clone()
+    with pytest.raises(ValueError, match=match):
+        run(model, batch, aa, generate, **kwargs)
+    assert not model.calls

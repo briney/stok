@@ -1,6 +1,7 @@
 """Seeded, token-weighted MDLM validation diagnostics, independent of training."""
 
 from contextlib import ExitStack
+import math
 from typing import cast
 
 from omegaconf import DictConfig, ListConfig, OmegaConf
@@ -17,7 +18,7 @@ from stok.utils.mdlm import (
     stable_seed,
 )
 from stok.utils.pretrained import state_sha256
-from stok.utils.sampling import inference_context, sample_mdlm
+from stok.utils.sampling import SAMPLING_ORDERS, inference_context, sample_mdlm
 from stok.utils.tokenizer import Tokenizer
 
 DEFAULTS = {
@@ -31,6 +32,8 @@ DEFAULTS = {
         "num_samples": 64,
         "decode": False,
         "schedule": {"name": "linear"},
+        "order": "random",
+        "temperature": 1.0,
     },
 }
 # Explicit regime/probability overrides use none of these values, but the corruption
@@ -96,6 +99,15 @@ def resolve_mdlm_eval_config(cfg: DictConfig) -> DictConfig:
             raise ValueError(f"MDLM generation {name} must be a positive integer")
     if generation.schedule.name == "power":
         generation.schedule.setdefault("power", 2.0)
+    if generation.order not in SAMPLING_ORDERS:
+        raise ValueError(f"Unsupported MDLM generation order: {generation.order}")
+    temperature = generation.temperature
+    if (
+        type(temperature) not in (int, float)
+        or not math.isfinite(temperature)
+        or temperature < 0
+    ):
+        raise ValueError("MDLM generation temperature must be finite and >= 0")
     mask_schedule(
         torch.tensor([0.0, 0.5, 1.0], dtype=torch.float64),
         name=generation.schedule.name,
@@ -296,6 +308,8 @@ def evaluate_mdlm(
                                 steps=settings.generation.sampling_steps,
                                 seeds=[seed],
                                 canonical_aa_ids=canonical,
+                                order=settings.generation.order,
+                                temperature=float(settings.generation.temperature),
                             )
                             track = 1 if task == "folding" else 0
                             name = ("sequence_tokens", "structure_tokens")[track]

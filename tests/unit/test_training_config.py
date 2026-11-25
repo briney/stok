@@ -529,3 +529,28 @@ def test_min_plddt_is_a_source_option(tmp_path):
         ]
     )
     assert cfg.data.train.afdb.min_plddt == 70
+
+
+def test_eval_generation_order_and_temperature_are_validated():
+    from stok.config import load_training_config
+    from stok.eval.mdlm import resolve_mdlm_eval_config
+
+    cfg = load_training_config(
+        [
+            "train.eval.mdlm.generation.order=max_prob",
+            "train.eval.mdlm.generation.temperature=0.2",
+        ]
+    )
+    resolved = resolve_mdlm_eval_config(cfg)
+    assert resolved.generation.order == "max_prob"
+    assert resolved.generation.temperature == 0.2
+
+    zero_cfg = load_training_config(["train.eval.mdlm.generation.temperature=0"])
+    assert resolve_mdlm_eval_config(zero_cfg).generation.temperature == 0
+
+    with pytest.raises(ValueError, match="order"):
+        load_training_config(["train.eval.mdlm.generation.order=invalid"])
+    with pytest.raises(ValueError, match="temperature"):
+        load_training_config(["train.eval.mdlm.generation.temperature=-0.5"])
+    with pytest.raises(ValueError, match="temperature"):
+        load_training_config(["train.eval.mdlm.generation.temperature=true"])

@@ -78,3 +78,5 @@ eval:
       num_samples: 64  # leading validation rows for folding/inverse folding
       decode: false
       schedule: {name: linear}
+      order: random  # random | max_prob | min_entropy
+      temperature: 1.0  # >= 0.0; 0.0 = greedy argmax

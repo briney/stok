@@ -18,7 +18,7 @@ from stok.utils.checkpoint import read_training_checkpoint
 from stok.utils.decoding import decode_token_aligned_coords
 from stok.utils.mdlm import build_mask_groups, stable_seed
 from stok.utils.pretrained import file_sha256, json_sha256, state_sha256
-from stok.utils.sampling import inference_context, sample_mdlm
+from stok.utils.sampling import SAMPLING_ORDERS, inference_context, sample_mdlm
 from stok.utils.tokenizer import Tokenizer
 
 
@@ -50,6 +50,13 @@ from stok.utils.tokenizer import Tokenizer
 )
 @click.option("--power", type=float, default=2.0, show_default=True)
 @click.option(
+    "--order",
+    type=click.Choice(list(SAMPLING_ORDERS)),
+    default="random",
+    show_default=True,
+)
+@click.option("--temperature", type=float, default=1.0, show_default=True)
+@click.option(
     "--device", type=click.Choice(["cpu", "cuda"]), default="cpu", show_default=True
 )
 @click.option(
@@ -66,6 +73,8 @@ def sample_cmd(
     seed,
     schedule,
     power,
+    order,
+    temperature,
     device,
     decode,
     decoder_path,
@@ -173,6 +182,8 @@ def sample_cmd(
             "seed": seed,
             "sampling_steps": steps,
             "sampling_schedule": OmegaConf.to_container(sampling_schedule),
+            "sampling_order": order,
+            "sampling_temperature": temperature,
             "training_noise": OmegaConf.to_container(cfg.train.mdlm.noise),
             "regime_weights": model.mdlm_regime_weights,
             "codebook_sha256": identity.codebook_sha256,
@@ -217,6 +228,8 @@ def sample_cmd(
                 canonical_aa_ids=torch.tensor(
                     tokenizer.convert_tokens_to_ids(list(CANONICAL_AA))
                 ),
+                order=order,
+                temperature=temperature,
             )
             seq = sampled["sequence_tokens"][0, 1:-1].tolist()
             struct = sampled["structure_tokens"][0, 1:-1].tolist()
@@ -248,7 +261,7 @@ def sample_cmd(
         with output.open("x") as handle:
             handle.writelines(results)
         click.echo(
-            f"Generated {len(results)} samples to {output}; steps={steps}, schedule={schedule}, device={device}"
+            f"Generated {len(results)} samples to {output}; steps={steps}, schedule={schedule}, order={order}, temperature={temperature}, device={device}"
         )
     except (
         ValueError,
