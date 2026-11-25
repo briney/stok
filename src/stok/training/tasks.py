@@ -13,6 +13,7 @@ from stok.utils.mdlm import (
     MDLMCorruption,
     corrupt_mdlm_batch,
     mdlm_loss_terms,
+    resolve_mdlm_stages,
     stable_seed,
 )
 from stok.utils.tokenizer import Tokenizer
@@ -74,6 +75,8 @@ def validate_logging_state(saved: dict) -> None:
 
 
 class MDLMTask:
+    _STATE_INDEX = {"clean": 0, "absent": 1, "active": 2}
+
     def __init__(self, cfg: DictConfig, *, codebook_size: int):
         self.cfg = cfg
         self.codebook_size = codebook_size
@@ -85,11 +88,20 @@ class MDLMTask:
             dtype=torch.float64,
         )
         self.weights /= self.weights.max()
+        self._stages = resolve_mdlm_stages(cfg.train.mdlm)
+        self._has_curriculum = cfg.train.mdlm.get("curriculum") is not None
+        self._track_states = torch.zeros(2, 3, dtype=torch.float64)
         self.tokenizer = Tokenizer()
         self.canonical_ids = torch.tensor(
             self.tokenizer.convert_tokens_to_ids(list(CANONICAL_AA))
         )
         self._logging = _initial_logging_state()
+
+    def _stage_for(self, global_step: int) -> tuple[int, DictConfig]:
+        for index, (until_step, stage_cfg) in enumerate(self._stages):
+            if until_step is None or global_step < until_step:
+                return index, stage_cfg
+        raise ValueError(f"MDLM curriculum does not cover global_step={global_step}")
 
     def prepare_window(
         self,
@@ -101,6 +113,9 @@ class MDLMTask:
         rank: int,
         world_size: int,
     ) -> PreparedWindow:
+        _, stage_cfg = self._stage_for(global_step)
+        is_independent = stage_cfg.get("mode", "regimes") == "independent_tracks"
+        track_counts = [0, 0, 0, 0, 0, 0]
         prepared = []
         for micro_index, rows in enumerate(batches):
             occurrences = [
@@ -126,9 +141,18 @@ class MDLMTask:
             )
             corruption = corrupt_mdlm_batch(
                 paired_batch,
-                self.cfg.train.mdlm,
+                stage_cfg,
                 seeds=[stable_seed([*key, "corruption"]) for key in occurrences],
             )
+            if is_independent:
+                for label in corruption["regimes"]:
+                    if label == "tied":
+                        track_counts[2] += 1
+                        track_counts[5] += 1
+                    else:
+                        seq_s, struct_s = label.split("_", 1)
+                        track_counts[self._STATE_INDEX[seq_s]] += 1
+                        track_counts[3 + self._STATE_INDEX[struct_s]] += 1
             prepared.append((paired_batch, corruption))
         local_eligible = sum(
             (c["eligible"].sum((0, 1)) for _, c in prepared),
@@ -141,6 +165,7 @@ class MDLMTask:
                 sum(b["sequence_tokens"].numel() for b, _ in prepared),
                 sum(b["missing_structure_count"] for b, _ in prepared),
                 sum(b["noncanonical_sequence_count"] for b, _ in prepared),
+                *track_counts,
             ],
             dtype=torch.long,
         )
@@ -216,6 +241,10 @@ class MDLMTask:
         )
         self._logging["mdlm_running"] += global_statistics.cpu()
         self._logging["running_updates"] += 1
+        if len(global_counts) >= 12:
+            self._track_states += (
+                global_counts[6:12].cpu().to(torch.float64).reshape(2, 3)
+            )
 
     def format_log(
         self,
@@ -240,6 +269,16 @@ class MDLMTask:
             "train/flops": flops,
             "lr": lr,
         }
+        if self._has_curriculum:
+            payload["train/mdlm/stage"] = self._stage_for(max(0, step - 1))[0]
+        if float(self._track_states.sum()) > 0:
+            for track, prefix in ((0, "seq"), (1, "struct")):
+                total = float(self._track_states[track].sum())
+                if total > 0:
+                    clean_c, absent_c, active_c = self._track_states[track].tolist()
+                    payload[f"train/mdlm/{prefix}_clean_frac"] = clean_c / total
+                    payload[f"train/mdlm/{prefix}_absent_frac"] = absent_c / total
+                    payload[f"train/mdlm/{prefix}_active_frac"] = active_c / total
         msg = f"step {step}/{max_steps} | micro_step {micro_step} | diffusion_loss {payload['train/diffusion_loss']:.4f}"
         for track, name in enumerate(("sequence", "structure")):
             weighted, ce, correct, masked, eligible = state["mdlm_running"][
@@ -266,6 +305,7 @@ class MDLMTask:
         self._logging["running_loss"] = 0.0
         self._logging["running_updates"] = 0
         self._logging["mdlm_running"].zero_()
+        self._track_states.zero_()
 
     def logging_state(self) -> dict:
         return {

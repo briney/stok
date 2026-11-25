@@ -640,3 +640,123 @@ def test_sequence_only_source_trains_sequence_loss_only(tmp_path):
     assert logging["total_missing_structure"] == state["residues_seen"] > 0
     log = (tmp_path / "run/logs/train.log").read_text()
     assert "sequence_ce" in log
+
+
+def test_independent_tracks_curriculum_resumes_identically_across_stage_boundary(
+    tmp_path,
+):
+    from stok.training.tasks import MDLMTask
+    from stok.utils.mdlm import effective_regime_weights
+
+    source, codebook = training_fixture(tmp_path)
+    default_noise = {
+        "name": "linear",
+        "power": 2.0,
+        "min_mask_probability": 1e-4,
+        "weight_mode": "elbo",
+        "max_weight": 20.0,
+    }
+    track_base = {
+        "clean_prob": 0.0,
+        "absent_prob": 0.0,
+        "span_prob": 0.0,
+        "span_mean": 8.0,
+        "noise": default_noise,
+    }
+    curriculum = [
+        {
+            "until_step": 1,
+            "sequence": {"clean_prob": 0.25, "absent_prob": 0.10},
+            "structure": {"clean_prob": 0.15, "absent_prob": 0.15, "span_prob": 0.25},
+        },
+        {
+            "until_step": None,
+            "sequence": {"clean_prob": 0.45, "absent_prob": 0.05},
+            "structure": {"clean_prob": 0.15, "absent_prob": 0.05, "span_prob": 0.50},
+        },
+    ]
+    overrides = {
+        "train.max_steps": 2,
+        "train.save_every": 1,
+        "train.log_every": 1,
+        "train.mdlm.mode": "independent_tracks",
+        "train.mdlm.tied_prob": 0.15,
+        "train.mdlm.sequence": track_base,
+        "train.mdlm.structure": track_base,
+        "train.mdlm.curriculum": curriculum,
+    }
+    full_cfg = mdlm_config(tmp_path / "full", source, codebook, **overrides)
+    run_training(full_cfg)
+    full_state = torch.load(tmp_path / "full/model/final.pt", weights_only=True)
+
+    # Resume from step 1 (right on the stage 0 -> stage 1 boundary) to step 2.
+    resumed_cfg = mdlm_config(
+        tmp_path / "resumed",
+        source,
+        codebook,
+        **overrides,
+        **{"train.resume_from": str(tmp_path / "full/checkpoints/step_00000001.pt")},
+    )
+    run_training(resumed_cfg)
+    resumed_state = torch.load(tmp_path / "resumed/model/final.pt", weights_only=True)
+
+    assert full_state["global_step"] == resumed_state["global_step"] == 2
+    for name in full_state["model"]:
+        assert torch.equal(full_state["model"][name], resumed_state["model"][name])
+    # Joint qualification metadata reflects active joint training.
+    joint_weights = effective_regime_weights(full_cfg.train.mdlm)
+    assert joint_weights["joint_independent"] > 0 and joint_weights["joint_tied"] > 0
+
+    fold_only_cfg = mdlm_config(
+        tmp_path / "fold_only",
+        source,
+        codebook,
+        **{
+            "train.mdlm.mode": "independent_tracks",
+            "train.mdlm.sequence": {**track_base, "clean_prob": 1.0},
+            "train.mdlm.structure": track_base,
+        },
+    )
+    fold_weights = effective_regime_weights(fold_only_cfg.train.mdlm)
+    assert (
+        fold_weights["joint_independent"] == 0.0 and fold_weights["joint_tied"] == 0.0
+    )
+    assert fold_weights["structure_only"] == 1.0
+
+    # Task logging emits curriculum stage and realized per-track fractions.
+    task = MDLMTask(full_cfg, codebook_size=32)
+    rows = make_mdlm_rows()
+    for step_idx in (0, 1):
+        prepared = task.prepare_window(
+            [rows],
+            epoch=0,
+            micro_step=step_idx,
+            global_step=step_idx,
+            rank=0,
+            world_size=1,
+        )
+        task.record_update(torch.ones(5, 2, dtype=torch.float64), prepared.counts)
+        _, payload = task.format_log(
+            step=step_idx + 1,
+            max_steps=2,
+            micro_step=step_idx + 1,
+            epoch=0.5,
+            lr=1e-4,
+            flops=100,
+            residues_seen=10,
+            executed_positions=20,
+        )
+        assert payload["train/mdlm/stage"] == step_idx
+        assert (
+            pytest.approx(1.0)
+            == payload["train/mdlm/seq_clean_frac"]
+            + payload["train/mdlm/seq_absent_frac"]
+            + payload["train/mdlm/seq_active_frac"]
+        )
+        assert (
+            pytest.approx(1.0)
+            == payload["train/mdlm/struct_clean_frac"]
+            + payload["train/mdlm/struct_absent_frac"]
+            + payload["train/mdlm/struct_active_frac"]
+        )
+        task.reset_log_window()

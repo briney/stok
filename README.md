@@ -351,6 +351,13 @@ train.mdlm.regime_weights.sequence_only=0 \
 train.mdlm.regime_weights.joint_tied=1
 ```
 
+For decoupled per-track masking (`train.mdlm.mode=independent_tracks`), configure
+independent `clean_prob`, `absent_prob`, `span_prob`, and `noise` (`linear`,
+`cosine`, `power`, or `beta_uniform` with `weight_mode` in `elbo | uniform | clipped_elbo`)
+under `train.mdlm.sequence` and `train.mdlm.structure`, plus `train.mdlm.tied_prob`.
+Add a step-indexed `train.mdlm.curriculum` list (`until_step`, ending with `null`)
+to shift corruption settings across training stages without resetting the optimizer.
+
 Resume with the original launch arguments and original update budget, adding
 `train.resume_from=/runs/stok-mdlm/baseline-001/checkpoints/step_00000500.pt`.
 The checkpoint records the deterministic stream, optimizer/scheduler/rank state,

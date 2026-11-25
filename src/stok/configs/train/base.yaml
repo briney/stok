@@ -50,6 +50,7 @@ console:
 
 # Supported paired absorbing masked diffusion recipe.
 mdlm:
+  mode: regimes  # regimes (default) | independent_tracks
   placement: token
   span_mean: 8.0  # read only when placement=span
   regime_weights:
@@ -58,9 +59,44 @@ mdlm:
     sequence_only: 0.0
     joint_tied: 0.0
   noise:
-    name: linear
+    name: linear  # linear | cosine | power | beta_uniform
     power: 2.0  # read only when name=power
+    beta_alpha: 3.0  # read only when name=beta_uniform
+    beta_beta: 9.0
+    beta_weight: 0.8
     min_mask_probability: 0.0001
+    weight_mode: elbo  # elbo | uniform | clipped_elbo
+    max_weight: 20.0  # read only when weight_mode=clipped_elbo
+  tied_prob: 0.0  # read only when mode=independent_tracks
+  sequence:
+    clean_prob: 0.0
+    absent_prob: 0.0
+    span_prob: 0.0
+    span_mean: 8.0
+    noise:
+      name: linear
+      power: 2.0
+      beta_alpha: 3.0
+      beta_beta: 9.0
+      beta_weight: 0.8
+      min_mask_probability: 0.0001
+      weight_mode: elbo
+      max_weight: 20.0
+  structure:
+    clean_prob: 0.0
+    absent_prob: 0.0
+    span_prob: 0.0
+    span_mean: 8.0
+    noise:
+      name: linear
+      power: 2.0
+      beta_alpha: 3.0
+      beta_beta: 9.0
+      beta_weight: 0.8
+      min_mask_probability: 0.0001
+      weight_mode: elbo
+      max_weight: 20.0
+  curriculum: null  # optional list of step-indexed partial mdlm overrides
   sequence_loss_weight: 1.0
   structure_loss_weight: 1.0
 

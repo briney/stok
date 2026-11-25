@@ -12,6 +12,7 @@ import torch
 from omegaconf import OmegaConf
 
 from stok.data.dataset import set_dataset_epoch
+from stok.utils.mdlm import effective_regime_weights
 from stok.utils.pretrained import state_sha256
 
 
@@ -131,7 +132,9 @@ def restore_training_state(
     rank = payload["rank_states"][accelerator.process_index if accelerator else 0]
     plain = accelerator.unwrap_model(model) if accelerator else model
     plain.load_state_dict(payload["model"], strict=True)
-    plain.mdlm_regime_weights = payload["config"]["train"]["mdlm"]["regime_weights"]
+    plain.mdlm_regime_weights = effective_regime_weights(
+        OmegaConf.create(payload["config"]["train"]["mdlm"])
+    )
     optimizer.load_state_dict(payload["optimizer"])
     scheduler.load_state_dict(payload["scheduler"])
     scaler = getattr(accelerator, "scaler", None)

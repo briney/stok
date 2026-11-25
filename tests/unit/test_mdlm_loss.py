@@ -110,3 +110,17 @@ def test_zero_draw_connects_both_heads():
     for tensor in outputs.values():
         assert tensor.grad is not None
         assert torch.count_nonzero(tensor.grad) == 0
+
+
+def test_per_track_2d_weights_apply_independently():
+    from stok.utils.mdlm import mdlm_loss_terms
+
+    batch, corruption, outputs, aa = loss_case()
+    corruption["masked"][0, 1, 0] = True
+    corruption["masked"][0, 1, 1] = True
+    corruption["weight"] = torch.tensor([[3.0, 7.0]], dtype=torch.float64)
+    terms = mdlm_loss_terms(outputs, batch, corruption, canonical_aa_ids=aa)
+    assert terms["ce_sum"].tolist() == pytest.approx([math.log(2), math.log(2)])
+    assert terms["weighted_sum"].tolist() == pytest.approx(
+        [3.0 * math.log(2), 7.0 * math.log(2)]
+    )
