@@ -554,3 +554,56 @@ def test_eval_generation_order_and_temperature_are_validated():
         load_training_config(["train.eval.mdlm.generation.temperature=-0.5"])
     with pytest.raises(ValueError, match="temperature"):
         load_training_config(["train.eval.mdlm.generation.temperature=true"])
+
+
+def test_independent_tracks_and_curriculum_config_validation(tmp_path):
+    from stok.config import load_training_config
+
+    overlay = tmp_path / "train_overlay.yaml"
+    overlay.write_text(
+        """
+mdlm:
+  mode: independent_tracks
+  tied_prob: 0.15
+  sequence:
+    clean_prob: 0.25
+    absent_prob: 0.10
+    span_prob: 0.0
+    noise:
+      name: linear
+      weight_mode: clipped_elbo
+      max_weight: 20.0
+  structure:
+    clean_prob: 0.15
+    absent_prob: 0.15
+    span_prob: 0.35
+    noise:
+      name: beta_uniform
+      beta_alpha: 3.0
+      beta_beta: 9.0
+      beta_weight: 0.8
+      weight_mode: uniform
+  curriculum:
+    - until_step: 100
+      sequence: {clean_prob: 0.25}
+    - until_step: null
+      sequence: {clean_prob: 0.45}
+"""
+    )
+    cfg = load_training_config(train_config=overlay)
+    assert cfg.train.mdlm.mode == "independent_tracks"
+    assert len(cfg.train.mdlm.curriculum) == 2
+
+    bad_overlay = tmp_path / "bad_curriculum.yaml"
+    bad_overlay.write_text(
+        """
+mdlm:
+  mode: independent_tracks
+  curriculum:
+    - until_step: 100
+      sequence: {clean_prbo: 0.25}
+    - until_step: null
+"""
+    )
+    with pytest.raises(ValueError, match="Unsupported configuration field"):
+        load_training_config(train_config=bad_overlay)

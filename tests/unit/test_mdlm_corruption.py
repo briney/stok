@@ -482,3 +482,293 @@ def test_numerically_unrepresentable_time_interval_is_rejected():
 
     with pytest.raises(ValueError, match="numerical support"):
         validate_mdlm_config(config(noise={"name": "power", "power": 1e20}))
+
+
+def independent_tracks_config(**changes):
+    base = OmegaConf.create(
+        {
+            "mode": "independent_tracks",
+            "tied_prob": 0.0,
+            "sequence": {
+                "clean_prob": 0.25,
+                "absent_prob": 0.10,
+                "span_prob": 0.0,
+                "span_mean": 8.0,
+                "noise": {
+                    "name": "linear",
+                    "power": 2.0,
+                    "beta_alpha": 3.0,
+                    "beta_beta": 9.0,
+                    "beta_weight": 0.8,
+                    "min_mask_probability": 1e-4,
+                    "weight_mode": "elbo",
+                    "max_weight": 20.0,
+                },
+            },
+            "structure": {
+                "clean_prob": 0.15,
+                "absent_prob": 0.15,
+                "span_prob": 0.35,
+                "span_mean": 8.0,
+                "noise": {
+                    "name": "linear",
+                    "power": 2.0,
+                    "beta_alpha": 3.0,
+                    "beta_beta": 9.0,
+                    "beta_weight": 0.8,
+                    "min_mask_probability": 1e-4,
+                    "weight_mode": "elbo",
+                    "max_weight": 20.0,
+                },
+            },
+            "sequence_loss_weight": 1.0,
+            "structure_loss_weight": 1.0,
+            "curriculum": None,
+        }
+    )
+    return OmegaConf.merge(base, changes)
+
+
+def test_independent_tracks_empirical_state_frequencies_and_zero_degenerate():
+    from stok.utils.mdlm import corrupt_mdlm_batch
+
+    cfg = independent_tracks_config()
+    clean = batch()
+    counts: dict[str, int] = {}
+    n = 10000
+    for seed in range(n):
+        out = corrupt_mdlm_batch(clean, cfg, seeds=[seed])
+        assert out["eligible"].any()
+        assert out["mask_probability"].shape == (1, 2)
+        assert out["weight"].shape == (1, 2)
+        label = out["regimes"][0]
+        counts[label] = counts.get(label, 0) + 1
+    c0, a0, m0 = 0.25, 0.10, 0.65
+    c1, a1, m1 = 0.15, 0.15, 0.70
+    z = 1.0 - (c0 + a0) * (c1 + a1)
+    expected = {
+        "active_active": m0 * m1 / z,
+        "active_clean": m0 * c1 / z,
+        "active_absent": m0 * a1 / z,
+        "clean_active": c0 * m1 / z,
+        "absent_active": a0 * m1 / z,
+    }
+    assert set(counts) == set(expected)
+    for label, target in expected.items():
+        assert abs(counts[label] / n - target) < 0.015
+
+
+def test_independent_tracks_boundary_tokens_and_sequence_only_rows():
+    from stok.utils.mdlm import corrupt_mdlm_batch
+
+    clean = batch()
+    # Absent structure -> UNAVAILABLE (codebook_size + 2 = 18) on all residue slots.
+    cfg_absent_struct = independent_tracks_config(
+        sequence={"clean_prob": 0.0, "absent_prob": 0.0},
+        structure={"clean_prob": 0.0, "absent_prob": 1.0},
+    )
+    out = corrupt_mdlm_batch(clean, cfg_absent_struct, seeds=[7])
+    assert out["regimes"] == ["active_absent"]
+    assert not out["eligible"][..., 1].any()
+    assert out["eligible"][..., 0].any()
+    assert (out["structure_tokens"][clean["residue_mask"]] == 18).all()
+    assert float(out["mask_probability"][0, 1]) == 0.0
+    assert float(out["weight"][0, 1]) == 0.0
+    assert float(out["mask_probability"][0, 0]) > 0.0
+
+    # Absent sequence -> sequence_mask_id on all residue slots.
+    cfg_absent_seq = independent_tracks_config(
+        sequence={"clean_prob": 0.0, "absent_prob": 1.0},
+        structure={"clean_prob": 0.0, "absent_prob": 0.0},
+    )
+    out = corrupt_mdlm_batch(clean, cfg_absent_seq, seeds=[7])
+    assert out["regimes"] == ["absent_active"]
+    assert not out["eligible"][..., 0].any()
+    assert out["eligible"][..., 1].any()
+    assert (
+        out["sequence_tokens"][clean["residue_mask"]] == clean["sequence_mask_id"]
+    ).all()
+    assert float(out["mask_probability"][0, 0]) == 0.0
+    assert float(out["weight"][0, 0]) == 0.0
+
+    # Clean sequence + active structure (folding): sequence untouched, ineligible.
+    cfg_fold = independent_tracks_config(
+        sequence={"clean_prob": 1.0, "absent_prob": 0.0},
+        structure={"clean_prob": 0.0, "absent_prob": 0.0},
+    )
+    out = corrupt_mdlm_batch(clean, cfg_fold, seeds=[7])
+    assert out["regimes"] == ["clean_active"]
+    assert not out["eligible"][..., 0].any()
+    assert torch.equal(out["sequence_tokens"], clean["sequence_tokens"])
+
+    # Sequence-only row (e.g. UniRef50): forced active on sequence, structure stays UNAVAILABLE.
+    seq_only = prepare_mdlm_batch(
+        [
+            {
+                "dataset": "uniref",
+                "sequence_id": "u1",
+                "sequence": "ACDEFGH",
+                "structure_tokens": [None] * 7,
+            }
+        ],
+        Tokenizer(),
+        max_len=10,
+        codebook_size=16,
+        crop="center",
+        seeds=[0],
+    )
+    out = corrupt_mdlm_batch(seq_only, cfg_fold, seeds=[11])
+    assert out["regimes"] == ["active_absent"]
+    assert out["eligible"][..., 0].any()
+    assert not out["eligible"][..., 1].any()
+    assert torch.equal(out["structure_tokens"], seq_only["structure_tokens"])
+
+
+def test_independent_tracks_tied_prob_and_independent_span_rates():
+    from stok.utils.mdlm import corrupt_mdlm_batch
+
+    clean = batch()
+    cfg_tied = independent_tracks_config(
+        tied_prob=1.0,
+        sequence={"clean_prob": 0.0, "absent_prob": 0.0, "span_prob": 0.0},
+        structure={"clean_prob": 0.0, "absent_prob": 0.0, "span_prob": 0.0},
+    )
+    out_tied = corrupt_mdlm_batch(clean, cfg_tied, seeds=[19])
+    assert out_tied["regimes"] == ["tied"]
+    paired = out_tied["eligible"].all(-1)
+    assert torch.equal(
+        out_tied["group_ids"][..., 0][paired], out_tied["group_ids"][..., 1][paired]
+    )
+    assert torch.equal(
+        out_tied["masked"][..., 0][paired], out_tied["masked"][..., 1][paired]
+    )
+    assert float(out_tied["mask_probability"][0, 0]) == float(
+        out_tied["mask_probability"][0, 1]
+    )
+    assert float(out_tied["weight"][0, 0]) == float(out_tied["weight"][0, 1])
+
+    cfg_untied = independent_tracks_config(
+        tied_prob=0.0,
+        sequence={"clean_prob": 0.0, "absent_prob": 0.0, "span_prob": 0.0},
+        structure={
+            "clean_prob": 0.0,
+            "absent_prob": 0.0,
+            "span_prob": 1.0,
+            "span_mean": 1e30,
+        },
+    )
+    out_untied = corrupt_mdlm_batch(clean, cfg_untied, seeds=[19])
+    assert out_untied["regimes"] == ["active_active"]
+    assert float(out_untied["mask_probability"][0, 0]) != float(
+        out_untied["mask_probability"][0, 1]
+    )
+    # Sequence is token-level (each eligible position has its own group), structure is 1 span.
+    seq_groups = out_untied["group_ids"][0, :, 0]
+    struct_groups = out_untied["group_ids"][0, :, 1]
+    assert seq_groups[seq_groups >= 0].unique().numel() == int(
+        out_untied["eligible"][0, :, 0].sum()
+    )
+    assert struct_groups[struct_groups >= 0].unique().numel() == 1
+
+
+def test_beta_uniform_noise_and_weight_modes_preserve_global_rng():
+    import random
+    import numpy as np
+    from stok.utils.mdlm import corrupt_mdlm_batch, validate_mdlm_config
+
+    clean = batch()
+    py_state = random.getstate()
+    np_state = np.random.get_state()
+    torch_state = torch.random.get_rng_state().clone()
+
+    cfg_unif = independent_tracks_config(
+        sequence={
+            "clean_prob": 0.0,
+            "absent_prob": 0.0,
+            "noise": {
+                "name": "beta_uniform",
+                "beta_alpha": 3.0,
+                "beta_beta": 9.0,
+                "beta_weight": 0.8,
+                "weight_mode": "uniform",
+            },
+        },
+        structure={
+            "clean_prob": 0.0,
+            "absent_prob": 0.0,
+            "noise": {
+                "name": "linear",
+                "weight_mode": "clipped_elbo",
+                "max_weight": 5.0,
+            },
+        },
+    )
+    validate_mdlm_config(cfg_unif)
+    seq_ps = []
+    for seed in range(200):
+        out = corrupt_mdlm_batch(clean, cfg_unif, seeds=[seed])
+        p_seq = float(out["mask_probability"][0, 0])
+        w_seq = float(out["weight"][0, 0])
+        w_struct = float(out["weight"][0, 1])
+        assert 1e-4 <= p_seq < 1.0
+        assert w_seq == 1.0
+        assert 0.0 < w_struct <= 5.0
+        seq_ps.append(p_seq)
+    # Mean of 0.8 * Beta(3,9) (0.25) + 0.2 * U(0,1) (0.5) = 0.30.
+    assert abs(sum(seq_ps) / len(seq_ps) - 0.30) < 0.04
+    assert random.getstate() == py_state
+    assert np.array_equal(np.random.get_state()[1], np_state[1])
+    assert torch.equal(torch.random.get_rng_state(), torch_state)
+
+    # beta_uniform + elbo must be rejected loudly.
+    bad = independent_tracks_config(
+        sequence={
+            "noise": {"name": "beta_uniform", "weight_mode": "elbo"},
+        }
+    )
+    with pytest.raises(ValueError, match="beta_uniform"):
+        validate_mdlm_config(bad)
+
+
+def test_curriculum_resolution_and_upfront_validation():
+    from stok.utils.mdlm import resolve_mdlm_step_config, validate_mdlm_config
+
+    cfg = independent_tracks_config(
+        curriculum=[
+            {
+                "until_step": 100,
+                "sequence": {"clean_prob": 0.2},
+                "structure": {"span_prob": 0.25},
+            },
+            {
+                "until_step": None,
+                "sequence": {"clean_prob": 0.5},
+                "structure": {"span_prob": 0.6},
+            },
+        ]
+    )
+    validate_mdlm_config(cfg)
+    s0, c0 = resolve_mdlm_step_config(cfg, 0)
+    s99, c99 = resolve_mdlm_step_config(cfg, 99)
+    s100, c100 = resolve_mdlm_step_config(cfg, 100)
+    assert (s0, s99, s100) == (0, 0, 1)
+    assert c0.sequence.clean_prob == 0.2 and c99.structure.span_prob == 0.25
+    assert c100.sequence.clean_prob == 0.5 and c100.structure.span_prob == 0.6
+
+    # Invalid curricula must all fail upfront.
+    bad_curricula = [
+        [],
+        [{"until_step": 100}],  # final stage missing until_step: null
+        [{"until_step": 0}, {"until_step": None}],
+        [{"until_step": 100}, {"until_step": 100}, {"until_step": None}],
+        [{"until_step": None}, {"until_step": 200}],
+        [{"until_step": None, "sequence": {"typo_field": 0.2}}],
+        [{"until_step": None, "curriculum": [{"until_step": None}]}],
+        [
+            {"until_step": 100},
+            {"until_step": None, "sequence": {"clean_prob": 0.7, "absent_prob": 0.5}},
+        ],
+    ]
+    for curriculum in bad_curricula:
+        with pytest.raises(ValueError):
+            validate_mdlm_config(independent_tracks_config(curriculum=curriculum))

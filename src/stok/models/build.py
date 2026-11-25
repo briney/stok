@@ -3,6 +3,7 @@
 from omegaconf import DictConfig
 from torch import Tensor
 
+from ..utils.mdlm import effective_regime_weights
 from ..utils.tokenizer import Tokenizer
 from .mdlm import STokMDLM
 
@@ -24,5 +25,5 @@ def build_model(cfg: DictConfig, *, codebook: Tensor | None) -> STokMDLM:
         attn_dropout=enc.attn_dropout,
         norm_type=enc.norm,
     )
-    model.mdlm_regime_weights = dict(cfg.train.mdlm.get("regime_weights") or {})
+    model.mdlm_regime_weights = effective_regime_weights(cfg.train.mdlm)
     return model
